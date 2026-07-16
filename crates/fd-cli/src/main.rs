@@ -28,6 +28,28 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// 批量导出多页（输入 JSON 数组）
+    ExportBatch {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, value_enum)]
+        format: ExportFormatArg,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// 文生 UI：自然语言描述 → PenDocument JSON
+    Generate {
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, default_value = "Home")]
+        page: String,
+        #[arg(long, default_value = "qwen3.5")]
+        model: String,
+        #[arg(long, default_value = "http://127.0.0.1:8000")]
+        endpoint: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// 校验前端静态资源目录
     CheckFrontend {
         #[arg(long)]
@@ -94,6 +116,27 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let page: export::CanvasPage = serde_json::from_str(&json)?;
             export::Exporter::export_page(&page, format.into(), &out)?;
             println!("已导出到 {out:?}");
+            Ok(())
+        }
+        Command::ExportBatch { input, format, out } => {
+            let json = std::fs::read_to_string(&input)?;
+            let pages: Vec<export::CanvasPage> = serde_json::from_str(&json)?;
+            let files = export::Exporter::export_batch(&pages, format.into(), &out)?;
+            println!("已批量导出 {} 个页面到 {out:?}", files.len());
+            Ok(())
+        }
+        Command::Generate { prompt, page, model, endpoint, out } => {
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let skills = fd_ai_adapter::DesignSkills::new(client, model);
+            let doc = skills.text_to_ui_async(&prompt, &page).await?;
+            let json = serde_json::to_string_pretty(&doc)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &json)?;
+                    println!("已生成 PenDocument JSON 到 {p:?}");
+                }
+                None => println!("{json}"),
+            }
             Ok(())
         }
         Command::CheckFrontend { dir, backend } => {
