@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fd-canvas-core",
+    "crates/fd-codegen",
+    "crates/fd-ai-adapter",
+    "crates/fd-design-system",
+    "crates/fd-ecosystem",
+    "crates/fd-host-desk",
+    "crates/fd-export",
+    "crates/fd-cli",
+    # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
+    "vendor/openpencil/crates/op-ai",
+]
+# OpenPencil 子集：仅引入与 fusion-design 直接对接的 crate，
+# 避免拖入 op-host-desktop（独立桌面壳）/ op-orchestrator（协作）等冗余。
+exclude = ["vendor/openpencil"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT"
+authors = ["Fusion-MLX Team"]
+repository = "https://github.com/dahai80/fusion-design"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "io-util"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# OpenPencil crate（path dep，vendored 子集）
+op-ai = { path = "vendor/openpencil/crates/op-ai" }
+# op-editor-core = { path = "vendor/openpencil/crates/op-editor-core" }
+# op-codegen = { path = "vendor/openpencil/crates/op-codegen" }
+# op-design-lint = { path = "vendor/openpencil/crates/op-design-lint" }
+# op-mcp = { path = "vendor/openpencil/crates/op-mcp" }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

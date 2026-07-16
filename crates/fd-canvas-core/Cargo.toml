@@ -1,0 +1,22 @@
+[package]
+name = "fd-canvas-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fusion-Design 画布内核 — 自研轻量矢量画布模型（替身 OpenPencil jian-ops-schema）"
+
+[lib]
+name = "fd_canvas_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

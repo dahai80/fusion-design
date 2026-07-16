@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+*.pdb
+.DS_Store
+vendor/openpencil/.git
+node_modules/
+frontend/dist/
+*.wasm

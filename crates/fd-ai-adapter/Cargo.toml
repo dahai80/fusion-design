@@ -1,0 +1,28 @@
+[package]
+name = "fd-ai-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fusion-Design AI adapter — 实现 OpenPencil ChatProvider trait，后端对接 fusion-mlx 本地多模态推理"
+
+[lib]
+name = "fd_ai_adapter"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+op-ai = { workspace = true }  # vendored OpenPencil subset
+fd-canvas-core = { path = "../fd-canvas-core" }
+fd-design-system = { path = "../fd-design-system" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros", "net"] }
+tempfile = "3"

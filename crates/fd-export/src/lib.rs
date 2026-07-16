@@ -1,0 +1,320 @@
+//! Fusion-Design 导出 — PNG/SVG/PDF/HTML 批量导出。
+//!
+//! 对应 PRD 模块 5「原型交互与交付」的导出能力。
+//! MVP 阶段实现 HTML/SVG 静态导出 + JSON 工程文件导出；
+//! PNG/PDF 需调用系统渲染（wkhtmltopdf 或 WebKit），后续阶段补齐。
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// 导出格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportFormat {
+    Html,
+    Svg,
+    Json,
+    Png, // 标记位，MVP 返回 NotImplemented
+    Pdf, // 同上
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Svg => "svg",
+            Self::Json => "json",
+            Self::Png => "png",
+            Self::Pdf => "pdf",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Html => "text/html",
+            Self::Svg => "image/svg+xml",
+            Self::Json => "application/json",
+            Self::Png => "image/png",
+            Self::Pdf => "application/pdf",
+        }
+    }
+}
+
+/// 画布页面数据（最小子集，供导出渲染）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasPage {
+    pub id: String,
+    pub name: String,
+    pub width: f32,
+    pub height: f32,
+    pub elements: Vec<CanvasElement>,
+}
+
+/// 矢量元素（最小子集）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanvasElement {
+    pub kind: String, // "rect" | "circle" | "text" | "image"
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub fill: Option<String>,
+    #[serde(default)]
+    pub stroke: Option<String>,
+}
+
+/// 导出器。
+pub struct Exporter;
+
+impl Exporter {
+    /// 导出单页到指定格式。
+    pub fn export_page(
+        page: &CanvasPage,
+        format: ExportFormat,
+        out_dir: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        std::fs::create_dir_all(out_dir)?;
+        let file = out_dir.join(format!("{}.{}", page.id, format.extension()));
+        let content = match format {
+            ExportFormat::Html => render_html(page),
+            ExportFormat::Svg => render_svg(page),
+            ExportFormat::Json => serde_json::to_string_pretty(page)?,
+            ExportFormat::Png | ExportFormat::Pdf => {
+                anyhow::bail!("{:?} 导出 MVP 阶段未实现，需系统渲染", format);
+            }
+        };
+        std::fs::write(&file, content)?;
+        tracing::info!(?file, format = format.extension(), "页面已导出");
+        Ok(file)
+    }
+
+    /// 批量导出多页。
+    pub fn export_batch(
+        pages: &[CanvasPage],
+        format: ExportFormat,
+        out_dir: &Path,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        let mut files = Vec::with_capacity(pages.len());
+        for page in pages {
+            files.push(Self::export_page(page, format, out_dir)?);
+        }
+        Ok(files)
+    }
+
+    /// 异步批量导出（供任务队列调用）。
+    pub async fn export_batch_async(
+        pages: Vec<CanvasPage>,
+        format: ExportFormat,
+        out_dir: PathBuf,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        tokio::task::spawn_blocking(move || {
+            Exporter::export_batch(&pages, format, &out_dir)
+        })
+        .await?
+    }
+}
+
+/// 渲染为独立 HTML 静态预览文件。
+fn render_html(page: &CanvasPage) -> String {
+    let body = render_svg(page);
+    format!(
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>{}</title></head>\n<body>{}</body></html>",
+        page.name, body
+    )
+}
+
+/// 渲染为 SVG（内嵌于 HTML 或独立文件）。
+fn render_svg(page: &CanvasPage) -> String {
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
+        page.width, page.height, page.width, page.height
+    );
+    for el in &page.elements {
+        svg.push_str(&render_element_svg(el));
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+fn render_element_svg(el: &CanvasElement) -> String {
+    let fill = el.fill.as_deref().unwrap_or("none");
+    let stroke = el.stroke.as_deref().unwrap_or("none");
+    match el.kind.as_str() {
+        "rect" => format!(
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\" stroke=\"{}\"/>\n",
+            el.x, el.y, el.w, el.h, fill, stroke
+        ),
+        "circle" => format!(
+            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" stroke=\"{}\"/>\n",
+            el.x + el.w / 2.0,
+            el.y + el.h / 2.0,
+            el.w.min(el.h) / 2.0,
+            fill,
+            stroke
+        ),
+        "text" => format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"{}\">{}</text>\n",
+            el.x,
+            el.y,
+            fill,
+            el.text.as_deref().unwrap_or("")
+        ),
+        "image" => format!(
+            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" href=\"{}\"/>\n",
+            el.x,
+            el.y,
+            el.w,
+            el.h,
+            el.text.as_deref().unwrap_or("")
+        ),
+        other => format!("<!-- 未知元素类型 {other} -->\n"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn sample_page() -> CanvasPage {
+        CanvasPage {
+            id: "p1".into(),
+            name: "Test".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![
+                CanvasElement {
+                    kind: "rect".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                    text: None,
+                    fill: Some("#FFF".into()),
+                    stroke: Some("#000".into()),
+                },
+                CanvasElement {
+                    kind: "text".into(),
+                    x: 10.0,
+                    y: 20.0,
+                    w: 0.0,
+                    h: 0.0,
+                    text: Some("hello".into()),
+                    fill: Some("#000".into()),
+                    stroke: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn export_html_writes_file() {
+        let tmp = tempdir().unwrap();
+        let page = sample_page();
+        let file = Exporter::export_page(&page, ExportFormat::Html, tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.contains("<svg"));
+        assert!(content.contains("hello"));
+    }
+
+    #[test]
+    fn export_svg_writes_file() {
+        let tmp = tempdir().unwrap();
+        let page = sample_page();
+        let file = Exporter::export_page(&page, ExportFormat::Svg, tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("<svg"));
+    }
+
+    #[test]
+    fn export_json_writes_file() {
+        let tmp = tempdir().unwrap();
+        let page = sample_page();
+        let file = Exporter::export_page(&page, ExportFormat::Json, tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.contains("\"id\""));    // serde_json 输出 "id": "p1"（带空格）
+        assert!(content.contains("p1"));
+    }
+
+    #[test]
+    fn export_png_not_implemented() {
+        let tmp = tempdir().unwrap();
+        let page = sample_page();
+        let err = Exporter::export_page(&page, ExportFormat::Pdf, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("未实现"));
+    }
+
+    #[test]
+    fn export_batch_multiple_pages() {
+        let tmp = tempdir().unwrap();
+        let pages = vec![sample_page(), sample_page()];
+        let files = Exporter::export_batch(&pages, ExportFormat::Svg, tmp.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn export_creates_out_dir() {
+        let tmp = tempdir().unwrap();
+        let out = tmp.path().join("nested").join("out");
+        let page = sample_page();
+        Exporter::export_page(&page, ExportFormat::Html, &out).unwrap();
+        assert!(out.exists());
+    }
+
+    #[test]
+    fn format_extension_and_mime() {
+        assert_eq!(ExportFormat::Html.extension(), "html");
+        assert_eq!(ExportFormat::Svg.mime(), "image/svg+xml");
+    }
+
+    #[tokio::test]
+    async fn export_batch_async_works() {
+        let tmp = tempdir().unwrap();
+        let pages = vec![sample_page()];
+        let files = Exporter::export_batch_async(pages, ExportFormat::Json, tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn render_element_svg_unknown_kind_commented() {
+        let el = CanvasElement {
+            kind: "weird".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            text: None,
+            fill: None,
+            stroke: None,
+        };
+        let svg = render_element_svg(&el);
+        assert!(svg.contains("未知元素"));
+    }
+
+    #[test]
+    fn render_svg_includes_circle() {
+        let page = CanvasPage {
+            id: "p".into(),
+            name: "n".into(),
+            width: 10.0,
+            height: 10.0,
+            elements: vec![CanvasElement {
+                kind: "circle".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+                text: None,
+                fill: Some("#F00".into()),
+                stroke: None,
+            }],
+        };
+        let svg = render_svg(&page);
+        assert!(svg.contains("<circle"));
+    }
+}

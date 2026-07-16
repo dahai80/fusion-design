@@ -1,0 +1,14 @@
+[package]
+name = "op-ai"
+version = "0.8.1"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT"
+description = "OpenPencil AI chat layer — transport-free ChatProvider trait + model catalog + agent-settings state (vendored subset)"
+
+[lib]
+name = "op_ai"
+path = "src/lib.rs"
+
+[dependencies]
+# op-ai is dependency-free per upstream lib.rs ("wasm32-clean")
