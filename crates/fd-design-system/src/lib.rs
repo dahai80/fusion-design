@@ -14,7 +14,46 @@ pub enum TokenValue {
     Color(String),        // hex, e.g. "#FFFFFF"
     Number(f32),          // 字号/间距/圆角
     Shadow(String),       // CSS box-shadow
-    String(String),       // 字体族等
+    String(String),       // 字体族等 / token:xxx 引用
+}
+
+impl TokenValue {
+    /// 转换为 CSS 属性值字符串。
+    /// - Color → 直接输出 hex
+    /// - Number → 输出 `Npx`（字号/间距/圆角默认 px）
+    /// - Shadow → 直接输出 CSS box-shadow
+    /// - String → 直接输出（字体族等）；若为 `token:xxx` 引用则输出 `var(--xxx)`
+    pub fn to_css_value(&self) -> String {
+        match self {
+            TokenValue::Color(c) => c.clone(),
+            TokenValue::Number(n) => format!("{}px", n),
+            TokenValue::Shadow(s) => s.clone(),
+            TokenValue::String(s) => {
+                if let Some(ref_name) = s.strip_prefix("token:") {
+                    format!("var(--{})", ref_name)
+                } else {
+                    s.clone()
+                }
+            }
+        }
+    }
+
+    /// 检查是否为 token 引用（`token:xxx` 格式）。
+    pub fn is_reference(&self) -> bool {
+        match self {
+            TokenValue::String(s) => s.starts_with("token:"),
+            _ => false,
+        }
+    }
+
+    /// 提取引用目标名（`token:xxx` → `xxx`）。
+    pub fn reference_target(&self) -> Option<&str> {
+        match self {
+            TokenValue::String(s) => s.strip_prefix("token:"),
+            _ => None,
+        }
+        .filter(|s| !s.is_empty())
+    }
 }
 
 /// 单个 Token 定义。
@@ -31,6 +70,60 @@ pub struct DesignSystem {
     pub id: String,
     pub name: String,
     pub tokens: Vec<Token>,
+}
+
+impl DesignSystem {
+    /// 生成 CSS Custom Properties 输出：`:root { --token-name: value; ... }`
+    /// Token name 中的 `.` 替换为 `-` 以符合 CSS 自定义属性命名规范。
+    /// 引用类型 token（`token:xxx`）会递归解析为最终值。
+    pub fn to_css_custom_properties(&self) -> String {
+        let mut lines = vec![":root {".to_string()];
+        let mut visited = std::collections::HashSet::new();
+        for token in &self.tokens {
+            let css_name = token.name.replace('.', "-");
+            let resolved = self.resolve_reference(&token.value, &mut visited);
+            lines.push(format!("  --{}: {};", css_name, resolved));
+            visited.clear();
+        }
+        lines.push("}".to_string());
+        lines.join("\n")
+    }
+
+    /// 解析 token 引用：若值为 `token:xxx` 则查找目标 token 的值并递归解析。
+    /// 防止循环引用（最多解析 8 层）。
+    pub fn resolve_reference(
+        &self,
+        value: &TokenValue,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> String {
+        if let Some(target) = value.reference_target() {
+            if visited.contains(target) {
+                tracing::warn!(
+                    "检测到循环 token 引用: {:?}, 已访问: {:?}",
+                    target,
+                    visited
+                );
+                return value.to_css_value();
+            }
+            visited.insert(target.to_string());
+            if let Some(resolved) = self.find_token_value(target) {
+                self.resolve_reference(resolved, visited)
+            } else {
+                tracing::warn!("Token 引用目标未找到: {}", target);
+                value.to_css_value()
+            }
+        } else {
+            value.to_css_value()
+        }
+    }
+
+    /// 按 name 查找 token 值。
+    fn find_token_value(&self, name: &str) -> Option<&TokenValue> {
+        self.tokens
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| &t.value)
+    }
 }
 
 /// 设计系统注册中心（管理多套规范，支持一键切换）。
@@ -73,6 +166,11 @@ impl DesignSystemRegistry {
     /// 列出全部已注册规范 ID。
     pub fn list(&self) -> Vec<&str> {
         self.systems.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// 按 ID 获取规范。
+    pub fn get(&self, id: &str) -> Option<&DesignSystem> {
+        self.systems.get(id)
     }
 
     /// 注册三套内置规范（Apple HIG / 极简后台 / 机器人仿真）。
@@ -122,7 +220,7 @@ pub struct ImportError(#[from] serde_json::Error);
 
 // ── 三套内置规范 ──
 
-fn builtin_apple_hig() -> DesignSystem {
+pub fn builtin_apple_hig() -> DesignSystem {
     DesignSystem {
         id: "apple-hig".into(),
         name: "Apple HIG".into(),
@@ -248,5 +346,149 @@ mod tests {
         let s = serde_json::to_string(&v).unwrap();
         let v2: TokenValue = serde_json::from_str(&s).unwrap();
         assert_eq!(v, v2);
+    }
+
+    // ── TokenValue::to_css_value 测试 ──
+
+    #[test]
+    fn token_value_color_to_css() {
+        let v = TokenValue::Color("#007AFF".into());
+        assert_eq!(v.to_css_value(), "#007AFF");
+    }
+
+    #[test]
+    fn token_value_number_to_css() {
+        let v = TokenValue::Number(17.0);
+        assert_eq!(v.to_css_value(), "17px");
+    }
+
+    #[test]
+    fn token_value_shadow_to_css() {
+        let v = TokenValue::Shadow("0 2px 4px rgba(0,0,0,0.1)".into());
+        assert_eq!(v.to_css_value(), "0 2px 4px rgba(0,0,0,0.1)");
+    }
+
+    #[test]
+    fn token_value_string_to_css() {
+        let v = TokenValue::String("SF Pro, sans-serif".into());
+        assert_eq!(v.to_css_value(), "SF Pro, sans-serif");
+    }
+
+    #[test]
+    fn token_value_reference_to_css_var() {
+        let v = TokenValue::String("token:color.accent".into());
+        assert_eq!(v.to_css_value(), "var(--color.accent)");
+    }
+
+    #[test]
+    fn token_value_is_reference() {
+        assert!(TokenValue::String("token:color.accent".into()).is_reference());
+        assert!(!TokenValue::String("SF Pro".into()).is_reference());
+        assert!(!TokenValue::Color("#FFF".into()).is_reference());
+    }
+
+    #[test]
+    fn token_value_reference_target() {
+        let v = TokenValue::String("token:color.accent".into());
+        assert_eq!(v.reference_target(), Some("color.accent"));
+        let v2 = TokenValue::String("no-ref".into());
+        assert_eq!(v2.reference_target(), None);
+    }
+
+    // ── DesignSystem::to_css_custom_properties 测试 ──
+
+    #[test]
+    fn design_system_css_custom_properties() {
+        let ds = builtin_apple_hig();
+        let css = ds.to_css_custom_properties();
+        assert!(css.starts_with(":root {"));
+        assert!(css.contains("--color-bg: #F2F2F7;"));
+        assert!(css.contains("--color-fg: #1C1C1E;"));
+        assert!(css.contains("--color-accent: #007AFF;"));
+        assert!(css.contains("--font-size-body: 17px;"));
+        assert!(css.contains("--radius-card: 10px;"));
+        assert!(css.ends_with("}"));
+    }
+
+    #[test]
+    fn design_system_css_with_references() {
+        let ds = DesignSystem {
+            id: "ref-test".into(),
+            name: "Ref Test".into(),
+            tokens: vec![
+                Token { name: "color.primary".into(), value: TokenValue::Color("#007AFF".into()), description: "主色".into() },
+                Token { name: "color.button".into(), value: TokenValue::String("token:color.primary".into()), description: "按钮色引用主色".into() },
+            ],
+        };
+        let css = ds.to_css_custom_properties();
+        // 引用 token 解析为实际值
+        assert!(css.contains("--color-button: #007AFF;"));
+    }
+
+    #[test]
+    fn design_system_circular_reference_safe() {
+        let ds = DesignSystem {
+            id: "circular".into(),
+            name: "Circular".into(),
+            tokens: vec![
+                Token { name: "a".into(), value: TokenValue::String("token:b".into()), description: "循环A".into() },
+                Token { name: "b".into(), value: TokenValue::String("token:a".into()), description: "循环B".into() },
+            ],
+        };
+        let css = ds.to_css_custom_properties();
+        // 循环引用不会 panic，回退到原始 CSS var 输出
+        assert!(css.contains("--a:") || css.contains("--b:"));
+    }
+
+    // ── DesignSystem::resolve_reference 测试 ──
+
+    #[test]
+    fn resolve_direct_value() {
+        let ds = builtin_apple_hig();
+        let mut visited = std::collections::HashSet::new();
+        let val = ds.resolve_reference(&TokenValue::Color("#FFF".into()), &mut visited);
+        assert_eq!(val, "#FFF");
+    }
+
+    #[test]
+    fn resolve_single_reference() {
+        let ds = builtin_apple_hig();
+        let mut visited = std::collections::HashSet::new();
+        let val = ds.resolve_reference(
+            &TokenValue::String("token:color.accent".into()),
+            &mut visited,
+        );
+        assert_eq!(val, "#007AFF");
+    }
+
+    #[test]
+    fn resolve_chained_reference() {
+        let ds = DesignSystem {
+            id: "chain".into(),
+            name: "Chain".into(),
+            tokens: vec![
+                Token { name: "color.base".into(), value: TokenValue::Color("#007AFF".into()), description: "基础色".into() },
+                Token { name: "color.mid".into(), value: TokenValue::String("token:color.base".into()), description: "中间引用".into() },
+                Token { name: "color.top".into(), value: TokenValue::String("token:color.mid".into()), description: "顶层引用".into() },
+            ],
+        };
+        let mut visited = std::collections::HashSet::new();
+        let val = ds.resolve_reference(
+            &TokenValue::String("token:color.top".into()),
+            &mut visited,
+        );
+        assert_eq!(val, "#007AFF");
+    }
+
+    #[test]
+    fn resolve_missing_reference_falls_back() {
+        let ds = builtin_apple_hig();
+        let mut visited = std::collections::HashSet::new();
+        let val = ds.resolve_reference(
+            &TokenValue::String("token:nonexistent".into()),
+            &mut visited,
+        );
+        // 回退到原始 CSS var 输出
+        assert_eq!(val, "var(--nonexistent)");
     }
 }

@@ -6,8 +6,11 @@ members = [
     "crates/fd-ai-adapter",
     "crates/fd-design-system",
     "crates/fd-ecosystem",
+    "crates/fd-host-web",
     "crates/fd-host-desk",
+    # Callers: workspace root, cargo build/test. Affected API: new member fd-design-lint. Data schemas: none. User instruction: "现在开始实施" — Task #17
     "crates/fd-export",
+    "crates/fd-design-lint",
     "crates/fd-cli",
     # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
     "vendor/openpencil/crates/op-ai",

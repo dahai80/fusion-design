@@ -23,9 +23,16 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+# Callers: CLI main.rs (bin), fd_cli::lib (lib)
+# Affected API: Codegen subcommand, fd-codegen/fd-canvas-core crate deps
+# Data schemas: PenDocument JSON→HTML/React/Tailwind code output
+# User instruction: "现在开始实施" — Task #14 P3-3 fd-codegen
 fd-ai-adapter = { path = "../fd-ai-adapter" }
+fd-canvas-core = { path = "../fd-canvas-core" }
+fd-codegen = { path = "../fd-codegen" }
 fd-design-system = { path = "../fd-design-system" }
 fd-export = { path = "../fd-export" }
+fd-design-lint = { path = "../fd-design-lint" }
 fd-ecosystem = { path = "../fd-ecosystem" }
 fd-host-desk = { path = "../fd-host-desk" }
 

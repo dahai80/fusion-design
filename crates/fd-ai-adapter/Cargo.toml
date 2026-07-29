@@ -11,6 +11,11 @@ description = "Fusion-Design AI adapter — 实现 OpenPencil ChatProvider trait
 name = "fd_ai_adapter"
 path = "src/lib.rs"
 
+# Callers: DesignBridge (Swift AI chat flow), TextToUiSkill, DesignSkills.
+# Affected API: html_to_pen_document() added, scraper dep for HTML parsing.
+# Data schemas: HTML elements → PenNode with style extraction.
+# User instruction: "继续" — P1-1: HTML→PenDocument parser
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,6 +27,7 @@ reqwest = { workspace = true }
 op-ai = { workspace = true }  # vendored OpenPencil subset
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }
+scraper = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt", "macros", "net"] }

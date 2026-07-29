@@ -1,0 +1,1302 @@
+// Callers: fd-cli (lint subcommand → Linter::lint()), DesignBridge.swift (Process → fusion-design lint)
+// Affected API: Linter::new(), Linter::with_rules(), Linter::with_design_system(), Linter::lint(), LintResult, LintViolation, LintRule, LintSeverity
+// Data schemas: PenDocument→Vec<LintViolation> (13 rules), DesignSystem Token→HashMap for cross-ref, LintStats summary
+// User instruction: "现在开始实施" — Task #17 P3-6 design_lint Skill（基础检测器）
+//! Fusion-Design design lint — 13 detectors for design specification compliance.
+
+use fd_canvas_core::{NodeKind, PenDocument, PenNode};
+use fd_design_system::{DesignSystem, TokenValue};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tracing::info;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LintRule {
+    ContrastCheck,
+    UnlabeledInput,
+    TextEffects,
+    AbnormalRotation,
+    EmptyEffects,
+    TokenInconsistency,
+    UnnamedNode,
+    TextOverflow,
+    OverlappingNodes,
+    HardcodedSpacing,
+    HardcodedFontSize,
+    MissingInteractionState,
+    LayoutInconsistency,
+}
+
+impl LintRule {
+    pub fn name(&self) -> &str {
+        match self {
+            LintRule::ContrastCheck => "contrast_check",
+            LintRule::UnlabeledInput => "unlabeled_input",
+            LintRule::TextEffects => "text_effects",
+            LintRule::AbnormalRotation => "abnormal_rotation",
+            LintRule::EmptyEffects => "empty_effects",
+            LintRule::TokenInconsistency => "token_inconsistency",
+            LintRule::UnnamedNode => "unnamed_node",
+            LintRule::TextOverflow => "text_overflow",
+            LintRule::OverlappingNodes => "overlapping_nodes",
+            LintRule::HardcodedSpacing => "hardcoded_spacing",
+            LintRule::HardcodedFontSize => "hardcoded_font_size",
+            LintRule::MissingInteractionState => "missing_interaction_state",
+            LintRule::LayoutInconsistency => "layout_inconsistency",
+        }
+    }
+
+    pub fn description(&self) -> &str {
+        match self {
+            LintRule::ContrastCheck => "前景色与背景色对比度不足，影响可读性",
+            LintRule::UnlabeledInput => "输入控件缺少标签（label/placeholder）",
+            LintRule::TextEffects => "文本节点使用了特效（渐变等），影响可读性",
+            LintRule::AbnormalRotation => "节点旋转角度异常（超过90°或非15°倍数）",
+            LintRule::EmptyEffects => "节点声明了样式但参数为空，属于冗余",
+            LintRule::TokenInconsistency => "样式值未使用设计系统 Token，存在不一致风险",
+            LintRule::UnnamedNode => "节点使用默认名称，缺少语义标识",
+            LintRule::TextOverflow => "文本节点尺寸为零，内容将溢出",
+            LintRule::OverlappingNodes => "同级节点边界框重叠，可能导致遮挡",
+            LintRule::HardcodedSpacing => "间距值未引用设计 Token，维护性差",
+            LintRule::HardcodedFontSize => "字号未引用设计 Token，维护性差",
+            LintRule::MissingInteractionState => "交互控件缺少 hover/active 状态定义",
+            LintRule::LayoutInconsistency => "同级节点布局模式不一致",
+        }
+    }
+
+    pub fn all() -> Vec<LintRule> {
+        vec![
+            LintRule::ContrastCheck,
+            LintRule::UnlabeledInput,
+            LintRule::TextEffects,
+            LintRule::AbnormalRotation,
+            LintRule::EmptyEffects,
+            LintRule::TokenInconsistency,
+            LintRule::UnnamedNode,
+            LintRule::TextOverflow,
+            LintRule::OverlappingNodes,
+            LintRule::HardcodedSpacing,
+            LintRule::HardcodedFontSize,
+            LintRule::MissingInteractionState,
+            LintRule::LayoutInconsistency,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LintViolation {
+    pub rule: LintRule,
+    pub node_id: String,
+    pub message: String,
+    pub suggestion: String,
+    pub severity: LintSeverity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LintSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LintResult {
+    pub violations: Vec<LintViolation>,
+    pub stats: LintStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LintStats {
+    pub total_nodes: usize,
+    pub total_violations: usize,
+    pub errors: usize,
+    pub warnings: usize,
+    pub infos: usize,
+}
+
+impl LintResult {
+    pub fn empty() -> Self {
+        Self {
+            violations: Vec::new(),
+            stats: LintStats {
+                total_nodes: 0,
+                total_violations: 0,
+                errors: 0,
+                warnings: 0,
+                infos: 0,
+            },
+        }
+    }
+}
+
+pub struct Linter {
+    rules: Vec<LintRule>,
+    design_system: Option<DesignSystem>,
+}
+
+impl Linter {
+    pub fn new() -> Self {
+        Self {
+            rules: LintRule::all(),
+            design_system: None,
+        }
+    }
+
+    pub fn with_rules(rules: Vec<LintRule>) -> Self {
+        Self {
+            rules,
+            design_system: None,
+        }
+    }
+
+    pub fn with_design_system(mut self, system: DesignSystem) -> Self {
+        self.design_system = Some(system);
+        self
+    }
+
+    pub fn lint(&self, doc: &PenDocument) -> LintResult {
+        info!("lint: 开始检测 PenDocument, 规则数={}", self.rules.len());
+        let mut violations = Vec::new();
+        let mut total_nodes = 0usize;
+
+        for page in &doc.pages {
+            self.lint_siblings(&page.nodes, &mut violations);
+            for node in &page.nodes {
+                total_nodes += 1;
+                self.lint_node(node, &mut violations);
+                self.lint_children(node, &mut violations, &mut total_nodes);
+            }
+        }
+
+        let errors = violations.iter().filter(|v| v.severity == LintSeverity::Error).count();
+        let warnings = violations.iter().filter(|v| v.severity == LintSeverity::Warning).count();
+        let infos = violations.iter().filter(|v| v.severity == LintSeverity::Info).count();
+
+        info!(
+            "lint: 检测完成, 总节点={}, 违规={}, error={}, warning={}, info={}",
+            total_nodes,
+            violations.len(),
+            errors,
+            warnings,
+            infos
+        );
+
+        LintResult {
+            violations,
+            stats: LintStats {
+                total_nodes,
+                total_violations: errors + warnings + infos,
+                errors,
+                warnings,
+                infos,
+            },
+        }
+    }
+
+    fn lint_children(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+        total_nodes: &mut usize,
+    ) {
+        for child in &node.children {
+            *total_nodes += 1;
+            self.lint_node(child, violations);
+            self.lint_siblings(&node.children, violations);
+            self.lint_children(child, violations, total_nodes);
+        }
+    }
+
+    fn lint_siblings(&self, siblings: &[PenNode], violations: &mut Vec<LintViolation>) {
+        if !self.rules.contains(&LintRule::OverlappingNodes)
+            && !self.rules.contains(&LintRule::LayoutInconsistency)
+        {
+            return;
+        }
+
+        if self.rules.contains(&LintRule::OverlappingNodes) {
+            self.check_overlapping_nodes(siblings, violations);
+        }
+
+        if self.rules.contains(&LintRule::LayoutInconsistency) {
+            self.check_layout_inconsistency(siblings, violations);
+        }
+    }
+
+    fn lint_node(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        for rule in &self.rules {
+            match rule {
+                LintRule::ContrastCheck => self.check_contrast(node, violations),
+                LintRule::UnlabeledInput => self.check_unlabeled_input(node, violations),
+                LintRule::TextEffects => self.check_text_effects(node, violations),
+                LintRule::AbnormalRotation => self.check_abnormal_rotation(node, violations),
+                LintRule::EmptyEffects => self.check_empty_effects(node, violations),
+                LintRule::TokenInconsistency => self.check_token_inconsistency(node, violations),
+                LintRule::UnnamedNode => self.check_unnamed_node(node, violations),
+                LintRule::TextOverflow => self.check_text_overflow(node, violations),
+                LintRule::OverlappingNodes => (),
+                LintRule::HardcodedSpacing => self.check_hardcoded_spacing(node, violations),
+                LintRule::HardcodedFontSize => self.check_hardcoded_font_size(node, violations),
+                LintRule::MissingInteractionState => self.check_missing_interaction_state(node, violations),
+                LintRule::LayoutInconsistency => (),
+            }
+        }
+    }
+
+    fn check_contrast(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let style = &node.style;
+        let fg = style.fill.as_deref().unwrap_or("");
+        let bg = style.stroke.as_deref().unwrap_or("");
+
+        if fg.is_empty() || bg.is_empty() {
+            return;
+        }
+
+        let fg_lum = luminance(fg);
+        let bg_lum = luminance(bg);
+
+        if fg_lum < 0.0 || bg_lum < 0.0 {
+            return;
+        }
+
+        let ratio = contrast_ratio(fg_lum, bg_lum);
+        if ratio < 3.0 {
+            violations.push(LintViolation {
+                rule: LintRule::ContrastCheck,
+                node_id: node.id.clone(),
+                message: format!("对比度 {:.1}:1 不足（最低 3:1）", ratio),
+                suggestion: "增大前景色与背景色的明度差".to_string(),
+                severity: LintSeverity::Error,
+            });
+        } else if ratio < 4.5 {
+            violations.push(LintViolation {
+                rule: LintRule::ContrastCheck,
+                node_id: node.id.clone(),
+                message: format!("对比度 {:.1}:1 偏低（建议 4.5:1）", ratio),
+                suggestion: "建议对比度达到 4.5:1 以满足 WCAG AA 标准".to_string(),
+                severity: LintSeverity::Warning,
+            });
+        }
+    }
+
+    fn check_unlabeled_input(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let name_lower = node.name.to_lowercase();
+        let is_input = name_lower.contains("input")
+            || name_lower.contains("textfield")
+            || name_lower.contains("textarea")
+            || name_lower.contains("搜索")
+            || name_lower.contains("输入");
+
+        if !is_input {
+            return;
+        }
+
+        let has_label = node.children.iter().any(|c| {
+            let cn = c.name.to_lowercase();
+            cn.contains("label") || cn.contains("标题") || cn.contains("placeholder")
+        });
+
+        let has_placeholder = node.children.iter().any(|c| {
+            let cn = c.name.to_lowercase();
+            cn.contains("placeholder") || cn.contains("提示") || cn.contains("hint")
+        });
+
+        if !has_label && !has_placeholder {
+            violations.push(LintViolation {
+                rule: LintRule::UnlabeledInput,
+                node_id: node.id.clone(),
+                message: format!("输入控件 '{}' 缺少标签", node.name),
+                suggestion: "添加 label 或 placeholder 子节点".to_string(),
+                severity: LintSeverity::Error,
+            });
+        }
+    }
+
+    fn check_text_effects(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        if node.kind != NodeKind::Text {
+            return;
+        }
+
+        let style = &node.style;
+
+        if let Some(ref fill) = style.fill {
+            if fill.starts_with("linear-gradient")
+                || fill.starts_with("radial-gradient")
+                || fill.starts_with("conic-gradient")
+            {
+                violations.push(LintViolation {
+                    rule: LintRule::TextEffects,
+                    node_id: node.id.clone(),
+                    message: format!("文本节点 '{}' 使用了渐变填充", node.name),
+                    suggestion: "文本渐变降低可读性，建议使用纯色填充".to_string(),
+                    severity: LintSeverity::Warning,
+                });
+            }
+        }
+    }
+
+    fn check_abnormal_rotation(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let rotation = node.rotation;
+
+        if rotation.abs() > 90.0 {
+            violations.push(LintViolation {
+                rule: LintRule::AbnormalRotation,
+                node_id: node.id.clone(),
+                message: format!("节点 '{}' 旋转角度 {:.1}° 超过 90°", node.name, rotation),
+                suggestion: "超过 90° 的旋转可能导致内容不可读，请确认是否正确".to_string(),
+                severity: LintSeverity::Error,
+            });
+        } else if rotation != 0.0 && (rotation % 15.0).abs() > 0.01 {
+            violations.push(LintViolation {
+                rule: LintRule::AbnormalRotation,
+                node_id: node.id.clone(),
+                message: format!(
+                    "节点 '{}' 旋转角度 {:.1}° 非 15° 倍数",
+                    node.name, rotation
+                ),
+                suggestion: "建议使用 15° 倍数的旋转角度以保持对齐一致".to_string(),
+                severity: LintSeverity::Info,
+            });
+        }
+    }
+
+    fn check_empty_effects(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let style = &node.style;
+
+        if let Some(ref fill) = style.fill {
+            if fill.trim().is_empty() {
+                violations.push(LintViolation {
+                    rule: LintRule::EmptyEffects,
+                    node_id: node.id.clone(),
+                    message: format!("节点 '{}' 声明了填充色但值为空", node.name),
+                    suggestion: "移除空的填充声明或设置颜色值".to_string(),
+                    severity: LintSeverity::Warning,
+                });
+            }
+        }
+
+        if let Some(ref stroke) = style.stroke {
+            if stroke.trim().is_empty() {
+                violations.push(LintViolation {
+                    rule: LintRule::EmptyEffects,
+                    node_id: node.id.clone(),
+                    message: format!("节点 '{}' 声明了描边色但值为空", node.name),
+                    suggestion: "移除空的描边声明或设置颜色值".to_string(),
+                    severity: LintSeverity::Warning,
+                });
+            }
+        }
+
+        if let Some(ref ff) = style.font_family {
+            if ff.trim().is_empty() {
+                violations.push(LintViolation {
+                    rule: LintRule::EmptyEffects,
+                    node_id: node.id.clone(),
+                    message: format!("节点 '{}' 声明了字体族但值为空", node.name),
+                    suggestion: "移除空的字体声明或设置字体族".to_string(),
+                    severity: LintSeverity::Warning,
+                });
+            }
+        }
+    }
+
+    fn check_token_inconsistency(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let system = match &self.design_system {
+            Some(s) => s,
+            None => return,
+        };
+
+        let style = &node.style;
+        let token_map = build_token_map(system);
+
+        if let Some(ref fill) = style.fill {
+            if let Some(token_name) = token_map.get(fill) {
+                violations.push(LintViolation {
+                    rule: LintRule::TokenInconsistency,
+                    node_id: node.id.clone(),
+                    message: format!(
+                        "节点 '{}' 填充色 '{}' 匹配 Token '{}'，建议直接引用 Token",
+                        node.name, fill, token_name
+                    ),
+                    suggestion: format!("使用 Token 引用替代硬编码值: {}", token_name),
+                    severity: LintSeverity::Info,
+                });
+            }
+        }
+
+        if let Some(ref stroke) = style.stroke {
+            if let Some(token_name) = token_map.get(stroke) {
+                violations.push(LintViolation {
+                    rule: LintRule::TokenInconsistency,
+                    node_id: node.id.clone(),
+                    message: format!(
+                        "节点 '{}' 描边色 '{}' 匹配 Token '{}'，建议直接引用 Token",
+                        node.name, stroke, token_name
+                    ),
+                    suggestion: format!("使用 Token 引用替代硬编码值: {}", token_name),
+                    severity: LintSeverity::Info,
+                });
+            }
+        }
+    }
+
+    fn check_unnamed_node(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let default_names = ["Rect", "Text", "Circle", "Image", "Group"];
+        if default_names.contains(&node.name.as_str()) {
+            violations.push(LintViolation {
+                rule: LintRule::UnnamedNode,
+                node_id: node.id.clone(),
+                message: format!("节点 '{}' 使用默认名称，缺少语义标识", node.name),
+                suggestion: "为节点设置有意义的名称便于维护".to_string(),
+                severity: LintSeverity::Warning,
+            });
+        }
+    }
+
+    fn check_text_overflow(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        if node.kind != NodeKind::Text {
+            return;
+        }
+        if node.w == 0.0 || node.h == 0.0 {
+            violations.push(LintViolation {
+                rule: LintRule::TextOverflow,
+                node_id: node.id.clone(),
+                message: format!(
+                    "文本节点 '{}' 尺寸为零（w={}, h={}），内容将溢出",
+                    node.name, node.w, node.h
+                ),
+                suggestion: "为文本节点设置宽高，或使用自适应布局".to_string(),
+                severity: LintSeverity::Error,
+            });
+        }
+    }
+
+    fn check_overlapping_nodes(&self, siblings: &[PenNode], violations: &mut Vec<LintViolation>) {
+        for i in 0..siblings.len() {
+            for j in (i + 1)..siblings.len() {
+                let a = &siblings[i];
+                let b = &siblings[j];
+                if a.z_index == b.z_index && rects_overlap(a, b) {
+                    violations.push(LintViolation {
+                        rule: LintRule::OverlappingNodes,
+                        node_id: format!("{}+{}", a.id, b.id),
+                        message: format!(
+                            "节点 '{}' 与 '{}' 边界框重叠",
+                            a.name, b.name
+                        ),
+                        suggestion: "调整节点位置或使用不同的 z-index 避免遮挡".to_string(),
+                        severity: LintSeverity::Warning,
+                    });
+                }
+            }
+        }
+    }
+
+    fn check_hardcoded_spacing(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        use fd_canvas_core::LayoutMode;
+        let layout = &node.style.layout;
+        match layout {
+            LayoutMode::Flex(flex) => {
+                if flex.gap != 0.0 && node.style.design_token_refs.get("gap").is_none() {
+                    violations.push(LintViolation {
+                        rule: LintRule::HardcodedSpacing,
+                        node_id: node.id.clone(),
+                        message: format!(
+                            "节点 '{}' Flex gap={} 未引用设计 Token",
+                            node.name, flex.gap
+                        ),
+                        suggestion: "使用 design_token_refs 引用 spacing Token".to_string(),
+                        severity: LintSeverity::Info,
+                    });
+                }
+                let p = &flex.padding;
+                if (p.top != 0.0 || p.right != 0.0 || p.bottom != 0.0 || p.left != 0.0)
+                    && node.style.design_token_refs.get("padding").is_none()
+                {
+                    violations.push(LintViolation {
+                        rule: LintRule::HardcodedSpacing,
+                        node_id: node.id.clone(),
+                        message: format!(
+                            "节点 '{}' padding(t={}/r={}/b={}/l={}) 未引用设计 Token",
+                            node.name, p.top, p.right, p.bottom, p.left
+                        ),
+                        suggestion: "使用 design_token_refs 引用 spacing Token".to_string(),
+                        severity: LintSeverity::Info,
+                    });
+                }
+            }
+            LayoutMode::Grid(grid) => {
+                if (grid.gap.0 != 0.0 || grid.gap.1 != 0.0)
+                    && node.style.design_token_refs.get("gap").is_none()
+                {
+                    violations.push(LintViolation {
+                        rule: LintRule::HardcodedSpacing,
+                        node_id: node.id.clone(),
+                        message: format!(
+                            "节点 '{}' Grid gap=({}, {}) 未引用设计 Token",
+                            node.name, grid.gap.0, grid.gap.1
+                        ),
+                        suggestion: "使用 design_token_refs 引用 spacing Token".to_string(),
+                        severity: LintSeverity::Info,
+                    });
+                }
+            }
+            LayoutMode::Free => {}
+        }
+    }
+
+    fn check_hardcoded_font_size(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        if let Some(fs) = node.style.font_size {
+            if fs > 0.0 && node.style.design_token_refs.get("font_size").is_none() {
+                violations.push(LintViolation {
+                    rule: LintRule::HardcodedFontSize,
+                    node_id: node.id.clone(),
+                    message: format!(
+                        "节点 '{}' font_size={} 未引用设计 Token",
+                        node.name, fs
+                    ),
+                    suggestion: "使用 design_token_refs 引用 typography Token".to_string(),
+                    severity: LintSeverity::Info,
+                });
+            }
+        }
+    }
+
+    fn check_missing_interaction_state(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+        let name_lower = node.name.to_lowercase();
+        let is_interactive = name_lower.contains("button")
+            || name_lower.contains("btn")
+            || name_lower.contains("input")
+            || name_lower.contains("textfield")
+            || name_lower.contains("link")
+            || name_lower.contains("按钮")
+            || name_lower.contains("链接");
+
+        if !is_interactive {
+            return;
+        }
+
+        let has_state_variant = node.children.iter().any(|c| {
+            let cn = c.name.to_lowercase();
+            cn.contains("hover")
+                || cn.contains("active")
+                || cn.contains("focus")
+                || cn.contains("pressed")
+                || cn.contains("disabled")
+        });
+
+        if !has_state_variant {
+            violations.push(LintViolation {
+                rule: LintRule::MissingInteractionState,
+                node_id: node.id.clone(),
+                message: format!("交互控件 '{}' 缺少 hover/active 状态定义", node.name),
+                suggestion: "添加 hover/active/focus 状态子节点".to_string(),
+                severity: LintSeverity::Warning,
+            });
+        }
+    }
+
+    fn check_layout_inconsistency(&self, siblings: &[PenNode], violations: &mut Vec<LintViolation>) {
+        use fd_canvas_core::LayoutMode;
+        if siblings.len() < 2 {
+            return;
+        }
+
+        let first_layout_mode = match &siblings[0].style.layout {
+            LayoutMode::Free => "free",
+            LayoutMode::Flex(_) => "flex",
+            LayoutMode::Grid(_) => "grid",
+        };
+
+        for sibling in &siblings[1..] {
+            let mode = match &sibling.style.layout {
+                LayoutMode::Free => "free",
+                LayoutMode::Flex(_) => "flex",
+                LayoutMode::Grid(_) => "grid",
+            };
+            if mode != first_layout_mode {
+                violations.push(LintViolation {
+                    rule: LintRule::LayoutInconsistency,
+                    node_id: format!("{}+{}", siblings[0].id, sibling.id),
+                    message: format!(
+                        "同级节点 '{}' 使用 {} 布局，'{}' 使用 {} 布局，不一致",
+                        siblings[0].name, first_layout_mode, sibling.name, mode
+                    ),
+                    suggestion: "同级节点建议使用统一的布局模式".to_string(),
+                    severity: LintSeverity::Warning,
+                });
+            }
+        }
+    }
+}
+
+impl Default for Linter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn rects_overlap(a: &PenNode, b: &PenNode) -> bool {
+    let a_x2 = a.x + a.w;
+    let a_y2 = a.y + a.h;
+    let b_x2 = b.x + b.w;
+    let b_y2 = b.y + b.h;
+    a.x < b_x2 && b.x < a_x2 && a.y < b_y2 && b.y < a_y2
+}
+
+fn build_token_map(system: &DesignSystem) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for token in &system.tokens {
+        let css_val = match &token.value {
+            TokenValue::Color(c) => c.clone(),
+            TokenValue::String(s) if !s.starts_with("token:") => s.clone(),
+            _ => continue,
+        };
+        map.insert(css_val, token.name.clone());
+    }
+    map
+}
+
+fn luminance(color: &str) -> f64 {
+    let hex = match parse_hex_color(color) {
+        Some(h) => h,
+        None => return -1.0,
+    };
+
+    let r = srgb_to_linear(hex[0] as f64 / 255.0);
+    let g = srgb_to_linear(hex[1] as f64 / 255.0);
+    let b = srgb_to_linear(hex[2] as f64 / 255.0);
+
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn contrast_ratio(l1: f64, l2: f64) -> f64 {
+    let lighter = l1.max(l2);
+    let darker = l1.min(l2);
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    match s.len() {
+        6 => {
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            Some([r, g, b])
+        }
+        3 => {
+            let r = u8::from_str_radix(&s[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&s[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&s[2..3], 16).ok()?;
+            Some([r * 17, g * 17, b * 17])
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fd_canvas_core::{NodeStyle, Page};
+
+    fn make_doc(nodes: Vec<PenNode>) -> PenDocument {
+        PenDocument {
+            pages: vec![Page {
+                id: "page-1".into(),
+                name: "Page 1".into(),
+                width: 800.0,
+                height: 600.0,
+                nodes,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn text_node(id: &str, name: &str, style: NodeStyle) -> PenNode {
+        PenNode {
+            id: id.into(),
+            name: name.into(),
+            kind: NodeKind::Text,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 30.0,
+            style,
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        }
+    }
+
+    fn rect_node(id: &str, name: &str, style: NodeStyle) -> PenNode {
+        PenNode {
+            id: id.into(),
+            name: name.into(),
+            kind: NodeKind::Rect,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            style,
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        }
+    }
+
+    fn group_node(id: &str, name: &str, children: Vec<PenNode>) -> PenNode {
+        PenNode {
+            id: id.into(),
+            name: name.into(),
+            kind: NodeKind::Group,
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 40.0,
+            style: NodeStyle::default(),
+            text: None,
+            children,
+            rotation: 0.0,
+            z_index: 0,
+        }
+    }
+
+    #[test]
+    fn contrast_low_ratio_detected() {
+        let style = NodeStyle {
+            fill: Some("#333333".into()),
+            stroke: Some("#444444".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(!contrast_violations.is_empty());
+    }
+
+    #[test]
+    fn contrast_good_ratio_no_violation() {
+        let style = NodeStyle {
+            fill: Some("#000000".into()),
+            stroke: Some("#ffffff".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(contrast_violations.is_empty());
+    }
+
+    #[test]
+    fn unlabeled_input_detected() {
+        let input = group_node("c1", "SearchInput", vec![]);
+        let doc = make_doc(vec![input]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::UnlabeledInput));
+    }
+
+    #[test]
+    fn labeled_input_no_violation() {
+        let label = text_node("l1", "Label", NodeStyle::default());
+        let input = group_node("c1", "SearchInput", vec![label]);
+        let doc = make_doc(vec![input]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::UnlabeledInput));
+    }
+
+    #[test]
+    fn text_gradient_detected() {
+        let style = NodeStyle {
+            fill: Some("linear-gradient(90deg, #ff0000, #0000ff)".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![text_node("t1", "fancy", style)]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::TextEffects));
+    }
+
+    #[test]
+    fn rect_with_gradient_no_text_effect_violation() {
+        let style = NodeStyle {
+            fill: Some("linear-gradient(90deg, #ff0000, #0000ff)".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "bg", style)]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::TextEffects));
+    }
+
+    #[test]
+    fn abnormal_rotation_over_90_detected() {
+        let mut node = rect_node("r1", "rotated", NodeStyle::default());
+        node.rotation = 120.0;
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::AbnormalRotation && v.severity == LintSeverity::Error));
+    }
+
+    #[test]
+    fn non_15_multiple_rotation_info() {
+        let mut node = rect_node("r1", "slight", NodeStyle::default());
+        node.rotation = 7.0;
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::AbnormalRotation && v.severity == LintSeverity::Info));
+    }
+
+    #[test]
+    fn empty_fill_detected() {
+        let style = NodeStyle {
+            fill: Some("".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::EmptyEffects));
+    }
+
+    #[test]
+    fn empty_stroke_detected() {
+        let style = NodeStyle {
+            stroke: Some("   ".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::EmptyEffects));
+    }
+
+    #[test]
+    fn empty_font_family_detected() {
+        let style = NodeStyle {
+            font_family: Some("  ".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![text_node("t1", "txt", style)]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::EmptyEffects));
+    }
+
+    #[test]
+    fn no_design_system_skips_token_check() {
+        let style = NodeStyle {
+            fill: Some("#007AFF".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::TokenInconsistency));
+    }
+
+    #[test]
+    fn lint_stats_counts_correct() {
+        let style = NodeStyle {
+            fill: Some("#333333".into()),
+            stroke: Some("#444444".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        assert_eq!(result.stats.total_nodes, 1);
+        assert!(result.stats.total_violations > 0);
+        assert_eq!(
+            result.stats.errors + result.stats.warnings + result.stats.infos,
+            result.stats.total_violations
+        );
+    }
+
+    #[test]
+    fn empty_document_no_violations() {
+        let doc = make_doc(vec![]);
+        let result = Linter::new().lint(&doc);
+        assert!(result.violations.is_empty());
+        assert_eq!(result.stats.total_nodes, 0);
+    }
+
+    #[test]
+    fn with_rules_filters_rules() {
+        let mut node = rect_node("r1", "box", NodeStyle::default());
+        node.rotation = 120.0;
+        let doc = make_doc(vec![node]);
+        let result = Linter::with_rules(vec![LintRule::ContrastCheck]).lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::AbnormalRotation));
+    }
+
+    #[test]
+    fn hex_color_3_digit_parsing() {
+        let style = NodeStyle {
+            fill: Some("#000".into()),
+            stroke: Some("#fff".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(contrast_violations.is_empty());
+    }
+
+    #[test]
+    fn nested_nodes_counted() {
+        let child = rect_node("c1", "child", NodeStyle::default());
+        let parent = PenNode {
+            id: "p1".into(),
+            name: "parent".into(),
+            kind: NodeKind::Group,
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![child],
+            rotation: 0.0,
+            z_index: 0,
+        };
+        let doc = make_doc(vec![parent]);
+        let result = Linter::new().lint(&doc);
+        assert_eq!(result.stats.total_nodes, 2);
+    }
+
+    #[test]
+    fn lint_result_serializable() {
+        let doc = make_doc(vec![]);
+        let result = Linter::new().lint(&doc);
+        let json = serde_json::to_string(&result).unwrap();
+        let back: LintResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.stats.total_nodes, 0);
+    }
+
+    #[test]
+    fn rotation_0_no_violation() {
+        let node = rect_node("r1", "box", NodeStyle::default());
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::AbnormalRotation));
+    }
+
+    #[test]
+    fn rotation_45_no_violation() {
+        let mut node = rect_node("r1", "box", NodeStyle::default());
+        node.rotation = 45.0;
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::AbnormalRotation));
+    }
+
+    #[test]
+    fn unnamed_node_default_name_detected() {
+        let node = rect_node("r1", "Rect", NodeStyle::default());
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::UnnamedNode));
+    }
+
+    #[test]
+    fn named_node_no_unnamed_violation() {
+        let node = rect_node("r1", "HeaderBackground", NodeStyle::default());
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::UnnamedNode));
+    }
+
+    #[test]
+    fn text_overflow_zero_size_detected() {
+        let mut node = text_node("t1", "Text", NodeStyle::default());
+        node.w = 0.0;
+        node.h = 0.0;
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::TextOverflow));
+    }
+
+    #[test]
+    fn text_with_size_no_overflow_violation() {
+        let node = text_node("t1", "label", NodeStyle::default());
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::TextOverflow));
+    }
+
+    #[test]
+    fn overlapping_nodes_detected() {
+        let a = PenNode {
+            id: "a".into(),
+            name: "A".into(),
+            kind: NodeKind::Rect,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        };
+        let b = PenNode {
+            id: "b".into(),
+            name: "B".into(),
+            kind: NodeKind::Rect,
+            x: 50.0,
+            y: 50.0,
+            w: 100.0,
+            h: 100.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        };
+        let doc = make_doc(vec![a, b]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::OverlappingNodes));
+    }
+
+    #[test]
+    fn non_overlapping_nodes_no_violation() {
+        let a = PenNode {
+            id: "a".into(),
+            name: "A".into(),
+            kind: NodeKind::Rect,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        };
+        let b = PenNode {
+            id: "b".into(),
+            name: "B".into(),
+            kind: NodeKind::Rect,
+            x: 200.0,
+            y: 200.0,
+            w: 100.0,
+            h: 100.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        };
+        let doc = make_doc(vec![a, b]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::OverlappingNodes));
+    }
+
+    #[test]
+    fn hardcoded_spacing_flex_gap_detected() {
+        use fd_canvas_core::{FlexParams, FlexDirection, LayoutMode};
+        let style = NodeStyle {
+            layout: LayoutMode::Flex(FlexParams {
+                gap: 16.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let node = rect_node("r1", "Container", style);
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::HardcodedSpacing));
+    }
+
+    #[test]
+    fn token_ref_spacing_no_violation() {
+        use fd_canvas_core::{FlexParams, FlexDirection, LayoutMode};
+        let mut refs = HashMap::new();
+        refs.insert("gap".to_string(), "spacing-md".to_string());
+        let style = NodeStyle {
+            layout: LayoutMode::Flex(FlexParams {
+                gap: 16.0,
+                ..Default::default()
+            }),
+            design_token_refs: refs,
+            ..Default::default()
+        };
+        let node = rect_node("r1", "Container", style);
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::HardcodedSpacing));
+    }
+
+    #[test]
+    fn hardcoded_font_size_detected() {
+        let style = NodeStyle {
+            font_size: Some(14.0),
+            ..Default::default()
+        };
+        let node = text_node("t1", "Label", style);
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::HardcodedFontSize));
+    }
+
+    #[test]
+    fn token_ref_font_size_no_violation() {
+        let mut refs = HashMap::new();
+        refs.insert("font_size".to_string(), "typography-body".to_string());
+        let style = NodeStyle {
+            font_size: Some(14.0),
+            design_token_refs: refs,
+            ..Default::default()
+        };
+        let node = text_node("t1", "Label", style);
+        let doc = make_doc(vec![node]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::HardcodedFontSize));
+    }
+
+    #[test]
+    fn missing_interaction_state_button_detected() {
+        let btn = group_node("b1", "SubmitButton", vec![]);
+        let doc = make_doc(vec![btn]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::MissingInteractionState));
+    }
+
+    #[test]
+    fn button_with_hover_no_violation() {
+        let hover = rect_node("h1", "Hover", NodeStyle::default());
+        let btn = group_node("b1", "SubmitButton", vec![hover]);
+        let doc = make_doc(vec![btn]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::MissingInteractionState));
+    }
+
+    #[test]
+    fn layout_inconsistency_detected() {
+        use fd_canvas_core::{FlexParams, LayoutMode};
+        let style_flex = NodeStyle {
+            layout: LayoutMode::Flex(FlexParams::default()),
+            ..Default::default()
+        };
+        let a = rect_node("a", "ItemA", style_flex);
+        let b = rect_node("b", "ItemB", NodeStyle::default());
+        let doc = make_doc(vec![a, b]);
+        let result = Linter::new().lint(&doc);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::LayoutInconsistency));
+    }
+
+    #[test]
+    fn consistent_layout_no_violation() {
+        let a = rect_node("a", "ItemA", NodeStyle::default());
+        let b = rect_node("b", "ItemB", NodeStyle::default());
+        let doc = make_doc(vec![a, b]);
+        let result = Linter::new().lint(&doc);
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.rule == LintRule::LayoutInconsistency));
+    }
+
+    #[test]
+    fn all_rules_count_is_13() {
+        assert_eq!(LintRule::all().len(), 13);
+    }
+}

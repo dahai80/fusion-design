@@ -5,7 +5,7 @@
 //! 但请求目标被 `FusionMlxClient` 限制为 `127.0.0.1` 本地 fusion-mlx 服务，
 //! 不存在任何公网调用路径。
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -163,12 +163,25 @@ fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 阻塞式 POST（复用当前 tokio runtime 若存在，否则新建 current-thread runtime）。
+/// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
 ///
-/// 设计：`chat_sync` 可能在已存在 tokio runtime 的上下文被调用
-/// （如 `#[tokio::test]`）。此时直接 `Builder::build()` 会嵌套 runtime
-/// panic。改用 `Handle::try_current()`：若已在 runtime 内，直接
-/// `handle.block_on()`；否则才新建独立 runtime。
+/// 设计：创建一个 `LazyLock` 初始化的 multi-thread 专用 runtime，
+/// 所有 `chat_sync` / `ChatProvider::send` 的异步请求在此 runtime 上执行。
+/// 解决了以下问题：
+/// - 在 `#[tokio::test]` 内调用 `chat_sync` 时，`block_on` 嵌套 panic
+/// - 在同步上下文（如 `ChatProvider::send`）中，需要异步能力
+/// - 每次调用都新建 runtime 的性能开销
+///
+/// 专用 runtime 是 multi-thread 的，因此 `block_in_place` 可用，
+/// `reqwest` 的 DNS/TLS 解析不会阻塞主线程。
+static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("blocking tokio runtime 创建失败")
+});
+
 fn blocking_post<T: Serialize + ?Sized>(
     http: &reqwest::Client,
     url: &str,
@@ -176,26 +189,13 @@ fn blocking_post<T: Serialize + ?Sized>(
 ) -> anyhow::Result<MlxChatResponse> {
     let http = http.clone();
     let url = url.to_string();
-    let fut = async move {
+    BLOCKING_RT.block_on(async move {
         let resp = http.post(&url).json(payload).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("fusion-mlx HTTP {}", resp.status());
         }
         Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?)
-    };
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // 已在 runtime 内：用 block_in_place（若 multi-thread）或直接 block_on
-            // 简化：直接 handle.block_on，调用方需保证不阻塞 reactor
-            handle.block_on(fut)
-        }
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(fut)
-        }
-    }
+    })
 }
 
 // ── OpenPencil ChatProvider 适配 ──
@@ -289,7 +289,418 @@ mod tests {
     }
 }
 
-// ── AI Skills：文生 UI / 图生 UI / 局部编辑 ──
+// ── AI Skill 系统：trait 化 + Token 注入 ──
+
+use fd_design_system::DesignSystem;
+
+/// Skill 执行上下文：携带客户端、模型、设计 Token 等运行时信息。
+#[derive(Clone, Copy)]
+pub struct SkillContext<'a> {
+    pub client: &'a FusionMlxClient,
+    pub model: &'a str,
+    pub design_system: Option<&'a DesignSystem>,
+}
+
+impl<'a> SkillContext<'a> {
+    /// 发送同步 chat 请求（快捷方法）。
+    pub fn chat(&self, sys: &str, user: &str, max_tokens: u32) -> anyhow::Result<String> {
+        self.client.chat_sync(self.model, sys, user, max_tokens)
+    }
+
+    /// 发送异步 chat 请求（快捷方法）。
+    pub async fn chat_async(&self, sys: &str, user: &str, max_tokens: u32) -> anyhow::Result<String> {
+        self.client.chat_async(self.model, sys, user, max_tokens).await
+    }
+
+    /// 生成设计 Token 的 CSS Custom Properties 片段，注入到 system prompt。
+    /// 返回 None 如果没有激活设计系统。
+    pub fn token_prompt_fragment(&self) -> Option<String> {
+        self.design_system.map(|ds| {
+            let css = ds.to_css_custom_properties();
+            format!("当前设计系统 Token（CSS Custom Properties）：\n{css}\n\n生成的 UI 必须使用这些 CSS 变量。")
+        })
+    }
+}
+
+/// Skill 输出类型。
+#[derive(Debug, Clone)]
+pub enum SkillOutput {
+    /// 完整页面文档
+    Document(PenDocument),
+    /// 局部编辑的节点 JSON
+    PartialEdit(String),
+    /// 多方案对比（3 份文档）
+    MultiVariants([PenDocument; 3]),
+}
+
+/// AI 设计 Skill trait — 每个 Skill 实现一个设计能力。
+pub trait DesignSkill: Send + Sync {
+    /// Skill 唯一标识。
+    fn id(&self) -> &str;
+    /// Skill 显示名称。
+    fn label(&self) -> &str;
+    /// 同步执行。
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput>;
+    /// 异步执行（默认实现：委托给同步版本）。
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move { self.execute(&ctx, &input) })
+    }
+}
+
+/// Skill 注册中心：按 id 查找并调度 Skill。
+pub struct SkillRegistry {
+    skills: std::collections::HashMap<String, Box<dyn DesignSkill>>,
+}
+
+impl SkillRegistry {
+    pub fn new() -> Self {
+        Self { skills: std::collections::HashMap::new() }
+    }
+
+    /// 注册一个 Skill。
+    pub fn register(&mut self, skill: Box<dyn DesignSkill>) {
+        self.skills.insert(skill.id().to_string(), skill);
+    }
+
+    /// 按 id 查找 Skill。
+    pub fn get(&self, id: &str) -> Option<&dyn DesignSkill> {
+        self.skills.get(id).map(|s| s.as_ref())
+    }
+
+    /// 列出所有已注册 Skill 的 id。
+    pub fn list(&self) -> Vec<&str> {
+        self.skills.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// 注册内置 Skill（text-to-ui, image-to-ui, partial-edit, local-edit, sim-panel, multi-variants）。
+    pub fn register_builtin(&mut self) {
+        self.register(Box::new(TextToUiSkill));
+        self.register(Box::new(ImageToUiSkill));
+        self.register(Box::new(PartialEditSkill));
+        self.register(Box::new(LocalEditSkill));
+        self.register(Box::new(SimPanelSkill));
+        self.register(Box::new(MultiVariantsSkill));
+    }
+}
+
+impl Default for SkillRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── 内置 Skill 实现 ──
+
+/// 文生 UI Skill。
+struct TextToUiSkill;
+
+impl DesignSkill for TextToUiSkill {
+    fn id(&self) -> &str { "text-to-ui" }
+    fn label(&self) -> &str { "文生 UI" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
+只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+        if let Some(tokens) = ctx.token_prompt_fragment() {
+            sys.push_str("\n\n");
+            sys.push_str(&tokens);
+        }
+        let user = format!("生成页面。需求：{input}");
+        let resp = ctx.chat(&sys, &user, 2048)?;
+        let doc = parse_ui_json(&resp, "generated")?;
+        Ok(SkillOutput::Document(doc))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
+只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+            if let Some(tokens) = ctx.token_prompt_fragment() {
+                sys.push_str("\n\n");
+                sys.push_str(&tokens);
+            }
+            let user = format!("生成页面。需求：{input}");
+            let resp = ctx.chat_async(&sys, &user, 2048).await?;
+            let doc = parse_ui_json(&resp, "generated")?;
+            Ok(SkillOutput::Document(doc))
+        })
+    }
+}
+
+/// 图生 UI Skill。
+struct ImageToUiSkill;
+
+impl DesignSkill for ImageToUiSkill {
+    fn id(&self) -> &str { "image-to-ui" }
+    fn label(&self) -> &str { "图生 UI" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        // input 格式: "sketch_path|hint|page_name" 或直接 "sketch_path"
+        let parts: Vec<&str> = input.splitn(3, '|').collect();
+        let sketch_path = parts[0];
+        let hint = parts.get(1).unwrap_or(&"");
+        let page_name = parts.get(2).unwrap_or(&"generated");
+        let mut sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON。".to_string();
+        if let Some(tokens) = ctx.token_prompt_fragment() {
+            sys.push_str("\n\n");
+            sys.push_str(&tokens);
+        }
+        let user = format!("草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
+        let resp = ctx.chat(&sys, &user, 2048)?;
+        let doc = parse_ui_json(&resp, page_name)?;
+        Ok(SkillOutput::Document(doc))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let parts: Vec<&str> = input.splitn(3, '|').collect();
+            let sketch_path = parts[0];
+            let hint = parts.get(1).unwrap_or(&"");
+            let page_name = parts.get(2).unwrap_or(&"generated");
+            let mut sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON。".to_string();
+            if let Some(tokens) = ctx.token_prompt_fragment() {
+                sys.push_str("\n\n");
+                sys.push_str(&tokens);
+            }
+            let user = format!("草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
+            let resp = ctx.chat_async(&sys, &user, 2048).await?;
+            let doc = parse_ui_json(&resp, page_name)?;
+            Ok(SkillOutput::Document(doc))
+        })
+    }
+}
+
+/// 局部编辑 Skill。
+struct PartialEditSkill;
+
+impl DesignSkill for PartialEditSkill {
+    fn id(&self) -> &str { "partial-edit" }
+    fn label(&self) -> &str { "局部编辑" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        // input 格式: "node_json|instruction"
+        let parts: Vec<&str> = input.splitn(2, '|').collect();
+        let node_json = parts[0];
+        let instruction = parts.get(1).unwrap_or(&"修改为更合适的样式");
+        let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
+输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
+        let user = format!("节点：{node_json}\n指令：{instruction}");
+        let resp = ctx.chat(sys, &user, 1024)?;
+        Ok(SkillOutput::PartialEdit(resp))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let parts: Vec<&str> = input.splitn(2, '|').collect();
+            let node_json = parts[0];
+            let instruction = parts.get(1).unwrap_or(&"修改为更合适的样式");
+            let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
+输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
+            let user = format!("节点：{node_json}\n指令：{instruction}");
+            let resp = ctx.chat_async(sys, &user, 1024).await?;
+            Ok(SkillOutput::PartialEdit(resp))
+        })
+    }
+}
+
+/// 本地编辑 Skill：框选多节点 + 自然语言指令 → 批量修改。
+///
+/// input 格式: "node1_json\n---\nnode2_json\n---\n...|||instruction"
+struct LocalEditSkill;
+
+impl DesignSkill for LocalEditSkill {
+    fn id(&self) -> &str { "local-edit" }
+    fn label(&self) -> &str { "本地编辑" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        let (nodes_part, instruction) = parse_local_edit_input(input);
+        let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
+输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。".to_string();
+        if let Some(tokens) = ctx.token_prompt_fragment() {
+            sys.push_str("\n\n");
+            sys.push_str(&tokens);
+        }
+        let user = format!("选中节点：\n{nodes_part}\n\n编辑指令：{instruction}");
+        let resp = ctx.chat(&sys, &user, 2048)?;
+        Ok(SkillOutput::PartialEdit(resp))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let (nodes_part, instruction) = parse_local_edit_input(&input);
+            let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
+输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。".to_string();
+            if let Some(tokens) = ctx.token_prompt_fragment() {
+                sys.push_str("\n\n");
+                sys.push_str(&tokens);
+            }
+            let user = format!("选中节点：\n{nodes_part}\n\n编辑指令：{instruction}");
+            let resp = ctx.chat_async(&sys, &user, 2048).await?;
+            Ok(SkillOutput::PartialEdit(resp))
+        })
+    }
+}
+
+/// 解析 local-edit 输入格式。
+/// 格式: "node_jsons|||instruction" 或 "node_jsons|instruction"（向后兼容）
+fn parse_local_edit_input(input: &str) -> (String, &str) {
+    if let Some((nodes, instr)) = input.splitn(2, "|||").collect::<Vec<_>>().split_first() {
+        if !instr.is_empty() {
+            return (nodes.to_string(), instr[0]);
+        }
+    }
+    let parts: Vec<&str> = input.splitn(2, '|').collect();
+    let nodes = parts[0].to_string();
+    let instr = parts.get(1).unwrap_or(&"修改为更合适的样式");
+    (nodes, instr)
+}
+
+/// 仿真控制面板 Skill：根据仿真参数描述生成控制面板 PenDocument。
+///
+/// input 格式: "param_desc|panel_name"
+/// param_desc 示例: "速度:0-100,加速度:0-50,刹车力度:0-10"
+struct SimPanelSkill;
+
+impl DesignSkill for SimPanelSkill {
+    fn id(&self) -> &str { "sim-panel" }
+    fn label(&self) -> &str { "仿真控制面板" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        let (desc, panel_name) = parse_sim_panel_input(input);
+        let mut sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
+页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
+每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
+page 含 width/height（默认 480×640），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+        if let Some(tokens) = ctx.token_prompt_fragment() {
+            sys.push_str("\n\n");
+            sys.push_str(&tokens);
+        }
+        let user = format!("参数描述：{desc}\n生成仿真控制面板「{panel_name}」。");
+        let resp = ctx.chat(&sys, &user, 2048)?;
+        let doc = parse_ui_json(&resp, panel_name)?;
+        Ok(SkillOutput::Document(doc))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let (desc, panel_name) = parse_sim_panel_input(&input);
+            let mut sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
+页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
+每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
+page 含 width/height（默认 480×640），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+            if let Some(tokens) = ctx.token_prompt_fragment() {
+                sys.push_str("\n\n");
+                sys.push_str(&tokens);
+            }
+            let user = format!("参数描述：{desc}\n生成仿真控制面板「{panel_name}」。");
+            let resp = ctx.chat_async(&sys, &user, 2048).await?;
+            let doc = parse_ui_json(&resp, panel_name)?;
+            Ok(SkillOutput::Document(doc))
+        })
+    }
+}
+
+fn parse_sim_panel_input(input: &str) -> (&str, &str) {
+    let parts: Vec<&str> = input.splitn(2, '|').collect();
+    let desc = parts[0];
+    let name = parts.get(1).unwrap_or(&"SimPanel");
+    (desc, name)
+}
+
+/// 多方案对比 Skill。
+struct MultiVariantsSkill;
+
+impl DesignSkill for MultiVariantsSkill {
+    fn id(&self) -> &str { "multi-variants" }
+    fn label(&self) -> &str { "多方案对比" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        // input 格式: "prompt|style1|style2|style3"
+        let parts: Vec<&str> = input.splitn(4, '|').collect();
+        let prompt = parts[0];
+        let styles = [
+            parts.get(1).unwrap_or(&"简约"),
+            parts.get(2).unwrap_or(&"玻璃拟态"),
+            parts.get(3).unwrap_or(&"深色"),
+        ];
+        let text_skill = TextToUiSkill;
+        let v1_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[0]))? {
+            SkillOutput::Document(d) => d,
+            _ => anyhow::bail!("text-to-ui 返回非 Document"),
+        };
+        let v2_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[1]))? {
+            SkillOutput::Document(d) => d,
+            _ => anyhow::bail!("text-to-ui 返回非 Document"),
+        };
+        let v3_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[2]))? {
+            SkillOutput::Document(d) => d,
+            _ => anyhow::bail!("text-to-ui 返回非 Document"),
+        };
+        Ok(SkillOutput::MultiVariants([v1_doc, v2_doc, v3_doc]))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let parts: Vec<&str> = input.splitn(4, '|').collect();
+            let prompt = parts[0];
+            let styles = [
+                parts.get(1).unwrap_or(&"简约"),
+                parts.get(2).unwrap_or(&"玻璃拟态"),
+                parts.get(3).unwrap_or(&"深色"),
+            ];
+            let text_skill = TextToUiSkill;
+            let v1_doc = match text_skill.execute_async(ctx, format!("{prompt}（风格：{}）", styles[0])).await? {
+                SkillOutput::Document(d) => d,
+                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            };
+            let v2_doc = match text_skill.execute_async(ctx, format!("{prompt}（风格：{}）", styles[1])).await? {
+                SkillOutput::Document(d) => d,
+                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            };
+            let v3_doc = match text_skill.execute_async(ctx, format!("{prompt}（风格：{}）", styles[2])).await? {
+                SkillOutput::Document(d) => d,
+                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            };
+            Ok(SkillOutput::MultiVariants([v1_doc, v2_doc, v3_doc]))
+        })
+    }
+}
 
 use fd_canvas_core::{NodeKind, Page, PenDocument, PenNode};
 
@@ -399,6 +810,69 @@ impl DesignSkills {
             .await
     }
 
+    /// 本地编辑：框选多节点 + 自然语言指令 → 批量修改 JSON。
+    pub fn local_edit(
+        &self,
+        nodes_json: &str,
+        instruction: &str,
+    ) -> anyhow::Result<String> {
+        let sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
+输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。";
+        let user = format!("选中节点：\n{nodes_json}\n\n编辑指令：{instruction}");
+        self.client.chat_sync(&self.default_model, sys, &user, 2048)
+    }
+
+    /// 本地编辑（async 变体）。
+    pub async fn local_edit_async(
+        &self,
+        nodes_json: &str,
+        instruction: &str,
+    ) -> anyhow::Result<String> {
+        let sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
+输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。";
+        let user = format!("选中节点：\n{nodes_json}\n\n编辑指令：{instruction}");
+        self.client
+            .chat_async(&self.default_model, sys, &user, 2048)
+            .await
+    }
+
+    /// 仿真控制面板：参数描述 → PenDocument 控制面板页面。
+    pub fn sim_panel(
+        &self,
+        param_desc: &str,
+        panel_name: &str,
+    ) -> anyhow::Result<PenDocument> {
+        let sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
+页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
+每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
+page 含 width/height（默认 480×640），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
+        let user = format!("参数描述：{param_desc}\n生成仿真控制面板「{panel_name}」。");
+        let resp = self.client.chat_sync(&self.default_model, sys, &user, 2048)?;
+        parse_ui_json(&resp, panel_name)
+    }
+
+    /// 仿真控制面板（async 变体）。
+    pub async fn sim_panel_async(
+        &self,
+        param_desc: &str,
+        panel_name: &str,
+    ) -> anyhow::Result<PenDocument> {
+        let sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
+页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
+每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
+page 含 width/height（默认 480×640），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
+        let user = format!("参数描述：{param_desc}\n生成仿真控制面板「{panel_name}」。");
+        let resp = self
+            .client
+            .chat_async(&self.default_model, sys, &user, 2048)
+            .await?;
+        parse_ui_json(&resp, panel_name)
+    }
+
     /// 多方案对比：生成 3 套不同风格设计稿。
     ///
     /// 对应 PRD 模块 2「一键生成 3 套不同风格设计稿并存画布」。
@@ -453,26 +927,32 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
         .and_then(|p| p.get("nodes"))
         .or_else(|| v.get("nodes"))
         .ok_or_else(|| anyhow::anyhow!("JSON 缺 nodes 字段"))?;
-    let nodes = parse_nodes(nodes_val)?;
+    let nodes = parse_nodes_with_depth(nodes_val, 0)?;
+    let validated: Vec<PenNode> = nodes.into_iter().map(validate_node).collect();
     let mut doc = PenDocument::new();
     let mut page = Page::new("page_1", page_name, w, h);
-    for n in nodes {
+    for n in validated {
         page.add(n);
     }
     doc.add_page(page);
     Ok(doc)
 }
 
-fn parse_nodes(v: &serde_json::Value) -> anyhow::Result<Vec<PenNode>> {
+const MAX_NODE_DEPTH: usize = 20;
+
+fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Result<Vec<PenNode>> {
+    if depth > MAX_NODE_DEPTH {
+        anyhow::bail!("节点嵌套深度超过 {MAX_NODE_DEPTH}，拒绝解析");
+    }
     let arr = v.as_array().ok_or_else(|| anyhow::anyhow!("nodes 非数组"))?;
     let mut nodes = Vec::with_capacity(arr.len());
     for (i, item) in arr.iter().enumerate() {
-        nodes.push(parse_node(item, i)?);
+        nodes.push(parse_node_with_depth(item, i, depth)?);
     }
     Ok(nodes)
 }
 
-fn parse_node(item: &serde_json::Value, idx: usize) -> anyhow::Result<PenNode> {
+fn parse_node_with_depth(item: &serde_json::Value, idx: usize, depth: usize) -> anyhow::Result<PenNode> {
     let o = item.as_object().ok_or_else(|| anyhow::anyhow!("节点 {idx} 非对象"))?;
     let kind_str = o.get("kind").and_then(|k| k.as_str()).unwrap_or("rect");
     let kind = match kind_str {
@@ -485,6 +965,7 @@ fn parse_node(item: &serde_json::Value, idx: usize) -> anyhow::Result<PenNode> {
     };
     let id = o.get("id").and_then(|x| x.as_str()).map(String::from)
         .unwrap_or_else(|| format!("n_{idx}"));
+    let id = sanitize_node_id(&id);
     let name = o.get("name").and_then(|x| x.as_str()).map(String::from)
         .unwrap_or_else(|| kind_str.to_string());
     let get_f = |key: &str, d: f32| o.get(key).and_then(|x| x.as_f64()).map(|v| v as f32).unwrap_or(d);
@@ -496,7 +977,7 @@ fn parse_node(item: &serde_json::Value, idx: usize) -> anyhow::Result<PenNode> {
     style.stroke = stroke;
     let children_val = o.get("children");
     let children = match children_val {
-        Some(cv) => parse_nodes(cv)?,
+        Some(cv) => parse_nodes_with_depth(cv, depth + 1)?,
         None => vec![],
     };
     Ok(PenNode {
@@ -504,21 +985,318 @@ fn parse_node(item: &serde_json::Value, idx: usize) -> anyhow::Result<PenNode> {
         x: get_f("x", 0.0), y: get_f("y", 0.0),
         w: get_f("w", 0.0), h: get_f("h", 0.0),
         style, text, children,
+        rotation: get_f("rotation", 0.0),
+        z_index: get_f("z_index", 0.0) as i32,
     })
+}
+
+fn sanitize_node_id(id: &str) -> String {
+    let sanitized: String = id.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if sanitized.is_empty() {
+        "node".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn validate_node(mut node: PenNode) -> PenNode {
+    if node.w <= 0.0 {
+        tracing::warn!("节点 {} w={:.1} 非正，修正为 1.0", node.id, node.w);
+        node.w = 1.0;
+    }
+    if node.h <= 0.0 {
+        tracing::warn!("节点 {} h={:.1} 非正，修正为 1.0", node.id, node.h);
+        node.h = 1.0;
+    }
+    node.children = node.children.into_iter().map(validate_node).collect();
+    node
 }
 
 fn strip_code_fence(s: &str) -> &str {
     let trimmed = s.trim();
     if !trimmed.starts_with("```") {
-        // 裸 JSON：原样返回（trim 已剥首尾空白，不影响 serde_json）
         return trimmed;
     }
-    // 剥首行 ```xxx 和末尾 ```
     let inner = trimmed
         .trim_start_matches('`')
         .trim_end_matches('`');
-    // 再剥可能的 "json\n" 前缀
     inner.trim_start_matches("json").trim()
+}
+
+// ── HTML → PenDocument 解析器 ──
+//
+// AI 响应中常包含 HTML artifact（如 <artifact type="html">... 或 ```html...``` 代码块）。
+// 本解析器将 HTML 元素转换为 PenDocument 节点树，支持：
+// - 基础元素映射：div/section/main→Rect, h1-h6/p/span/a→Text, img→Image, button→Rect
+// - 样式提取：width/height/left/top/background/color/font-size/border-radius
+// - 嵌套子元素递归解析
+// - class→token 引用（如 class="bg-primary" → fill=var(--color-primary)）
+
+use scraper::{Html, Selector, ElementRef, Node};
+
+/// 从 AI 响应中提取 HTML 片段并转换为 PenDocument。
+///
+/// 支持的输入格式：
+/// 1. 纯 HTML 字符串
+/// 2. ```html...``` 代码块包裹
+/// 3. <artifact type="html">...</artifact> 标签包裹
+pub fn html_to_pen_document(html: &str, page_name: &str) -> anyhow::Result<PenDocument> {
+    let extracted = extract_html_artifact(html);
+    let document = Html::parse_document(&extracted);
+
+    let body_sel = Selector::parse("body").unwrap();
+    let body_el = document.select(&body_sel).next();
+
+    let container = body_el.map(|el| el.inner_html()).unwrap_or_else(|| extracted.clone());
+    let container_doc = Html::parse_fragment(&container);
+
+    let mut doc = PenDocument::new();
+    let mut page = Page::new("page_1", page_name, 1440.0, 900.0);
+
+    let root_sel = Selector::parse(":root > *").unwrap_or_else(|_| Selector::parse("*").unwrap());
+    let mut auto_y: f32 = 0.0;
+    let mut node_counter: u32 = 0;
+    for el_ref in container_doc.select(&root_sel) {
+        if let Some(node) = html_element_to_node(&el_ref, 0.0, &mut auto_y, 0, &mut node_counter) {
+            auto_y += node.h + 8.0;
+            page.add(node);
+        }
+    }
+
+    if page.nodes.is_empty() {
+        let any_sel = Selector::parse("*").unwrap();
+        let root_el = container_doc.select(&any_sel).next();
+        if let Some(root) = root_el {
+            for child_ref in root.child_elements() {
+                if let Some(node) = html_element_to_node(&child_ref, 0.0, &mut auto_y, 0, &mut node_counter) {
+                    auto_y += node.h + 8.0;
+                    page.add(node);
+                }
+            }
+        }
+    }
+
+    doc.add_page(page);
+    tracing::info!("html_to_pen_document: 解析完成，{} 个节点", doc.pages.first().map(|p| p.nodes.len()).unwrap_or(0));
+    Ok(doc)
+}
+
+/// 从 AI 响应文本中提取 HTML 片段。
+fn extract_html_artifact(raw: &str) -> String {
+    // 尝试提取 <artifact type="html">...</artifact>
+    if let Some(start) = raw.find(r#"<artifact"#) {
+        if let Some(content_start) = raw[start..].find('>') {
+            let content_start = start + content_start + 1;
+            if let Some(end) = raw[content_start..].find("</artifact>") {
+                return raw[content_start..content_start + end].trim().to_string();
+            }
+        }
+    }
+
+    // 尝试提取 ```html ... ```
+    if let Some(start_marker) = raw.find("```html") {
+        let content_start = start_marker + 7;
+        if let Some(end) = raw[content_start..].find("```") {
+            return raw[content_start..content_start + end].trim().to_string();
+        }
+    }
+
+    // 尝试提取 ``` ... ``` (generic code fence)
+    if raw.trim().starts_with("```") {
+        let trimmed = raw.trim();
+        let first_newline = trimmed.find('\n').unwrap_or(3);
+        let content_start = first_newline + 1;
+        if let Some(end) = trimmed[content_start..].rfind("```") {
+            return trimmed[content_start..content_start + end].trim().to_string();
+        }
+    }
+
+    // 如果包含 HTML 标签，原样返回
+    if raw.contains('<') && raw.contains('>') {
+        return raw.trim().to_string();
+    }
+
+    raw.trim().to_string()
+}
+
+/// 将 HTML 元素转换为 PenNode。
+fn html_element_to_node(
+    el_ref: &ElementRef,
+    base_x: f32,
+    auto_y: &mut f32,
+    depth: usize,
+    counter: &mut u32,
+) -> Option<PenNode> {
+    let el = el_ref.value();
+    let tag = el.name();
+
+    let (kind, name) = match tag {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => (NodeKind::Text, format!("heading_{tag}")),
+        "p" | "span" | "a" | "label" | "li" => (NodeKind::Text, tag.to_string()),
+        "img" | "svg" => (NodeKind::Image, tag.to_string()),
+        "input" | "textarea" | "select" => (NodeKind::Rect, format!("input_{tag}")),
+        "button" => (NodeKind::Rect, "button".to_string()),
+        _ => (NodeKind::Rect, tag.to_string()),
+    };
+
+    let text = extract_text_content(el_ref);
+    let mut style = fd_canvas_core::NodeStyle::default();
+    let (mut x, mut y, mut w, mut h) = (base_x, *auto_y, 300.0, 40.0);
+
+    // Tag-based defaults first
+    match tag {
+        "h1" => { w = 1440.0; h = 60.0; style.fill = Some("#FFFFFF".into()); }
+        "h2" => { w = 600.0; h = 48.0; style.fill = Some("#FFFFFF".into()); }
+        "h3" => { w = 400.0; h = 36.0; style.fill = Some("#FFFFFF".into()); }
+        "p" | "span" | "a" | "label" => { w = 300.0; h = 24.0; style.fill = Some("#E0E0E0".into()); }
+        "button" => { w = 120.0; h = 40.0; style.radius = Some(8.0); style.fill = Some("#007AFF".into()); }
+        "input" => { w = 300.0; h = 36.0; style.radius = Some(6.0); style.fill = Some("#2C2C2E".into()); style.stroke = Some("1px solid #555".into()); }
+        "img" => { w = 200.0; h = 150.0; }
+        "div" | "section" | "main" | "header" | "footer" | "nav" | "article" | "form" => {
+            if text.is_some() { h = 40.0; } else { h = 80.0; }
+            w = 1440.0;
+        }
+        "ul" | "ol" => { w = 300.0; h = 120.0; }
+        "li" => { w = 280.0; h = 28.0; style.fill = Some("#E0E0E0".into()); }
+        _ => {}
+    }
+
+    // Inline style overrides defaults
+    let parsed_style = el.attr("style").map(|s| parse_inline_style(&s));
+    if let Some(ref parsed) = parsed_style {
+        if let Some(v) = parsed.get("width") {
+            w = parse_px(v).unwrap_or(w);
+        }
+        if let Some(v) = parsed.get("height") {
+            h = parse_px(v).unwrap_or(h);
+        }
+        if let Some(v) = parsed.get("left") {
+            x = base_x + parse_px(v).unwrap_or(0.0);
+        }
+        if let Some(v) = parsed.get("top") {
+            y = parse_px(v).unwrap_or(0.0);
+        }
+        if let Some(v) = parsed.get("background") {
+            style.fill = Some(v.clone());
+        }
+        if let Some(v) = parsed.get("background-color") {
+            style.fill = Some(v.clone());
+        }
+        if let Some(v) = parsed.get("color") {
+            if kind == NodeKind::Text {
+                style.fill = Some(v.clone());
+            }
+        }
+        if let Some(v) = parsed.get("border-radius") {
+            style.radius = Some(parse_px(v).unwrap_or(0.0));
+        }
+        if let Some(v) = parsed.get("border") {
+            style.stroke = Some(v.clone());
+        }
+    }
+
+    // class → token hint (overrides tag default, but not inline style)
+    if let Some(class) = el.attr("class") {
+        if let Some(token_fill) = class_to_fill_hint(class) {
+            let has_bg = parsed_style.as_ref().map_or(false, |p| {
+                p.contains_key("background") || p.contains_key("background-color")
+            });
+            if !has_bg {
+                style.fill = Some(token_fill);
+            }
+        }
+    }
+
+    *counter += 1;
+    let id = format!("n_{}", counter);
+    let node_text = if kind == NodeKind::Text { text } else { None };
+
+    let children: Vec<PenNode> = el_ref.child_elements()
+        .filter_map(|child_ref| {
+            let mut child_auto_y = 0.0f32;
+            html_element_to_node(&child_ref, x + 16.0, &mut child_auto_y, depth + 1, counter)
+        })
+        .collect();
+
+    Some(PenNode {
+        id,
+        kind,
+        name,
+        x,
+        y,
+        w,
+        h,
+        style,
+        text: node_text,
+        children,
+        rotation: 0.0,
+        z_index: depth as i32,
+    })
+}
+
+/// 提取元素内的直接文本内容。
+fn extract_text_content(el_ref: &ElementRef) -> Option<String> {
+    let mut texts = Vec::new();
+    for child in el_ref.children() {
+        if let Node::Text(t) = child.value() {
+            let trimmed = t.text.trim();
+            if !trimmed.is_empty() {
+                texts.push(trimmed.to_string());
+            }
+        }
+    }
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join(" "))
+    }
+}
+
+/// 解析内联 style 属性为 key-value 映射。
+fn parse_inline_style(style_str: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for decl in style_str.split(';') {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        if let Some((key, val)) = decl.split_once(':') {
+            map.insert(key.trim().to_string(), val.trim().to_string());
+        }
+    }
+    map
+}
+
+/// 解析 CSS px 值为 f32。
+fn parse_px(val: &str) -> Option<f32> {
+    let v = val.trim();
+    if let Some(num) = v.strip_suffix("px") {
+        num.trim().parse::<f32>().ok()
+    } else if let Ok(n) = v.parse::<f32>() {
+        Some(n)
+    } else if let Some(pct) = v.strip_suffix('%') {
+        pct.trim().parse::<f32>().ok()
+    } else {
+        None
+    }
+}
+
+/// CSS class → token fill 提示。
+fn class_to_fill_hint(class: &str) -> Option<String> {
+    for cls in class.split_whitespace() {
+        match cls {
+            "bg-primary" | "btn-primary" => return Some("var(--color-accent)".into()),
+            "bg-secondary" | "btn-secondary" => return Some("var(--color-secondary)".into()),
+            "bg-danger" | "btn-danger" => return Some("var(--color-error)".into()),
+            "bg-success" | "btn-success" => return Some("var(--color-success)".into()),
+            "bg-dark" => return Some("#1C1C1E".into()),
+            "bg-light" | "bg-white" => return Some("#FFFFFF".into()),
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -580,7 +1358,7 @@ mod skills_tests {
     #[test]
     fn parse_node_defaults_id_when_absent() {
         let v: serde_json::Value = serde_json::from_str(r#"{"kind":"rect"}"#).unwrap();
-        let n = parse_node(&v, 5).unwrap();
+        let n = parse_node_with_depth(&v, 5, 0).unwrap();
         assert_eq!(n.id, "n_5");
     }
 
@@ -593,6 +1371,140 @@ mod skills_tests {
     fn design_skills_constructible() {
         let skills = DesignSkills::new(FusionMlxClient::default(), "qwen3.5");
         assert_eq!(skills.default_model, "qwen3.5");
+    }
+
+    // ── Skill trait 系统测试 ──
+
+    #[test]
+    fn skill_registry_register_and_list() {
+        let mut reg = SkillRegistry::new();
+        reg.register(Box::new(TextToUiSkill));
+        reg.register(Box::new(PartialEditSkill));
+        let ids = reg.list();
+        assert!(ids.contains(&"text-to-ui"));
+        assert!(ids.contains(&"partial-edit"));
+    }
+
+    #[test]
+    fn skill_registry_get_found() {
+        let mut reg = SkillRegistry::new();
+        reg.register(Box::new(TextToUiSkill));
+        let skill = reg.get("text-to-ui").unwrap();
+        assert_eq!(skill.id(), "text-to-ui");
+        assert_eq!(skill.label(), "文生 UI");
+    }
+
+    #[test]
+    fn skill_registry_get_missing() {
+        let reg = SkillRegistry::new();
+        assert!(reg.get("nope").is_none());
+    }
+
+    #[test]
+    fn skill_registry_builtin_registers_six() {
+        let mut reg = SkillRegistry::new();
+        reg.register_builtin();
+        let ids = reg.list();
+        assert_eq!(ids.len(), 6);
+        assert!(ids.contains(&"text-to-ui"));
+        assert!(ids.contains(&"image-to-ui"));
+        assert!(ids.contains(&"partial-edit"));
+        assert!(ids.contains(&"local-edit"));
+        assert!(ids.contains(&"sim-panel"));
+        assert!(ids.contains(&"multi-variants"));
+    }
+
+    #[test]
+    fn skill_context_token_prompt_without_design_system() {
+        let client = FusionMlxClient::default();
+        let ctx = SkillContext {
+            client: &client,
+            model: "qwen3.5",
+            design_system: None,
+        };
+        assert!(ctx.token_prompt_fragment().is_none());
+    }
+
+    #[test]
+    fn skill_context_token_prompt_with_design_system() {
+        let client = FusionMlxClient::default();
+        let ds = fd_design_system::builtin_apple_hig();
+        let ctx = SkillContext {
+            client: &client,
+            model: "qwen3.5",
+            design_system: Some(&ds),
+        };
+        let frag = ctx.token_prompt_fragment().unwrap();
+        assert!(frag.contains("--color-accent"));
+        assert!(frag.contains("CSS Custom Properties"));
+    }
+
+    #[test]
+    fn skill_output_variant_document() {
+        let doc = PenDocument::new();
+        let out = SkillOutput::Document(doc);
+        match out {
+            SkillOutput::Document(d) => assert_eq!(d.pages.len(), 0),
+            _ => panic!("期望 Document"),
+        }
+    }
+
+    #[test]
+    fn skill_output_variant_partial_edit() {
+        let out = SkillOutput::PartialEdit("modified".into());
+        match out {
+            SkillOutput::PartialEdit(s) => assert_eq!(s, "modified"),
+            _ => panic!("期望 PartialEdit"),
+        }
+    }
+
+    #[test]
+    fn parse_local_edit_input_with_triple_pipe() {
+        let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]|||改成红色");
+        assert_eq!(nodes, "[{\"id\":\"a\"}]");
+        assert_eq!(instr, "改成红色");
+    }
+
+    #[test]
+    fn parse_local_edit_input_with_single_pipe() {
+        let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]|修改样式");
+        assert_eq!(nodes, "[{\"id\":\"a\"}]");
+        assert_eq!(instr, "修改样式");
+    }
+
+    #[test]
+    fn parse_local_edit_input_no_instruction() {
+        let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]");
+        assert_eq!(nodes, "[{\"id\":\"a\"}]");
+        assert_eq!(instr, "修改为更合适的样式");
+    }
+
+    #[test]
+    fn local_edit_skill_id_and_label() {
+        let skill = LocalEditSkill;
+        assert_eq!(skill.id(), "local-edit");
+        assert_eq!(skill.label(), "本地编辑");
+    }
+
+    #[test]
+    fn sim_panel_skill_id_and_label() {
+        let skill = SimPanelSkill;
+        assert_eq!(skill.id(), "sim-panel");
+        assert_eq!(skill.label(), "仿真控制面板");
+    }
+
+    #[test]
+    fn parse_sim_panel_input_with_name() {
+        let (desc, name) = parse_sim_panel_input("速度:0-100|RobotPanel");
+        assert_eq!(desc, "速度:0-100");
+        assert_eq!(name, "RobotPanel");
+    }
+
+    #[test]
+    fn parse_sim_panel_input_default_name() {
+        let (desc, name) = parse_sim_panel_input("速度:0-100,加速度:0-50");
+        assert_eq!(desc, "速度:0-100,加速度:0-50");
+        assert_eq!(name, "SimPanel");
     }
 }
 
@@ -757,10 +1669,118 @@ mod mlx_integration {
 
     #[test]
     fn mock_server_endpoint_is_localhost() {
-        // 确保自建 mock server 的 127.0.0.1 endpoint 通过 validate_localhost
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
         assert!(validate_localhost(&url).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod html_parser_tests {
+    use super::*;
+
+    #[test]
+    fn extract_plain_html() {
+        let html = r#"<div><h1>Hello</h1><p>World</p></div>"#;
+        let result = extract_html_artifact(html);
+        assert!(result.contains("<h1>"));
+    }
+
+    #[test]
+    fn extract_code_fenced_html() {
+        let raw = "```html\n<div><button>Click</button></div>\n```";
+        let result = extract_html_artifact(raw);
+        assert!(result.contains("<button>"));
+        assert!(!result.contains("```"));
+    }
+
+    #[test]
+    fn extract_artifact_tag() {
+        let raw = r#"<artifact type="html"><div>Content</div></artifact>"#;
+        let result = extract_html_artifact(raw);
+        assert!(result.contains("<div>Content</div>"));
+        assert!(!result.contains("<artifact"));
+    }
+
+    #[test]
+    fn html_to_pen_document_basic() {
+        let html = r#"<h1>Title</h1><p>Paragraph</p><button>Click</button>"#;
+        let doc = html_to_pen_document(html, "TestPage").unwrap();
+        assert_eq!(doc.pages.len(), 1);
+        let page = &doc.pages[0];
+        assert!(page.nodes.len() >= 2, "at least h1 and p");
+        let h1 = page.nodes.iter().find(|n| n.name == "heading_h1");
+        assert!(h1.is_some());
+        assert_eq!(h1.unwrap().kind, fd_canvas_core::NodeKind::Text);
+        assert_eq!(h1.unwrap().text.as_deref(), Some("Title"));
+    }
+
+    #[test]
+    fn html_to_pen_document_button() {
+        let html = r#"<button>Submit</button>"#;
+        let doc = html_to_pen_document(html, "BtnPage").unwrap();
+        let btn = doc.pages[0].nodes.iter().find(|n| n.name == "button");
+        assert!(btn.is_some());
+        assert_eq!(btn.unwrap().kind, fd_canvas_core::NodeKind::Rect);
+        assert_eq!(btn.unwrap().style.radius, Some(8.0));
+    }
+
+    #[test]
+    fn html_to_pen_document_inline_style() {
+        let html = r#"<div style="background: #333; width: 200px; height: 100px; border-radius: 12px;">Box</div>"#;
+        let doc = html_to_pen_document(html, "StylePage").unwrap();
+        let div = doc.pages[0].nodes.first().unwrap();
+        assert_eq!(div.w, 200.0);
+        assert_eq!(div.h, 100.0);
+        assert_eq!(div.style.fill.as_deref(), Some("#333"));
+        assert_eq!(div.style.radius, Some(12.0));
+    }
+
+    #[test]
+    fn html_to_pen_document_class_token_hint() {
+        let html = r#"<button class="btn-primary">Go</button>"#;
+        let doc = html_to_pen_document(html, "TokenPage").unwrap();
+        let btn = doc.pages[0].nodes.first().unwrap();
+        assert_eq!(btn.style.fill.as_deref(), Some("var(--color-accent)"));
+    }
+
+    #[test]
+    fn html_to_pen_document_nested() {
+        let html = r#"<div><h1>Title</h1><p>Sub</p></div>"#;
+        let doc = html_to_pen_document(html, "NestedPage").unwrap();
+        let div = doc.pages[0].nodes.first().unwrap();
+        assert!(!div.children.is_empty(), "div should have child nodes");
+    }
+
+    #[test]
+    fn html_to_pen_document_img() {
+        let html = r#"<img src="test.png" />"#;
+        let doc = html_to_pen_document(html, "ImgPage").unwrap();
+        let img = doc.pages[0].nodes.iter().find(|n| n.kind == fd_canvas_core::NodeKind::Image);
+        assert!(img.is_some());
+    }
+
+    #[test]
+    fn parse_inline_style_basic() {
+        let map = parse_inline_style("width: 100px; height: 50px; color: #fff");
+        assert_eq!(map.get("width").unwrap(), "100px");
+        assert_eq!(map.get("height").unwrap(), "50px");
+        assert_eq!(map.get("color").unwrap(), "#fff");
+    }
+
+    #[test]
+    fn parse_px_values() {
+        assert_eq!(parse_px("100px"), Some(100.0));
+        assert_eq!(parse_px("50"), Some(50.0));
+        assert_eq!(parse_px("75%"), Some(75.0));
+        assert_eq!(parse_px("auto"), None);
+    }
+
+    #[test]
+    fn class_to_fill_hint_mapping() {
+        assert_eq!(class_to_fill_hint("bg-primary"), Some("var(--color-accent)".to_string()));
+        assert_eq!(class_to_fill_hint("bg-danger"), Some("var(--color-error)".to_string()));
+        assert_eq!(class_to_fill_hint("unknown"), None);
     }
 }

@@ -11,6 +11,10 @@ description = "Fusion-Design 导出 — PNG/SVG/PDF/HTML 批量导出"
 name = "fd_export"
 path = "src/lib.rs"
 
+# Callers: fd-cli (export/export-batch), DesignBridge (Swift Process)
+# Affected API: Exporter (new from_pen_document), CanvasPage conversion
+# Data schemas: PenDocument→CanvasPage bridge, enhanced SVG/HTML with NodeStyle
+# User instruction: "现在开始实施" — Task #16 P3-5 fd-export PNG/SVG/HTML 批量导出
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,6 +22,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+fd-canvas-core = { path = "../fd-canvas-core" }
 
 [dev-dependencies]
 tempfile = "3"
