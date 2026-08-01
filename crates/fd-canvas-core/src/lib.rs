@@ -900,7 +900,7 @@ impl PenDocument {
         let other_ids: Vec<&str> = other_nodes.keys().map(|s| s.as_str()).collect();
 
         for id in &other_ids {
-            if !self_ids.iter().any(|s| *s == *id) {
+            if !self_ids.contains(id) {
                 entries.push(DiffEntry {
                     node_id: id.to_string(),
                     change_type: DiffChangeType::Added,
@@ -911,7 +911,7 @@ impl PenDocument {
             }
         }
         for id in &self_ids {
-            if !other_ids.iter().any(|s| *s == *id) {
+            if !other_ids.contains(id) {
                 entries.push(DiffEntry {
                     node_id: id.to_string(),
                     change_type: DiffChangeType::Removed,
@@ -1581,5 +1581,304 @@ mod tests {
         let patch = doc_v1.diff(&doc_v2);
         doc_v1.apply_patch(&patch);
         assert_eq!(doc_v1.pages[0].nodes[0].w, 200.0);
+    }
+}
+
+// ── 命名版本管理 ──
+
+/// 单个命名版本快照。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedVersion {
+    pub id: String,
+    pub name: String,
+    pub snapshot: PenDocument,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// 文档版本管理器，支持命名版本、切换、diff 对比。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionedDocument {
+    pub document_id: String,
+    versions: Vec<NamedVersion>,
+    active_version_id: String,
+}
+
+impl VersionedDocument {
+    pub fn new(document_id: impl Into<String>, initial: PenDocument) -> Self {
+        let id = uuid_v4();
+        let version = NamedVersion {
+            id: id.clone(),
+            name: "初始版本".to_string(),
+            snapshot: initial,
+            created_at: now_iso(),
+            description: None,
+        };
+        Self {
+            document_id: document_id.into(),
+            versions: vec![version],
+            active_version_id: id,
+        }
+    }
+
+    pub fn active_version(&self) -> &NamedVersion {
+        self.versions.iter().find(|v| v.id == self.active_version_id)
+            .expect("active_version_id must exist")
+    }
+
+    pub fn active_document(&self) -> &PenDocument {
+        &self.active_version().snapshot
+    }
+
+    pub fn save_version(
+        &mut self,
+        name: impl Into<String>,
+        doc: PenDocument,
+        description: Option<String>,
+    ) -> &NamedVersion {
+        let id = uuid_v4();
+        let version = NamedVersion {
+            id: id.clone(),
+            name: name.into(),
+            snapshot: doc,
+            created_at: now_iso(),
+            description,
+        };
+        self.versions.push(version);
+        self.active_version_id = id.clone();
+        tracing::info!(version_id = %id, total = self.versions.len(), "save_version: 新版本已保存");
+        self.versions.last().unwrap()
+    }
+
+    pub fn switch_to(&mut self, version_id: &str) -> anyhow::Result<&PenDocument> {
+        if !self.versions.iter().any(|v| v.id == version_id) {
+            anyhow::bail!("版本 {} 不存在", version_id);
+        }
+        self.active_version_id = version_id.to_string();
+        tracing::info!(version_id, "switch_to: 版本切换");
+        Ok(&self.active_version().snapshot)
+    }
+
+    pub fn switch_to_by_name(&mut self, name: &str) -> anyhow::Result<&PenDocument> {
+        let v = self.versions.iter().find(|v| v.name == name)
+            .ok_or_else(|| anyhow::anyhow!("版本「{}」不存在", name))?;
+        self.active_version_id = v.id.clone();
+        tracing::info!(name, "switch_to_by_name: 版本切换");
+        Ok(&self.active_version().snapshot)
+    }
+
+    pub fn list_versions(&self) -> Vec<&NamedVersion> {
+        self.versions.iter().collect()
+    }
+
+    pub fn version_count(&self) -> usize {
+        self.versions.len()
+    }
+
+    pub fn diff_versions(&self, id_a: &str, id_b: &str) -> anyhow::Result<PenDocumentDiff> {
+        let a = self.versions.iter().find(|v| v.id == id_a)
+            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", id_a))?;
+        let b = self.versions.iter().find(|v| v.id == id_b)
+            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", id_b))?;
+        Ok(a.snapshot.diff(&b.snapshot))
+    }
+
+    pub fn diff_adjacent(&self, version_id: &str) -> anyhow::Result<PenDocumentDiff> {
+        let idx = self.versions.iter().position(|v| v.id == version_id)
+            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
+        if idx == 0 {
+            return Ok(PenDocumentDiff::default());
+        }
+        let prev = &self.versions[idx - 1];
+        let curr = &self.versions[idx];
+        Ok(prev.snapshot.diff(&curr.snapshot))
+    }
+
+    pub fn delete_version(&mut self, version_id: &str) -> anyhow::Result<()> {
+        if self.versions.len() <= 1 {
+            anyhow::bail!("至少保留一个版本");
+        }
+        if self.active_version_id == version_id {
+            anyhow::bail!("不能删除当前激活版本");
+        }
+        let idx = self.versions.iter().position(|v| v.id == version_id)
+            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
+        self.versions.remove(idx);
+        tracing::info!(version_id, remaining = self.versions.len(), "delete_version: 版本已删除");
+        Ok(())
+    }
+
+    pub fn rename_version(&mut self, version_id: &str, new_name: &str) -> anyhow::Result<()> {
+        let v = self.versions.iter_mut().find(|v| v.id == version_id)
+            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
+        tracing::info!(version_id, old = %v.name, new = new_name, "rename_version");
+        v.name = new_name.to_string();
+        Ok(())
+    }
+
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    pub fn from_json(json: &str) -> anyhow::Result<Self> {
+        Ok(serde_json::from_str(json)?)
+    }
+}
+
+fn uuid_v4() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:016x}-{:04x}", ts, (ts & 0xffff) as u16)
+}
+
+fn now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("20{:02}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        (secs / 31536000) as u8 % 100,
+        (secs % 31536000) / 2592000 + 1,
+        ((secs % 2592000) / 86400) + 1,
+        (secs % 86400) / 3600,
+        (secs % 3600) / 60,
+        secs % 60)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    fn sample_doc(name: &str) -> PenDocument {
+        let mut doc = PenDocument::new();
+        doc.add_page(Page {
+            id: "p1".into(),
+            name: name.into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        doc
+    }
+
+    #[test]
+    fn versioned_document_new() {
+        let doc = sample_doc("v0");
+        let vd = VersionedDocument::new("doc1", doc);
+        assert_eq!(vd.version_count(), 1);
+        assert_eq!(vd.active_version().name, "初始版本");
+    }
+
+    #[test]
+    fn save_and_switch_version() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let doc_v1 = sample_doc("v1");
+        vd.save_version("设计稿 V2", doc_v1, None);
+        assert_eq!(vd.version_count(), 2);
+        assert_eq!(vd.active_version().name, "设计稿 V2");
+
+        let first_id = vd.versions[0].id.clone();
+        vd.switch_to(&first_id).unwrap();
+        assert_eq!(vd.active_version().name, "初始版本");
+    }
+
+    #[test]
+    fn switch_by_name() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let doc_v1 = sample_doc("v1");
+        vd.save_version("设计稿 V2", doc_v1, None);
+        vd.switch_to_by_name("初始版本").unwrap();
+        assert_eq!(vd.active_version().name, "初始版本");
+    }
+
+    #[test]
+    fn diff_versions() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0.clone());
+        let mut doc_v1 = doc_v0.clone();
+        doc_v1.pages[0].nodes[0].w = 200.0;
+        vd.save_version("V2", doc_v1, None);
+        let id_a = vd.versions[0].id.clone();
+        let id_b = vd.versions[1].id.clone();
+        let diff = vd.diff_versions(&id_a, &id_b).unwrap();
+        assert!(!diff.is_empty());
+    }
+
+    #[test]
+    fn diff_adjacent_first_is_empty() {
+        let doc_v0 = sample_doc("v0");
+        let vd = VersionedDocument::new("doc1", doc_v0);
+        let diff = vd.diff_adjacent(&vd.versions[0].id).unwrap();
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn delete_version() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let doc_v1 = sample_doc("v1");
+        vd.save_version("V2", doc_v1, None);
+        let first_id = vd.versions[0].id.clone();
+        let second_id = vd.versions[1].id.clone();
+        vd.switch_to(&second_id).unwrap();
+        vd.delete_version(&first_id).unwrap();
+        assert_eq!(vd.version_count(), 1);
+    }
+
+    #[test]
+    fn delete_active_version_fails() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let id = vd.active_version_id.clone();
+        assert!(vd.delete_version(&id).is_err());
+    }
+
+    #[test]
+    fn delete_last_version_fails() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let id = vd.versions[0].id.clone();
+        vd.save_version("V2", sample_doc("v2"), None);
+        let second_id = vd.versions[1].id.clone();
+        vd.switch_to(&second_id).unwrap();
+        vd.delete_version(&id).unwrap();
+        let active_id = vd.active_version_id.clone();
+        assert!(vd.delete_version(&active_id).is_err());
+    }
+
+    #[test]
+    fn rename_version() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let id = vd.versions[0].id.clone();
+        vd.rename_version(&id, "V1 初稿").unwrap();
+        assert_eq!(vd.versions[0].name, "V1 初稿");
+    }
+
+    #[test]
+    fn versioned_document_json_roundtrip() {
+        let doc_v0 = sample_doc("v0");
+        let vd = VersionedDocument::new("doc1", doc_v0);
+        let json = vd.to_json().unwrap();
+        let vd2 = VersionedDocument::from_json(&json).unwrap();
+        assert_eq!(vd2.document_id, "doc1");
+        assert_eq!(vd2.version_count(), 1);
+    }
+
+    #[test]
+    fn list_versions_order() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        vd.save_version("V2", sample_doc("v1"), None);
+        vd.save_version("V3", sample_doc("v2"), None);
+        let names: Vec<&str> = vd.list_versions().iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["初始版本", "V2", "V3"]);
     }
 }

@@ -621,3 +621,180 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 }
+
+// ── 内置场景模板预置 ──
+
+/// 返回 4 类内置场景模板：移动端应用、B 端后台、营销网站、小程序。
+pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
+    let templates = vec![
+        // 1. 移动端应用
+        DesignTemplate {
+            id: "builtin-mobile-app".into(),
+            name: "移动端应用".into(),
+            tags: vec!["mobile".into(), "app".into(), "iOS".into(), "Android".into()],
+            category: "mobile".into(),
+            document_json: serde_json::json!({
+                "pages": [{
+                    "id": "home", "name": "首页", "width": 390.0, "height": 844.0,
+                    "nodes": [
+                        {"id":"nav","kind":"rect","x":0.0,"y":0.0,"w":390.0,"h":88.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"title","kind":"text","x":16.0,"y":44.0,"w":200.0,"h":32.0,"text":"首页","fill":"#000000"},
+                        {"id":"banner","kind":"rect","x":16.0,"y":104.0,"w":358.0,"h":180.0,"fill":"#F5F5F5","stroke":"#E0E0E0"},
+                        {"id":"card1","kind":"rect","x":16.0,"y":300.0,"w":358.0,"h":100.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"card2","kind":"rect","x":16.0,"y":416.0,"w":358.0,"h":100.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"tab-bar","kind":"rect","x":0.0,"y":760.0,"w":390.0,"h":84.0,"fill":"#FFFFFF","stroke":"#E5E5E5"}
+                    ]
+                }]
+            }).to_string(),
+            created_at: default_timestamp(),
+        },
+        // 2. B 端后台
+        DesignTemplate {
+            id: "builtin-admin-dashboard".into(),
+            name: "B端后台".into(),
+            tags: vec!["admin".into(), "dashboard".into(), "B端".into(), "后台".into()],
+            category: "admin".into(),
+            document_json: serde_json::json!({
+                "pages": [{
+                    "id": "dashboard", "name": "仪表盘", "width": 1440.0, "height": 900.0,
+                    "nodes": [
+                        {"id":"sidebar","kind":"rect","x":0.0,"y":0.0,"w":240.0,"h":900.0,"fill":"#1A1A2E"},
+                        {"id":"logo","kind":"text","x":24.0,"y":24.0,"w":180.0,"h":32.0,"text":"Admin","fill":"#FFFFFF"},
+                        {"id":"nav-1","kind":"text","x":24.0,"y":80.0,"w":180.0,"h":24.0,"text":"仪表盘","fill":"#A0A0C0"},
+                        {"id":"nav-2","kind":"text","x":24.0,"y":120.0,"w":180.0,"h":24.0,"text":"用户管理","fill":"#A0A0C0"},
+                        {"id":"nav-3","kind":"text","x":24.0,"y":160.0,"w":180.0,"h":24.0,"text":"数据分析","fill":"#A0A0C0"},
+                        {"id":"header","kind":"rect","x":240.0,"y":0.0,"w":1200.0,"h":64.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"stat-card-1","kind":"rect","x":272.0,"y":96.0,"w":260.0,"h":120.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"stat-card-2","kind":"rect","x":556.0,"y":96.0,"w":260.0,"h":120.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"stat-card-3","kind":"rect","x":840.0,"y":96.0,"w":260.0,"h":120.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"stat-card-4","kind":"rect","x":1124.0,"y":96.0,"w":260.0,"h":120.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"chart-area","kind":"rect","x":272.0,"y":240.0,"w":544.0,"h":320.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"table-area","kind":"rect","x":840.0,"y":240.0,"w":544.0,"h":320.0,"fill":"#FFFFFF","stroke":"#E5E5E5"}
+                    ]
+                }]
+            }).to_string(),
+            created_at: default_timestamp(),
+        },
+        // 3. 营销网站
+        DesignTemplate {
+            id: "builtin-marketing-site".into(),
+            name: "营销网站".into(),
+            tags: vec!["website".into(), "marketing".into(), "landing".into(), "营销".into()],
+            category: "website".into(),
+            document_json: serde_json::json!({
+                "pages": [{
+                    "id": "landing", "name": "落地页", "width": 1440.0, "height": 900.0,
+                    "nodes": [
+                        {"id":"navbar","kind":"rect","x":0.0,"y":0.0,"w":1440.0,"h":72.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        {"id":"brand","kind":"text","x":64.0,"y":20.0,"w":160.0,"h":32.0,"text":"Brand","fill":"#000000"},
+                        {"id":"hero-section","kind":"rect","x":0.0,"y":72.0,"w":1440.0,"h":480.0,"fill":"#F8F9FA"},
+                        {"id":"hero-title","kind":"text","x":200.0,"y":200.0,"w":600.0,"h":48.0,"text":"让设计更简单","fill":"#1A1A2E"},
+                        {"id":"hero-subtitle","kind":"text","x":200.0,"y":264.0,"w":500.0,"h":32.0,"text":"AI 驱动的本地设计工具","fill":"#666666"},
+                        {"id":"cta-button","kind":"rect","x":200.0,"y":320.0,"w":160.0,"h":48.0,"fill":"#007AFF"},
+                        {"id":"cta-text","kind":"text","x":216.0,"y":328.0,"w":128.0,"h":32.0,"text":"立即开始","fill":"#FFFFFF"},
+                        {"id":"features-section","kind":"rect","x":0.0,"y":552.0,"w":1440.0,"h":348.0,"fill":"#FFFFFF"},
+                        {"id":"feature-1","kind":"rect","x":64.0,"y":592.0,"w":400.0,"h":240.0,"fill":"#F5F5F7","stroke":"#E5E5E5"},
+                        {"id":"feature-2","kind":"rect","x":520.0,"y":592.0,"w":400.0,"h":240.0,"fill":"#F5F5F7","stroke":"#E5E5E5"},
+                        {"id":"feature-3","kind":"rect","x":976.0,"y":592.0,"w":400.0,"h":240.0,"fill":"#F5F5F7","stroke":"#E5E5E5"}
+                    ]
+                }]
+            }).to_string(),
+            created_at: default_timestamp(),
+        },
+        // 4. 小程序
+        DesignTemplate {
+            id: "builtin-mini-program".into(),
+            name: "小程序".into(),
+            tags: vec!["mini-program".into(), "wechat".into(), "小程序".into(), "微信".into()],
+            category: "mini-program".into(),
+            document_json: serde_json::json!({
+                "pages": [{
+                    "id": "index", "name": "首页", "width": 375.0, "height": 812.0,
+                    "nodes": [
+                        {"id":"status-bar","kind":"rect","x":0.0,"y":0.0,"w":375.0,"h":44.0,"fill":"#FFFFFF"},
+                        {"id":"search-bar","kind":"rect","x":12.0,"y":52.0,"w":351.0,"h":36.0,"fill":"#F5F5F5","stroke":"#E5E5E5"},
+                        {"id":"swiper","kind":"rect","x":0.0,"y":100.0,"w":375.0,"h":160.0,"fill":"#E8E8E8"},
+                        {"id":"grid-nav","kind":"rect","x":12.0,"y":276.0,"w":351.0,"h":160.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"product-1","kind":"rect","x":12.0,"y":452.0,"w":168.0,"h":220.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"product-2","kind":"rect","x":195.0,"y":452.0,"w":168.0,"h":220.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"product-3","kind":"rect","x":12.0,"y":688.0,"w":168.0,"h":220.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"product-4","kind":"rect","x":195.0,"y":688.0,"w":168.0,"h":220.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
+                        {"id":"tab-bar","kind":"rect","x":0.0,"y":728.0,"w":375.0,"h":84.0,"fill":"#FFFFFF","stroke":"#E5E5E5"}
+                    ]
+                }]
+            }).to_string(),
+            created_at: default_timestamp(),
+        },
+    ];
+    tracing::info!(count = templates.len(), "builtin_scene_templates: 返回内置模板");
+    templates
+}
+
+impl EcosystemLink {
+    /// 将内置场景模板保存到 KB 目录（幂等，已存在则跳过）。
+    pub fn install_builtin_templates(&self) -> anyhow::Result<usize> {
+        let mut installed = 0usize;
+        for tmpl in builtin_scene_templates() {
+            let kb_dir = self.base_dir.join(EcosystemTarget::FusionKB.ipc_dir()).join("templates");
+            std::fs::create_dir_all(&kb_dir)?;
+            let file = kb_dir.join(format!("{}.json", tmpl.id));
+            if file.exists() {
+                tracing::debug!(id = %tmpl.id, "install_builtin_templates: 模板已存在，跳过");
+                continue;
+            }
+            let json = serde_json::to_string_pretty(&tmpl)?;
+            std::fs::write(&file, json)?;
+            installed += 1;
+            tracing::info!(id = %tmpl.id, name = %tmpl.name, "install_builtin_templates: 模板已安装");
+        }
+        Ok(installed)
+    }
+}
+
+#[cfg(test)]
+mod builtin_template_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_templates_has_four() {
+        let templates = builtin_scene_templates();
+        assert_eq!(templates.len(), 4);
+    }
+
+    #[test]
+    fn builtin_templates_categories() {
+        let templates = builtin_scene_templates();
+        let categories: Vec<&str> = templates.iter().map(|t| t.category.as_str()).collect();
+        assert!(categories.contains(&"mobile"));
+        assert!(categories.contains(&"admin"));
+        assert!(categories.contains(&"website"));
+        assert!(categories.contains(&"mini-program"));
+    }
+
+    #[test]
+    fn builtin_templates_valid_json() {
+        for tmpl in builtin_scene_templates() {
+            let v: serde_json::Value = serde_json::from_str(&tmpl.document_json).unwrap();
+            assert!(v.get("pages").is_some(), "模板 {} 缺少 pages", tmpl.id);
+        }
+    }
+
+    #[test]
+    fn install_builtin_templates_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = EcosystemLink::new(dir.path());
+        let count1 = link.install_builtin_templates().unwrap();
+        assert_eq!(count1, 4);
+        let count2 = link.install_builtin_templates().unwrap();
+        assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn search_builtin_by_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = EcosystemLink::new(dir.path());
+        link.install_builtin_templates().unwrap();
+        let mobile = link.search_templates("mobile").unwrap();
+        assert!(!mobile.is_empty());
+    }
+}

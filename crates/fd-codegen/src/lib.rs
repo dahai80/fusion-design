@@ -151,10 +151,10 @@ fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
         mods.push(format!(".offset(x: {}, y: {})", node.x as i32, node.y as i32));
     }
     if let Some(fill) = &node.style.fill {
-        mods.push(format!(".background(swiftUIColor(\"{}\"))", fill));
+        mods.push(format!(".background(swift_ui_color(\"{}\"))", fill));
     }
     if let Some(stroke) = &node.style.stroke {
-        mods.push(format!(".overlay(RoundedRectangle(cornerRadius: {}).stroke(swiftUIColor(\"{}\"), lineWidth: 1))",
+        mods.push(format!(".overlay(RoundedRectangle(cornerRadius: {}).stroke(swift_ui_color(\"{}\"), lineWidth: 1))",
             node.style.radius.unwrap_or(0.0) as i32, stroke));
     }
     if let Some(r) = node.style.radius {
@@ -223,7 +223,7 @@ fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
     }
 }
 
-fn swiftUIColor(color: &str) -> String {
+fn swift_ui_color(color: &str) -> String {
     if let Some(rest) = color.strip_prefix("token:") {
         format!("DesignTokens.{}", rest.replace('.', "_"))
     } else if let Some(hex) = color.strip_prefix('#') {
@@ -271,8 +271,8 @@ fn collect_token_exts_from_nodes(nodes: &[PenNode], seen: &mut HashMap<String, T
                 continue;
             }
             let color_expr = match key.as_str() {
-                "fill" => node.style.fill.as_deref().map(|f| swiftUIColor(f)),
-                "stroke" => node.style.stroke.as_deref().map(|f| swiftUIColor(f)),
+                "fill" => node.style.fill.as_deref().map(swift_ui_color),
+                "stroke" => node.style.stroke.as_deref().map(swift_ui_color),
                 _ => None,
             };
             if let Some(expr) = color_expr {

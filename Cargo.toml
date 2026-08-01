@@ -11,6 +11,7 @@ members = [
     # Callers: workspace root, cargo build/test. Affected API: new member fd-design-lint. Data schemas: none. User instruction: "现在开始实施" — Task #17
     "crates/fd-export",
     "crates/fd-design-lint",
+    "crates/fd-asset",
     "crates/fd-cli",
     # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
     "vendor/openpencil/crates/op-ai",
@@ -38,6 +39,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", 
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 base64 = "0.22"
+image = "0.25"
 
 # OpenPencil crate（path dep，vendored 子集）
 op-ai = { path = "vendor/openpencil/crates/op-ai" }

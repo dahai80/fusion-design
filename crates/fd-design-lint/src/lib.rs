@@ -499,7 +499,7 @@ impl Linter {
         let layout = &node.style.layout;
         match layout {
             LayoutMode::Flex(flex) => {
-                if flex.gap != 0.0 && node.style.design_token_refs.get("gap").is_none() {
+                if flex.gap != 0.0 && !node.style.design_token_refs.contains_key("gap") {
                     violations.push(LintViolation {
                         rule: LintRule::HardcodedSpacing,
                         node_id: node.id.clone(),
@@ -513,7 +513,7 @@ impl Linter {
                 }
                 let p = &flex.padding;
                 if (p.top != 0.0 || p.right != 0.0 || p.bottom != 0.0 || p.left != 0.0)
-                    && node.style.design_token_refs.get("padding").is_none()
+                    && !node.style.design_token_refs.contains_key("padding")
                 {
                     violations.push(LintViolation {
                         rule: LintRule::HardcodedSpacing,
@@ -529,7 +529,7 @@ impl Linter {
             }
             LayoutMode::Grid(grid) => {
                 if (grid.gap.0 != 0.0 || grid.gap.1 != 0.0)
-                    && node.style.design_token_refs.get("gap").is_none()
+                    && !node.style.design_token_refs.contains_key("gap")
                 {
                     violations.push(LintViolation {
                         rule: LintRule::HardcodedSpacing,
@@ -549,7 +549,7 @@ impl Linter {
 
     fn check_hardcoded_font_size(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
         if let Some(fs) = node.style.font_size {
-            if fs > 0.0 && node.style.design_token_refs.get("font_size").is_none() {
+            if fs > 0.0 && !node.style.design_token_refs.contains_key("font_size") {
                 violations.push(LintViolation {
                     rule: LintRule::HardcodedFontSize,
                     node_id: node.id.clone(),
@@ -710,7 +710,7 @@ fn apply_tokens_to_nodes(
     for node in nodes.iter_mut() {
         // fill → token ref
         if let Some(ref fill) = node.style.fill {
-            if node.style.design_token_refs.get("fill").is_none() {
+            if !node.style.design_token_refs.contains_key("fill") {
                 if let Some(token_name) = token_map.get(fill) {
                     let before = fill.clone();
                     node.style.design_token_refs.insert("fill".into(), token_name.clone());
@@ -728,7 +728,7 @@ fn apply_tokens_to_nodes(
 
         // stroke → token ref
         if let Some(ref stroke) = node.style.stroke {
-            if node.style.design_token_refs.get("stroke").is_none() {
+            if !node.style.design_token_refs.contains_key("stroke") {
                 if let Some(token_name) = token_map.get(stroke) {
                     let before = stroke.clone();
                     node.style.design_token_refs.insert("stroke".into(), token_name.clone());
@@ -747,7 +747,7 @@ fn apply_tokens_to_nodes(
         // gap → spacing token
         match &node.style.layout {
             LayoutMode::Flex(flex) => {
-                if flex.gap != 0.0 && node.style.design_token_refs.get("gap").is_none() {
+                if flex.gap != 0.0 && !node.style.design_token_refs.contains_key("gap") {
                     let key = format!("{}", flex.gap);
                     if let Some(token_name) = numeric_map.get(&key) {
                         let before = format!("{}", flex.gap);
@@ -765,7 +765,7 @@ fn apply_tokens_to_nodes(
             }
             LayoutMode::Grid(grid) => {
                 if (grid.gap.0 != 0.0 || grid.gap.1 != 0.0)
-                    && node.style.design_token_refs.get("gap").is_none()
+                    && !node.style.design_token_refs.contains_key("gap")
                 {
                     let key = format!("{}", grid.gap.0);
                     if let Some(token_name) = numeric_map.get(&key) {
@@ -787,7 +787,7 @@ fn apply_tokens_to_nodes(
 
         // font_size → typography token
         if let Some(fs) = node.style.font_size {
-            if fs > 0.0 && node.style.design_token_refs.get("font_size").is_none() {
+            if fs > 0.0 && !node.style.design_token_refs.contains_key("font_size") {
                 let key = format!("{}", fs);
                 if let Some(token_name) = numeric_map.get(&key) {
                     let before = format!("{}", fs);
@@ -805,7 +805,7 @@ fn apply_tokens_to_nodes(
         }
 
         // empty effects cleanup
-        if node.style.fill.as_ref().map_or(false, |v| v.trim().is_empty()) {
+        if node.style.fill.as_deref().is_some_and(|v| v.trim().is_empty()) {
             let before = node.style.fill.clone().unwrap_or_default();
             node.style.fill = None;
             result.fixes_applied += 1;
@@ -817,7 +817,7 @@ fn apply_tokens_to_nodes(
                 after: "None".into(),
             });
         }
-        if node.style.stroke.as_ref().map_or(false, |v| v.trim().is_empty()) {
+        if node.style.stroke.as_deref().is_some_and(|v| v.trim().is_empty()) {
             let before = node.style.stroke.clone().unwrap_or_default();
             node.style.stroke = None;
             result.fixes_applied += 1;

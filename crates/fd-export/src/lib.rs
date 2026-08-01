@@ -6,8 +6,7 @@
 //! Fusion-Design 导出 — PNG/SVG/PDF/HTML 批量导出。
 //!
 //! 对应 PRD 模块 5「原型交互与交付」的导出能力。
-//! MVP 阶段实现 HTML/SVG 静态导出 + JSON 工程文件导出；
-//! PNG/PDF 需调用系统渲染（wkhtmltopdf 或 WebKit），后续阶段补齐。
+//! 支持格式：HTML（静态）、SVG（矢量）、PNG（tiny-skia 光栅化）、PDF（结构化）、JSON（工程文件）。
 //!
 //! V0.2: 支持 PenDocument 直接导出（无需手动转 CanvasPage），
 //! 增强渲染：NodeStyle（fill/stroke/radius/opacity/font）→ SVG 属性。
@@ -275,7 +274,7 @@ fn render_element_svg(el: &CanvasElement) -> String {
             el.x, el.y, el.w, el.h,
             xml_escape(el.text.as_deref().unwrap_or(""))
         ),
-        "group" => format!("<!-- group -->\n"),
+        "group" => "<!-- group -->\n".to_string(),
         other => format!("<!-- 未知元素类型 {other} -->\n"),
     }
 }

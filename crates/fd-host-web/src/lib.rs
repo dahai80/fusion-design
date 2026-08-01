@@ -34,9 +34,11 @@ static SHELL: LazyLock<Mutex<Option<WebShellInner>>> =
 /// 宿主外壳（wasm_bindgen 公开类型）。
 #[wasm_bindgen]
 pub struct WebShell {
+    #[allow(dead_code)]
     inner: WebShellInner,
 }
 
+#[allow(dead_code)]
 struct WebShellInner {
     canvas_id: String,
     ready: bool,
@@ -206,18 +208,14 @@ fn send_to_host(kind: &str, payload: &serde_json::Value) {
         "payload": payload,
     });
     let json = serde_json::to_string(&msg).unwrap_or_default();
-    js_sys::global()
-        .dyn_ref::<web_sys::Window>()
-        .and_then(|w| {
-            // 尝试通过原生桥发送
-            let js_val = JsValue::from_str(&json);
-            let _ = js_sys::Reflect::set(
-                &w.navigator(),
-                &JsValue::from_str("__fd_host_post"),
-                &js_val,
-            );
-            Some(())
-        });
+    if let Some(w) = js_sys::global().dyn_ref::<web_sys::Window>() {
+        let js_val = JsValue::from_str(&json);
+        let _ = js_sys::Reflect::set(
+            &w.navigator(),
+            &JsValue::from_str("__fd_host_post"),
+            &js_val,
+        );
+    }
 }
 
 // ── Bridge 消息协议 ──
@@ -415,7 +413,7 @@ fn render_dom(doc_json: &str) {
             if !is_node_in_viewport(node, &container) {
                 continue;
             }
-            if let Some(el) = render_node_to_dom(&node, &document) {
+            if let Some(el) = render_node_to_dom(node, &document) {
                 fragment.append_child(&el).ok();
                 node_count += 1;
             }
@@ -518,9 +516,9 @@ fn viewport_cull_update() {
 
     // 添加新进入视口的节点
     if !ids_to_add.is_empty() {
-        let mut fragment = document.create_document_fragment();
+        let fragment = document.create_document_fragment();
         for page in &doc.pages {
-            add_nodes_by_ids(&page.nodes, &document, &ids_to_add, &mut fragment);
+            add_nodes_by_ids(&page.nodes, &document, &ids_to_add, &fragment);
         }
         container.append_child(&fragment).ok();
     }
@@ -664,8 +662,8 @@ fn render_node_to_dom(
         }
         fd_canvas_core::LayoutMode::Grid(params) => {
             style.push_str("display:grid;");
-            let cols: Vec<String> = params.columns.iter().map(|t| track_to_css(t)).collect();
-            let rows: Vec<String> = params.rows.iter().map(|t| track_to_css(t)).collect();
+            let cols: Vec<String> = params.columns.iter().map(track_to_css).collect();
+            let rows: Vec<String> = params.rows.iter().map(track_to_css).collect();
             style.push_str(&format!("grid-template-columns:{};", cols.join(" ")));
             style.push_str(&format!("grid-template-rows:{};", rows.join(" ")));
             style.push_str(&format!("gap:{}px {}px;", params.gap.0, params.gap.1));
@@ -1815,6 +1813,7 @@ fn update_node_size(el: &web_sys::Element, w: f32, h: f32) {
 }
 
 /// MutateNode 命令处理：更新节点位置/尺寸/样式。
+#[allow(clippy::too_many_arguments)]
 fn mutate_node(
     node_id: &str,
     x: Option<f32>, y: Option<f32>,
@@ -2185,7 +2184,7 @@ fn render_node(node: &fd_canvas_core::PenNode, ctx: &web_sys::CanvasRenderingCon
             ctx.begin_path();
             let cx = x + w / 2.0;
             let cy = y + h / 2.0;
-            let r = (w.min(h) / 2.0) as f64;
+            let r = w.min(h) / 2.0;
             let _ = ctx.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
             ctx.close_path();
             ctx.fill();

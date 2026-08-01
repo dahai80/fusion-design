@@ -253,8 +253,7 @@ pub async fn chat_stream(
                     while let Some(line_end) = buffer.find('\n') {
                         let line = buffer[..line_end].trim().to_string();
                         buffer = buffer[line_end + 1..].to_string();
-                        if line.starts_with("data: ") {
-                            let data = &line[6..];
+                        if let Some(data) = line.strip_prefix("data: ") {
                             if data == "[DONE]" {
                                 return Some((Ok(MlxStreamDelta { token: String::new(), finished: true }), (stream, buffer)));
                             }
@@ -514,6 +513,62 @@ pub enum SkillOutput {
     PartialEdit(String),
     /// 多方案对比（3 份文档）
     MultiVariants([PenDocument; 3]),
+    /// 设计规范文档（交互规范/组件规范/页面架构）
+    SpecDoc(SpecDocument),
+    /// 页面流程批量生成（多页连贯流程）
+    PageFlow(Vec<PenDocument>),
+}
+
+/// 设计规范文档。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecDocument {
+    /// 文档标题。
+    pub title: String,
+    /// 页面架构描述。
+    pub page_architecture: String,
+    /// 交互规范条目。
+    pub interaction_specs: Vec<InteractionSpec>,
+    /// 组件规范条目。
+    pub component_specs: Vec<ComponentSpec>,
+    /// 设计 Token 引用摘要。
+    pub token_summary: String,
+}
+
+/// 交互规范条目。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionSpec {
+    pub id: String,
+    pub element: String,
+    pub event: String,
+    pub behavior: String,
+    #[serde(default)]
+    pub animation: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// 组件规范条目。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentSpec {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub props: Vec<ComponentProp>,
+    #[serde(default)]
+    pub variants: Vec<String>,
+    #[serde(default)]
+    pub accessibility: Option<String>,
+}
+
+/// 组件属性。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentProp {
+    pub name: String,
+    pub prop_type: String,
+    #[serde(default)]
+    pub default_value: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// AI 设计 Skill trait — 每个 Skill 实现一个设计能力。
@@ -559,7 +614,7 @@ impl SkillRegistry {
         self.skills.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 注册内置 Skill（text-to-ui, image-to-ui, partial-edit, local-edit, sim-panel, multi-variants）。
+    /// 注册内置 Skill（text-to-ui, image-to-ui, partial-edit, local-edit, sim-panel, multi-variants, spec-doc, page-flow）。
     pub fn register_builtin(&mut self) {
         self.register(Box::new(TextToUiSkill));
         self.register(Box::new(ImageToUiSkill));
@@ -567,6 +622,8 @@ impl SkillRegistry {
         self.register(Box::new(LocalEditSkill));
         self.register(Box::new(SimPanelSkill));
         self.register(Box::new(MultiVariantsSkill));
+        self.register(Box::new(SpecDocSkill));
+        self.register(Box::new(PageFlowSkill));
     }
 }
 
@@ -820,6 +877,217 @@ fn parse_sim_panel_input(input: &str) -> (&str, &str) {
     let desc = parts[0];
     let name = parts.get(1).unwrap_or(&"SimPanel");
     (desc, name)
+}
+
+/// 设计规范文档生成 Skill：从 PenDocument JSON 生成交互规范/组件规范/页面架构文档。
+///
+/// input 格式: "pen_document_json|spec_title"
+struct SpecDocSkill;
+
+impl DesignSkill for SpecDocSkill {
+    fn id(&self) -> &str { "spec-doc" }
+    fn label(&self) -> &str { "设计规范文档" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        let (doc_json, title) = parse_spec_doc_input(input);
+        let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
+分析其页面结构和节点，输出严格 JSON：{\"title\":\"...\",\"page_architecture\":\"...\",\
+\"interaction_specs\":[...],\"component_specs\":[...],\"token_summary\":\"...\"}。\
+只输出 JSON，禁止额外文字。\n\n\
+interaction_specs 每项含：id, element, event, behavior, animation?, notes?\n\
+component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
+规范要求：\n\
+1. 为每个可交互节点（按钮/输入框/链接等）生成交互规范\n\
+2. 为每种组件类型生成组件规范，包含属性、变体、无障碍说明\n\
+3. 页面架构用文字描述布局层次和导航关系\n\
+4. token_summary 汇总设计系统 Token 使用情况".to_string();
+        if let Some(tokens) = ctx.token_prompt_fragment() {
+            sys.push_str("\n\n");
+            sys.push_str(&tokens);
+        }
+        let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
+        let resp = ctx.chat(&sys, &user, 4096)?;
+        let spec = parse_spec_doc_json(&resp, title)?;
+        Ok(SkillOutput::SpecDoc(spec))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let (doc_json, title) = parse_spec_doc_input(&input);
+            let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
+分析其页面结构和节点，输出严格 JSON：{\"title\":\"...\",\"page_architecture\":\"...\",\
+\"interaction_specs\":[...],\"component_specs\":[...],\"token_summary\":\"...\"}。\
+只输出 JSON，禁止额外文字。\n\n\
+interaction_specs 每项含：id, element, event, behavior, animation?, notes?\n\
+component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
+规范要求：\n\
+1. 为每个可交互节点（按钮/输入框/链接等）生成交互规范\n\
+2. 为每种组件类型生成组件规范，包含属性、变体、无障碍说明\n\
+3. 页面架构用文字描述布局层次和导航关系\n\
+4. token_summary 汇总设计系统 Token 使用情况".to_string();
+            if let Some(tokens) = ctx.token_prompt_fragment() {
+                sys.push_str("\n\n");
+                sys.push_str(&tokens);
+            }
+            let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
+            let resp = ctx.chat_async(&sys, &user, 4096).await?;
+            let spec = parse_spec_doc_json(&resp, title)?;
+            Ok(SkillOutput::SpecDoc(spec))
+        })
+    }
+}
+
+fn parse_spec_doc_input(input: &str) -> (&str, &str) {
+    let parts: Vec<&str> = input.splitn(2, '|').collect();
+    let doc_json = parts[0];
+    let title = parts.get(1).unwrap_or(&"设计规范文档");
+    (doc_json, title)
+}
+
+fn parse_spec_doc_json(json: &str, fallback_title: &str) -> anyhow::Result<SpecDocument> {
+    let cleaned = strip_code_fence(json);
+    let v: serde_json::Value = serde_json::from_str(cleaned)?;
+
+    let title = v.get("title").and_then(|t| t.as_str()).unwrap_or(fallback_title).to_string();
+    let page_architecture = v.get("page_architecture").and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let token_summary = v.get("token_summary").and_then(|t| t.as_str()).unwrap_or("").to_string();
+
+    let interaction_specs: Vec<InteractionSpec> = v.get("interaction_specs")
+        .and_then(|s| s.as_array())
+        .map(|arr| arr.iter().filter_map(|item| {
+            let obj = item.as_object()?;
+            Some(InteractionSpec {
+                id: obj.get("id")?.as_str()?.to_string(),
+                element: obj.get("element")?.as_str()?.to_string(),
+                event: obj.get("event")?.as_str()?.to_string(),
+                behavior: obj.get("behavior")?.as_str()?.to_string(),
+                animation: obj.get("animation").and_then(|a| a.as_str()).map(String::from),
+                notes: obj.get("notes").and_then(|n| n.as_str()).map(String::from),
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    let component_specs: Vec<ComponentSpec> = v.get("component_specs")
+        .and_then(|s| s.as_array())
+        .map(|arr| arr.iter().filter_map(|item| {
+            let obj = item.as_object()?;
+            Some(ComponentSpec {
+                id: obj.get("id")?.as_str()?.to_string(),
+                name: obj.get("name")?.as_str()?.to_string(),
+                kind: obj.get("kind")?.as_str()?.to_string(),
+                props: obj.get("props").and_then(|p| p.as_array())
+                    .map(|arr| arr.iter().filter_map(|p| {
+                        let o = p.as_object()?;
+                        Some(ComponentProp {
+                            name: o.get("name")?.as_str()?.to_string(),
+                            prop_type: o.get("prop_type")?.as_str()?.to_string(),
+                            default_value: o.get("default_value").and_then(|d| d.as_str()).map(String::from),
+                            description: o.get("description").and_then(|d| d.as_str()).map(String::from),
+                        })
+                    }).collect())
+                    .unwrap_or_default(),
+                variants: obj.get("variants").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                accessibility: obj.get("accessibility").and_then(|a| a.as_str()).map(String::from),
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    tracing::info!(
+        title = %title,
+        interactions = interaction_specs.len(),
+        components = component_specs.len(),
+        "parse_spec_doc_json: 规范文档解析完成"
+    );
+
+    Ok(SpecDocument {
+        title,
+        page_architecture,
+        interaction_specs,
+        component_specs,
+        token_summary,
+    })
+}
+
+/// 页面流程批量生成 Skill：生成完整页面流程序列（首页→列表→详情→弹窗），统一风格。
+///
+/// input 格式: "flow_desc|style_hint"
+/// flow_desc 示例: "电商应用:首页,商品列表,商品详情,购物车,结算"
+struct PageFlowSkill;
+
+impl DesignSkill for PageFlowSkill {
+    fn id(&self) -> &str { "page-flow" }
+    fn label(&self) -> &str { "页面流程生成" }
+
+    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
+        let (flow_desc, style_hint) = parse_page_flow_input(input);
+        let pages = parse_flow_pages(flow_desc);
+        let text_skill = TextToUiSkill;
+        let mut docs = Vec::with_capacity(pages.len());
+        for page_name in &pages {
+            let prompt = format!("{flow_desc}（页面：{page_name}，风格：{style_hint}）");
+            match text_skill.execute(ctx, &prompt)? {
+                SkillOutput::Document(d) => docs.push(d),
+                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            }
+        }
+        tracing::info!(count = docs.len(), "page-flow: 流程生成完成");
+        Ok(SkillOutput::PageFlow(docs))
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        ctx: SkillContext<'a>,
+        input: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let (flow_desc, style_hint) = parse_page_flow_input(&input);
+            let pages = parse_flow_pages(flow_desc);
+            let text_skill = TextToUiSkill;
+            let mut docs = Vec::with_capacity(pages.len());
+            for page_name in &pages {
+                let prompt = format!("{flow_desc}（页面：{page_name}，风格：{style_hint}）");
+                match text_skill.execute_async(ctx, prompt).await? {
+                    SkillOutput::Document(d) => docs.push(d),
+                    _ => anyhow::bail!("text-to-ui 返回非 Document"),
+                }
+            }
+            tracing::info!(count = docs.len(), "page-flow: 流程生成完成");
+            Ok(SkillOutput::PageFlow(docs))
+        })
+    }
+}
+
+fn parse_page_flow_input(input: &str) -> (&str, &str) {
+    let parts: Vec<&str> = input.splitn(2, '|').collect();
+    let flow_desc = parts[0];
+    let style = parts.get(1).unwrap_or(&"简约");
+    (flow_desc, style)
+}
+
+/// 从流程描述中提取页面列表。
+/// 格式: "应用名:页面1,页面2,页面3" 或直接 "页面1,页面2,页面3"
+fn parse_flow_pages(flow_desc: &str) -> Vec<String> {
+    let desc = flow_desc.trim();
+    if desc.is_empty() {
+        return vec!["首页".to_string()];
+    }
+    let pages_str = if desc.contains(':') {
+        desc.split_once(':').map(|(_, s)| s).unwrap_or("")
+    } else {
+        desc
+    };
+    let pages: Vec<String> = pages_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pages.is_empty() { vec!["首页".to_string()] } else { pages }
 }
 
 /// 多方案对比 Skill。
@@ -1113,6 +1381,62 @@ page 含 width/height（默认 480×640），nodes 列表每项 \
             .await?;
         Ok([v1, v2, v3])
     }
+
+    pub fn spec_doc(&self, doc_json: &str, title: &str) -> anyhow::Result<SpecDocument> {
+        let skill = SpecDocSkill;
+        let ctx = SkillContext {
+            client: &self.client,
+            model: &self.default_model,
+            design_system: None,
+        };
+        let input = format!("{doc_json}|{title}");
+        match skill.execute(&ctx, &input)? {
+            SkillOutput::SpecDoc(spec) => Ok(spec),
+            other => anyhow::bail!("spec-doc 返回非 SpecDoc: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    pub async fn spec_doc_async(&self, doc_json: &str, title: &str) -> anyhow::Result<SpecDocument> {
+        let skill = SpecDocSkill;
+        let ctx = SkillContext {
+            client: &self.client,
+            model: &self.default_model,
+            design_system: None,
+        };
+        let input = format!("{doc_json}|{title}");
+        match skill.execute_async(ctx, input).await? {
+            SkillOutput::SpecDoc(spec) => Ok(spec),
+            other => anyhow::bail!("spec-doc 返回非 SpecDoc: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    pub fn page_flow(&self, flow_desc: &str, style_hint: &str) -> anyhow::Result<Vec<PenDocument>> {
+        let skill = PageFlowSkill;
+        let ctx = SkillContext {
+            client: &self.client,
+            model: &self.default_model,
+            design_system: None,
+        };
+        let input = format!("{flow_desc}|{style_hint}");
+        match skill.execute(&ctx, &input)? {
+            SkillOutput::PageFlow(docs) => Ok(docs),
+            other => anyhow::bail!("page-flow 返回非 PageFlow: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    pub async fn page_flow_async(&self, flow_desc: &str, style_hint: &str) -> anyhow::Result<Vec<PenDocument>> {
+        let skill = PageFlowSkill;
+        let ctx = SkillContext {
+            client: &self.client,
+            model: &self.default_model,
+            design_system: None,
+        };
+        let input = format!("{flow_desc}|{style_hint}");
+        match skill.execute_async(ctx, input).await? {
+            SkillOutput::PageFlow(docs) => Ok(docs),
+            other => anyhow::bail!("page-flow 返回非 PageFlow: {:?}", std::mem::discriminant(&other)),
+        }
+    }
 }
 
 /// 解析 fusion-mlx 返回的 UI JSON 为 PenDocument。
@@ -1179,9 +1503,11 @@ fn parse_node_with_depth(item: &serde_json::Value, idx: usize, depth: usize) -> 
     let text = o.get("text").and_then(|x| x.as_str()).map(String::from);
     let fill = o.get("fill").and_then(|x| x.as_str()).map(String::from);
     let stroke = o.get("stroke").and_then(|x| x.as_str()).map(String::from);
-    let mut style = fd_canvas_core::NodeStyle::default();
-    style.fill = fill;
-    style.stroke = stroke;
+    let style = fd_canvas_core::NodeStyle {
+        fill,
+        stroke,
+        ..Default::default()
+    };
     let children_val = o.get("children");
     let children = match children_val {
         Some(cv) => parse_nodes_with_depth(cv, depth + 1)?,
@@ -1371,7 +1697,7 @@ fn html_element_to_node(
     }
 
     // Inline style overrides defaults
-    let parsed_style = el.attr("style").map(|s| parse_inline_style(&s));
+    let parsed_style = el.attr("style").map(parse_inline_style);
     if let Some(ref parsed) = parsed_style {
         if let Some(v) = parsed.get("width") {
             w = parse_px(v).unwrap_or(w);
@@ -1407,7 +1733,7 @@ fn html_element_to_node(
     // class → token hint (overrides tag default, but not inline style)
     if let Some(class) = el.attr("class") {
         if let Some(token_fill) = class_to_fill_hint(class) {
-            let has_bg = parsed_style.as_ref().map_or(false, |p| {
+            let has_bg = parsed_style.as_ref().is_some_and(|p| {
                 p.contains_key("background") || p.contains_key("background-color")
             });
             if !has_bg {
@@ -1608,17 +1934,19 @@ mod skills_tests {
     }
 
     #[test]
-    fn skill_registry_builtin_registers_six() {
+    fn skill_registry_builtin_registers_eight() {
         let mut reg = SkillRegistry::new();
         reg.register_builtin();
         let ids = reg.list();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(ids.len(), 8);
         assert!(ids.contains(&"text-to-ui"));
         assert!(ids.contains(&"image-to-ui"));
         assert!(ids.contains(&"partial-edit"));
         assert!(ids.contains(&"local-edit"));
         assert!(ids.contains(&"sim-panel"));
         assert!(ids.contains(&"multi-variants"));
+        assert!(ids.contains(&"spec-doc"));
+        assert!(ids.contains(&"page-flow"));
     }
 
     #[test]
@@ -1712,6 +2040,87 @@ mod skills_tests {
         let (desc, name) = parse_sim_panel_input("速度:0-100,加速度:0-50");
         assert_eq!(desc, "速度:0-100,加速度:0-50");
         assert_eq!(name, "SimPanel");
+    }
+
+    #[test]
+    fn spec_doc_skill_id_and_label() {
+        let skill = SpecDocSkill;
+        assert_eq!(skill.id(), "spec-doc");
+        assert_eq!(skill.label(), "设计规范文档");
+    }
+
+    #[test]
+    fn parse_spec_doc_input_with_title() {
+        let (doc, title) = parse_spec_doc_input("{\"pages\":[]}|登录页规范");
+        assert_eq!(doc, "{\"pages\":[]}");
+        assert_eq!(title, "登录页规范");
+    }
+
+    #[test]
+    fn parse_spec_doc_input_default_title() {
+        let (doc, title) = parse_spec_doc_input("{\"pages\":[]}");
+        assert_eq!(doc, "{\"pages\":[]}");
+        assert_eq!(title, "设计规范文档");
+    }
+
+    #[test]
+    fn parse_spec_doc_json_full() {
+        let json = r#"{"title":"登录页规范","page_architecture":"单页居中布局","interaction_specs":[{"id":"i1","element":"登录按钮","event":"click","behavior":"提交表单","animation":"fade-in","notes":"防重复点击"}],"component_specs":[{"id":"c1","name":"LoginButton","kind":"button","props":[{"name":"disabled","prop_type":"boolean","default_value":"false","description":"是否禁用"}],"variants":["primary","ghost"],"accessibility":"aria-label=登录"}],"token_summary":"主色蓝 #007AFF，圆角 8px"}"#;
+        let spec = parse_spec_doc_json(json, "fallback").unwrap();
+        assert_eq!(spec.title, "登录页规范");
+        assert_eq!(spec.interaction_specs.len(), 1);
+        assert_eq!(spec.interaction_specs[0].element, "登录按钮");
+        assert_eq!(spec.component_specs.len(), 1);
+        assert_eq!(spec.component_specs[0].props.len(), 1);
+        assert_eq!(spec.component_specs[0].props[0].name, "disabled");
+    }
+
+    #[test]
+    fn parse_spec_doc_json_minimal() {
+        let json = "{}";
+        let spec = parse_spec_doc_json(json, "默认标题").unwrap();
+        assert_eq!(spec.title, "默认标题");
+        assert!(spec.interaction_specs.is_empty());
+        assert!(spec.component_specs.is_empty());
+    }
+
+    #[test]
+    fn page_flow_skill_id_and_label() {
+        let skill = PageFlowSkill;
+        assert_eq!(skill.id(), "page-flow");
+        assert_eq!(skill.label(), "页面流程生成");
+    }
+
+    #[test]
+    fn parse_page_flow_input_with_style() {
+        let (desc, style) = parse_page_flow_input("电商:首页,列表,详情|Material");
+        assert_eq!(desc, "电商:首页,列表,详情");
+        assert_eq!(style, "Material");
+    }
+
+    #[test]
+    fn parse_page_flow_input_default_style() {
+        let (desc, style) = parse_page_flow_input("电商:首页,列表,详情");
+        assert_eq!(desc, "电商:首页,列表,详情");
+        assert_eq!(style, "简约");
+    }
+
+    #[test]
+    fn parse_flow_pages_with_colon() {
+        let pages = parse_flow_pages("电商:首页,商品列表,商品详情,购物车,结算");
+        assert_eq!(pages, vec!["首页", "商品列表", "商品详情", "购物车", "结算"]);
+    }
+
+    #[test]
+    fn parse_flow_pages_without_colon() {
+        let pages = parse_flow_pages("首页,列表,详情");
+        assert_eq!(pages, vec!["首页", "列表", "详情"]);
+    }
+
+    #[test]
+    fn parse_flow_pages_empty() {
+        let pages = parse_flow_pages("");
+        assert_eq!(pages, vec!["首页"]);
     }
 }
 
