@@ -41,16 +41,6 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 13. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison, 11 tests
 14. **Built-in scene templates** — 4 preset categories (mobile app / admin dashboard / marketing site / mini program), one-click install
 
-## 📚 Documentation
-
-| Doc | Content |
-|-----|---------|
-| [PRD.md](PRD.md) | Full PRD V0.1 MVP — positioning, feature modules, architecture, performance targets, iteration roadmap |
-| [REFACTOR_PLAN.md](REFACTOR_PLAN.md) | V0.2→V1.0 refactor plan — 5 phases, 14 weeks + gap analysis |
-| [docs/OPENS_SOURCE_REFERENCES.md](docs/OPENS_SOURCE_REFERENCES.md) | Open-source software reference list (with local status verification + selection decision matrix) |
-| [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) | Integration plan (OpenPencil trimming + fusion-mlx bridge + phased implementation) |
-| [README_CN.md](README_CN.md) | Chinese documentation |
-
 ## 🗂️ Project Structure (V0.2 — 11 crates + vendored op-ai, 324 tests)
 
 ```

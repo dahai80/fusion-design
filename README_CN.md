@@ -41,16 +41,6 @@ Fusion-Design 是 Fusion-MLX「一核九端」产品矩阵的旗舰主力之一�
 13. **命名版本管理** — 版本快照/切换/重命名/删除/相邻 diff 对比，11 项测试
 14. **内置场景模板** — 4 类预设（移动端/B 端后台/营销网站/小程序），一键安装
 
-## 📚 文档
-
-| 文档 | 内容 |
-|------|------|
-| [PRD.md](PRD.md) | 完整 PRD V0.1 MVP — 定位、功能模块、架构、性能指标、迭代路线 |
-| [REFACTOR_PLAN.md](REFACTOR_PLAN.md) | V0.2→V1.0 重构方案 — 5 个阶段 14 周计划 + gap 分析 |
-| [docs/OPENS_SOURCE_REFERENCES.md](docs/OPENS_SOURCE_REFERENCES.md) | 开源软件参考清单（含本地状态核实 + 选型决策矩阵） |
-| [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) | 集成方案（OpenPencil 底座裁剪 + fusion-mlx 桥接 + 分阶段实施） |
-| [README.md](README.md) | 英文文档（默认） |
-
 ## 🗂️ 项目结构（V0.2 — 11 个 crate + vendored op-ai，324 个测试）
 
 ```
