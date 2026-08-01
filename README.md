@@ -2,7 +2,7 @@
 
 > Mac 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**Status**: V0.2 — 10 crates + vendored op-ai, 275 tests pass, WASM build verified.
+**Status**: V0.2 — 10 crates + vendored op-ai, 276 tests pass, WASM build verified.
 
 ## 📋 Overview
 
@@ -45,7 +45,7 @@
 | [docs/OPENS_SOURCE_REFERENCES.md](docs/OPENS_SOURCE_REFERENCES.md) | 开源软件参考清单（含本地状态核实 + 选型决策矩阵） |
 | [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) | 集成方案（OpenPencil 底座裁剪 + fusion-mlx 桥接 + 分阶段实施） |
 
-## 🗂️ Project structure (V0.2 — 10 crates + vendored op-ai, 275 tests)
+## 🗂️ Project structure (V0.2 — 10 crates + vendored op-ai, 276 tests)
 
 ```
 fusion-design/

@@ -37,6 +37,9 @@ pub enum Command {
         input: PathBuf,
         #[arg(long, value_enum)]
         format: ExportFormatArg,
+        /// 多格式组合导出，逗号分隔（如 html,svg,json），优先于 --format
+        #[arg(long, value_delimiter = ',')]
+        formats: Option<Vec<ExportFormatArg>>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -206,6 +209,8 @@ pub enum ExportFormatArg {
     Html,
     Svg,
     Json,
+    Png,
+    Pdf,
 }
 
 impl From<ExportFormatArg> for fd_export::ExportFormat {
@@ -214,6 +219,8 @@ impl From<ExportFormatArg> for fd_export::ExportFormat {
             ExportFormatArg::Html => Self::Html,
             ExportFormatArg::Svg => Self::Svg,
             ExportFormatArg::Json => Self::Json,
+            ExportFormatArg::Png => Self::Png,
+            ExportFormatArg::Pdf => Self::Pdf,
         }
     }
 }
@@ -284,11 +291,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::ExportBatch { input, format, out } => {
+        Command::ExportBatch { input, format, formats, out } => {
             let json = std::fs::read_to_string(&input)?;
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
-            let files = export::Exporter::from_pen_document(&doc, format.into(), &out)?;
-            println!("已批量导出 {} 个页面到 {out:?}", files.len());
+            let fmt_list: Vec<fd_export::ExportFormat> = if let Some(ref fmts) = formats {
+                fmts.iter().map(|f| f.clone().into()).collect()
+            } else {
+                vec![format.into()]
+            };
+            let mut total = 0;
+            for fmt in fmt_list {
+                let files = export::Exporter::from_pen_document(&doc, fmt, &out)?;
+                tracing::info!(format = ?fmt, count = files.len(), "批量导出完成");
+                total += files.len();
+            }
+            println!("已批量导出 {} 个页面到 {out:?}", total);
             Ok(())
         }
         Command::Generate { prompt, page, model, endpoint, out, ipc_base, stream } => {

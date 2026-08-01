@@ -155,15 +155,19 @@ impl Exporter {
         std::fs::create_dir_all(out_dir)?;
         let filename = format!("{}.{}", sanitize_filename(&page.name), format.extension());
         let file = out_dir.join(&filename);
-        let content = match format {
-            ExportFormat::Html => render_html(page),
-            ExportFormat::Svg => render_svg(page),
-            ExportFormat::Json => serde_json::to_string_pretty(page)?,
-            ExportFormat::Png | ExportFormat::Pdf => {
-                anyhow::bail!("{:?} 导出 MVP 阶段未实现，需系统渲染", format);
+        match format {
+            ExportFormat::Png => render_png(page, &file)?,
+            ExportFormat::Pdf => render_pdf(page, &file)?,
+            _ => {
+                let content = match format {
+                    ExportFormat::Html => render_html(page),
+                    ExportFormat::Svg => render_svg(page),
+                    ExportFormat::Json => serde_json::to_string_pretty(page)?,
+                    _ => unreachable!(),
+                };
+                std::fs::write(&file, content)?;
             }
-        };
-        std::fs::write(&file, content)?;
+        }
         tracing::info!(?file, format = format.extension(), "页面已导出");
         Ok(file)
     }
@@ -283,6 +287,70 @@ fn xml_escape(s: &str) -> String {
      .replace('"', "&quot;")
 }
 
+fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
+    let svg_str = render_svg(page);
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_str(&svg_str, &opt)?;
+    let pixmap_size = tree.size();
+    let width = pixmap_size.width() as u32;
+    let height = pixmap_size.height() as u32;
+    if width == 0 || height == 0 {
+        anyhow::bail!("页面尺寸为零，无法渲染 PNG");
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| anyhow::anyhow!("无法创建 pixmap ({}x{})", width, height))?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    let png_data = pixmap.encode_png()?;
+    std::fs::write(file, &png_data)?;
+    tracing::info!(?file, "PNG 已导出");
+    Ok(())
+}
+
+fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
+    let width_mm = page.width * 0.264583;
+    let height_mm = page.height * 0.264583;
+
+    let mut ops = Vec::new();
+    for el in &page.elements {
+        if el.kind == "text" {
+            let text = el.text.as_deref().unwrap_or("");
+            let fs = el.font_size.unwrap_or(12.0);
+            ops.push(printpdf::ops::Op::StartTextSection);
+            ops.push(printpdf::ops::Op::SetFontSizeBuiltinFont {
+                size: printpdf::Pt(fs),
+                font: printpdf::BuiltinFont::Helvetica,
+            });
+            ops.push(printpdf::ops::Op::SetTextCursor {
+                pos: printpdf::graphics::Point::new(
+                    printpdf::Mm(el.x * 0.264583),
+                    printpdf::Mm(height_mm - el.y * 0.264583 - fs * 0.264583),
+                ),
+            });
+            ops.push(printpdf::ops::Op::WriteTextBuiltinFont {
+                items: vec![printpdf::text::TextItem::Text(text.to_string())],
+                font: printpdf::BuiltinFont::Helvetica,
+            });
+            ops.push(printpdf::ops::Op::EndTextSection);
+        }
+    }
+
+    let pdf_page = printpdf::ops::PdfPage::new(
+        printpdf::Mm(width_mm),
+        printpdf::Mm(height_mm),
+        ops,
+    );
+
+    let mut doc = printpdf::PdfDocument::new(&page.name);
+    doc.with_pages(vec![pdf_page]);
+
+    let mut warnings = Vec::new();
+    let opts = printpdf::serialize::PdfSaveOptions::default();
+    let pdf_data = doc.save(&opts, &mut warnings);
+    std::fs::write(file, &pdf_data)?;
+    tracing::info!(?file, warnings = warnings.len(), "PDF 已导出");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,11 +426,21 @@ mod tests {
     }
 
     #[test]
-    fn export_png_not_implemented() {
+    fn export_png_writes_file() {
         let tmp = tempdir().unwrap();
         let page = sample_page();
-        let err = Exporter::export_page(&page, ExportFormat::Pdf, tmp.path()).unwrap_err();
-        assert!(err.to_string().contains("未实现"));
+        let file = Exporter::export_page(&page, ExportFormat::Png, tmp.path()).unwrap();
+        let data = std::fs::read(&file).unwrap();
+        assert!(data.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "PNG magic bytes");
+    }
+
+    #[test]
+    fn export_pdf_writes_file() {
+        let tmp = tempdir().unwrap();
+        let page = sample_page();
+        let file = Exporter::export_page(&page, ExportFormat::Pdf, tmp.path()).unwrap();
+        let data = std::fs::read(&file).unwrap();
+        assert!(data.starts_with(b"%PDF"), "PDF magic bytes");
     }
 
     #[test]
