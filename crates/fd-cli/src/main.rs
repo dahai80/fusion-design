@@ -55,6 +55,9 @@ pub enum Command {
         /// 通过 fd-ecosystem IPC 发送结果（而非直接输出）
         #[arg(long)]
         ipc_base: Option<PathBuf>,
+        /// 流式输出 SSE token（供 GUI 管道读取）
+        #[arg(long)]
+        stream: bool,
     },
     /// 校验前端静态资源目录
     CheckFrontend {
@@ -88,6 +91,12 @@ pub enum Command {
         design_system: Option<String>,
         #[arg(long, value_enum)]
         rules: Option<Vec<LintRuleArg>>,
+        /// 自动修复可修复的违规（Token 引用、空值清理、自动命名）
+        #[arg(long)]
+        fix: bool,
+        /// 仅预览修复，不写入文件
+        #[arg(long, requires = "fix")]
+        dry_run: bool,
     },
     /// 代码导出：PenDocument → HTML / React+Tailwind / Tailwind-only
     Codegen {
@@ -99,6 +108,35 @@ pub enum Command {
         component: String,
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// 撤销：返回上一步 PenDocument 快照
+    Undo {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// 重做：返回下一步 PenDocument 快照
+    Redo {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// 探测 fusion-mlx 健康状态
+    Health {
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        endpoint: String,
+    },
+    /// 比较两个 PenDocument 的差异
+    Diff {
+        #[arg(long)]
+        old: PathBuf,
+        #[arg(long)]
+        new: PathBuf,
+    },
+    /// 输出指定主题模式的 CSS Custom Properties
+    Theme {
+        #[arg(long, default_value = "apple-hig")]
+        design_system: String,
+        #[arg(long, value_enum, default_value = "light")]
+        mode: ThemeModeArg,
     },
 }
 
@@ -180,6 +218,21 @@ impl From<ExportFormatArg> for fd_export::ExportFormat {
     }
 }
 
+#[derive(Clone, clap::ValueEnum)]
+pub enum ThemeModeArg {
+    Light,
+    Dark,
+}
+
+impl From<ThemeModeArg> for fd_design_system::Theme {
+    fn from(v: ThemeModeArg) -> Self {
+        match v {
+            ThemeModeArg::Light => Self::Light,
+            ThemeModeArg::Dark => Self::Dark,
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
@@ -238,8 +291,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("已批量导出 {} 个页面到 {out:?}", files.len());
             Ok(())
         }
-        Command::Generate { prompt, page, model, endpoint, out, ipc_base } => {
+        Command::Generate { prompt, page, model, endpoint, out, ipc_base, stream } => {
             let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            if stream {
+                let model_owned = model.clone();
+                let sys = "你是 fusion-design UI 生成器。根据用户描述，\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
+                let user_msg = format!("描述：{prompt}\n生成页面「{page}」对应的 UI 布局。");
+                let s = fd_ai_adapter::chat_stream(
+                    client,
+                    model_owned,
+                    sys.to_string(),
+                    user_msg,
+                    2048,
+                ).await;
+                use futures::StreamExt;
+                futures::pin_mut!(s);
+                while let Some(delta) = s.next().await {
+                    match delta {
+                        Ok(d) if d.finished => break,
+                        Ok(d) => print!("{}", d.token),
+                        Err(e) => eprintln!("流式输出错误: {e}"),
+                    }
+                }
+                println!();
+                return Ok(());
+            }
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let doc = skills.text_to_ui_async(&prompt, &page).await?;
             let json = serde_json::to_string_pretty(&doc)?;
@@ -311,9 +388,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{}", system.to_css_custom_properties());
             Ok(())
         }
-        Command::Lint { input, design_system, rules } => {
+        Command::Lint { input, design_system, rules, fix, dry_run } => {
             let json = std::fs::read_to_string(&input)?;
-            let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
+            let mut doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
 
             let mut linter = match rules {
                 Some(r) => fd_design_lint::Linter::with_rules(r.into_iter().map(Into::into).collect()),
@@ -331,6 +408,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let result = linter.lint(&doc);
             let output = serde_json::to_string_pretty(&result)?;
             println!("{output}");
+
+            if fix {
+                let fix_result = linter.auto_fix(&mut doc);
+                let fix_output = serde_json::to_string_pretty(&fix_result)?;
+                println!("{fix_output}");
+
+                if !dry_run {
+                    let fixed_json = serde_json::to_string_pretty(&doc)?;
+                    std::fs::write(&input, &fixed_json)?;
+                    eprintln!("修复已写入: {}", input.display());
+                } else {
+                    eprintln!("dry-run 模式: 修复未写入文件");
+                }
+            }
+
             Ok(())
         }
         Command::Codegen { input, target, component, out } => {
@@ -373,6 +465,78 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 None => println!("{code}"),
             }
+            Ok(())
+        }
+        Command::Undo { input } => {
+            let history_path = input.with_extension("history.json");
+            if !history_path.exists() {
+                anyhow::bail!("历史文件不存在: {history_path:?}");
+            }
+            let hist_json = std::fs::read_to_string(&history_path)?;
+            let mut stack: fd_canvas_core::UndoRedoStack = serde_json::from_str(&hist_json)
+                .map_err(|e| anyhow::anyhow!("历史文件解析失败: {e}"))?;
+            match stack.undo() {
+                Some(doc) => {
+                    let out_json = serde_json::to_string_pretty(&doc)?;
+                    let hist_out = serde_json::to_string_pretty(&stack)?;
+                    std::fs::write(&history_path, &hist_out)?;
+                    println!("{out_json}");
+                    tracing::info!("undo: 成功回退");
+                    Ok(())
+                }
+                None => anyhow::bail!("无法撤销：已到最早状态"),
+            }
+        }
+        Command::Redo { input } => {
+            let history_path = input.with_extension("history.json");
+            if !history_path.exists() {
+                anyhow::bail!("历史文件不存在: {history_path:?}");
+            }
+            let hist_json = std::fs::read_to_string(&history_path)?;
+            let mut stack: fd_canvas_core::UndoRedoStack = serde_json::from_str(&hist_json)
+                .map_err(|e| anyhow::anyhow!("历史文件解析失败: {e}"))?;
+            match stack.redo() {
+                Some(doc) => {
+                    let out_json = serde_json::to_string_pretty(&doc)?;
+                    let hist_out = serde_json::to_string_pretty(&stack)?;
+                    std::fs::write(&history_path, &hist_out)?;
+                    println!("{out_json}");
+                    tracing::info!("redo: 成功重做");
+                    Ok(())
+                }
+                None => anyhow::bail!("无法重做：已到最新状态"),
+            }
+        }
+        Command::Health { endpoint } => {
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let status = client.health_check().await;
+            let output = match status {
+                Ok(s) => serde_json::to_string_pretty(&s)?,
+                Err(e) => serde_json::to_string_pretty(&serde_json::json!({
+                    "available": false,
+                    "error": e.to_string()
+                }))?,
+            };
+            println!("{output}");
+            Ok(())
+        }
+        Command::Diff { old, new } => {
+            let old_json = std::fs::read_to_string(&old)?;
+            let new_json = std::fs::read_to_string(&new)?;
+            let old_doc: fd_canvas_core::PenDocument = serde_json::from_str(&old_json)?;
+            let new_doc: fd_canvas_core::PenDocument = serde_json::from_str(&new_json)?;
+            let diff = old_doc.diff(&new_doc);
+            let output = serde_json::to_string_pretty(&diff)?;
+            println!("{output}");
+            Ok(())
+        }
+        Command::Theme { design_system, mode } => {
+            let mut reg = fd_design_system::DesignSystemRegistry::new();
+            reg.register_builtin();
+            let system = reg.get(&design_system)
+                .ok_or_else(|| anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list()))?;
+            let css = system.to_css_custom_properties_for_theme(mode.into());
+            println!("{css}");
             Ok(())
         }
     }

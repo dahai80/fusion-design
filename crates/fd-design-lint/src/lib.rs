@@ -646,6 +646,10 @@ fn rects_overlap(a: &PenNode, b: &PenNode) -> bool {
     a.x < b_x2 && b.x < a_x2 && a.y < b_y2 && b.y < a_y2
 }
 
+// Callers: fd-cli (lint --fix), auto_fix() delegates to apply_tokens_to_document
+// Affected API: FixResult, FixDetail, apply_tokens_to_document(), Linter::auto_fix()
+// Data schemas: PenDocument mutable → FixResult with per-fix details; spacing/typography token maps
+// User instruction: "按照方案和prd方案全面落地" — Phase 4 Task 4.1-4.2
 fn build_token_map(system: &DesignSystem) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for token in &system.tokens {
@@ -657,6 +661,238 @@ fn build_token_map(system: &DesignSystem) -> HashMap<String, String> {
         map.insert(css_val, token.name.clone());
     }
     map
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixResult {
+    pub fixes_applied: usize,
+    pub fixes_skipped: usize,
+    pub details: Vec<FixDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixDetail {
+    pub rule: LintRule,
+    pub node_id: String,
+    pub action: String,
+    pub before: String,
+    pub after: String,
+}
+
+pub fn apply_tokens_to_document(doc: &mut PenDocument, system: &DesignSystem) -> FixResult {
+    info!("apply_tokens_to_document: 开始应用 Token 到 PenDocument");
+    let token_map = build_token_map(system);
+    let numeric_map = build_numeric_token_map(system);
+    let mut result = FixResult {
+        fixes_applied: 0,
+        fixes_skipped: 0,
+        details: vec![],
+    };
+
+    for page in &mut doc.pages {
+        apply_tokens_to_nodes(&mut page.nodes, &token_map, &numeric_map, &mut result);
+    }
+
+    info!(
+        "apply_tokens_to_document: 完成, applied={}, skipped={}",
+        result.fixes_applied, result.fixes_skipped
+    );
+    result
+}
+
+fn apply_tokens_to_nodes(
+    nodes: &mut [PenNode],
+    token_map: &HashMap<String, String>,
+    numeric_map: &HashMap<String, String>,
+    result: &mut FixResult,
+) {
+    use fd_canvas_core::LayoutMode;
+    for node in nodes.iter_mut() {
+        // fill → token ref
+        if let Some(ref fill) = node.style.fill {
+            if node.style.design_token_refs.get("fill").is_none() {
+                if let Some(token_name) = token_map.get(fill) {
+                    let before = fill.clone();
+                    node.style.design_token_refs.insert("fill".into(), token_name.clone());
+                    result.fixes_applied += 1;
+                    result.details.push(FixDetail {
+                        rule: LintRule::TokenInconsistency,
+                        node_id: node.id.clone(),
+                        action: "fill→token_ref".into(),
+                        before,
+                        after: token_name.clone(),
+                    });
+                }
+            }
+        }
+
+        // stroke → token ref
+        if let Some(ref stroke) = node.style.stroke {
+            if node.style.design_token_refs.get("stroke").is_none() {
+                if let Some(token_name) = token_map.get(stroke) {
+                    let before = stroke.clone();
+                    node.style.design_token_refs.insert("stroke".into(), token_name.clone());
+                    result.fixes_applied += 1;
+                    result.details.push(FixDetail {
+                        rule: LintRule::TokenInconsistency,
+                        node_id: node.id.clone(),
+                        action: "stroke→token_ref".into(),
+                        before,
+                        after: token_name.clone(),
+                    });
+                }
+            }
+        }
+
+        // gap → spacing token
+        match &node.style.layout {
+            LayoutMode::Flex(flex) => {
+                if flex.gap != 0.0 && node.style.design_token_refs.get("gap").is_none() {
+                    let key = format!("{}", flex.gap);
+                    if let Some(token_name) = numeric_map.get(&key) {
+                        let before = format!("{}", flex.gap);
+                        node.style.design_token_refs.insert("gap".into(), token_name.clone());
+                        result.fixes_applied += 1;
+                        result.details.push(FixDetail {
+                            rule: LintRule::HardcodedSpacing,
+                            node_id: node.id.clone(),
+                            action: "gap→token_ref".into(),
+                            before,
+                            after: token_name.clone(),
+                        });
+                    }
+                }
+            }
+            LayoutMode::Grid(grid) => {
+                if (grid.gap.0 != 0.0 || grid.gap.1 != 0.0)
+                    && node.style.design_token_refs.get("gap").is_none()
+                {
+                    let key = format!("{}", grid.gap.0);
+                    if let Some(token_name) = numeric_map.get(&key) {
+                        let before = format!("({}, {})", grid.gap.0, grid.gap.1);
+                        node.style.design_token_refs.insert("gap".into(), token_name.clone());
+                        result.fixes_applied += 1;
+                        result.details.push(FixDetail {
+                            rule: LintRule::HardcodedSpacing,
+                            node_id: node.id.clone(),
+                            action: "grid_gap→token_ref".into(),
+                            before,
+                            after: token_name.clone(),
+                        });
+                    }
+                }
+            }
+            LayoutMode::Free => {}
+        }
+
+        // font_size → typography token
+        if let Some(fs) = node.style.font_size {
+            if fs > 0.0 && node.style.design_token_refs.get("font_size").is_none() {
+                let key = format!("{}", fs);
+                if let Some(token_name) = numeric_map.get(&key) {
+                    let before = format!("{}", fs);
+                    node.style.design_token_refs.insert("font_size".into(), token_name.clone());
+                    result.fixes_applied += 1;
+                    result.details.push(FixDetail {
+                        rule: LintRule::HardcodedFontSize,
+                        node_id: node.id.clone(),
+                        action: "font_size→token_ref".into(),
+                        before,
+                        after: token_name.clone(),
+                    });
+                }
+            }
+        }
+
+        // empty effects cleanup
+        if node.style.fill.as_ref().map_or(false, |v| v.trim().is_empty()) {
+            let before = node.style.fill.clone().unwrap_or_default();
+            node.style.fill = None;
+            result.fixes_applied += 1;
+            result.details.push(FixDetail {
+                rule: LintRule::EmptyEffects,
+                node_id: node.id.clone(),
+                action: "remove_empty_fill".into(),
+                before,
+                after: "None".into(),
+            });
+        }
+        if node.style.stroke.as_ref().map_or(false, |v| v.trim().is_empty()) {
+            let before = node.style.stroke.clone().unwrap_or_default();
+            node.style.stroke = None;
+            result.fixes_applied += 1;
+            result.details.push(FixDetail {
+                rule: LintRule::EmptyEffects,
+                node_id: node.id.clone(),
+                action: "remove_empty_stroke".into(),
+                before,
+                after: "None".into(),
+            });
+        }
+
+        // unnamed node → auto-name
+        let default_names = ["Rect", "Text", "Circle", "Image", "Group"];
+        if default_names.contains(&node.name.as_str()) {
+            let kind_str = match node.kind {
+                NodeKind::Rect => "rect",
+                NodeKind::Circle => "circle",
+                NodeKind::Text => "text",
+                NodeKind::Image => "image",
+                NodeKind::Group => "group",
+            };
+            let new_name = format!("{}_{}", kind_str, &node.id[..8.min(node.id.len())]);
+            let before = node.name.clone();
+            node.name = new_name.clone();
+            result.fixes_applied += 1;
+            result.details.push(FixDetail {
+                rule: LintRule::UnnamedNode,
+                node_id: node.id.clone(),
+                action: "auto_name".into(),
+                before,
+                after: new_name,
+            });
+        }
+
+        apply_tokens_to_nodes(&mut node.children, token_map, numeric_map, result);
+    }
+}
+
+fn build_numeric_token_map(system: &DesignSystem) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for token in &system.tokens {
+        if let TokenValue::String(s) = &token.value {
+            if s.starts_with("token:") {
+                continue;
+            }
+            if let Ok(val) = s.parse::<f64>() {
+                map.insert(format!("{}", val), token.name.clone());
+            }
+        }
+    }
+    map
+}
+
+impl Linter {
+    pub fn auto_fix(&self, doc: &mut PenDocument) -> FixResult {
+        info!("auto_fix: 开始自动修复, 规则数={}", self.rules.len());
+        let mut result = FixResult {
+            fixes_applied: 0,
+            fixes_skipped: 0,
+            details: vec![],
+        };
+
+        if let Some(ref system) = self.design_system {
+            let token_result = apply_tokens_to_document(doc, system);
+            result.fixes_applied += token_result.fixes_applied;
+            result.details.extend(token_result.details);
+        } else {
+            result.fixes_skipped += 1;
+            info!("auto_fix: 无设计规范, 跳过 Token 修复");
+        }
+
+        info!("auto_fix: 完成, applied={}, skipped={}", result.fixes_applied, result.fixes_skipped);
+        result
+    }
 }
 
 fn luminance(color: &str) -> f64 {
@@ -1298,5 +1534,119 @@ mod tests {
     #[test]
     fn all_rules_count_is_13() {
         assert_eq!(LintRule::all().len(), 13);
+    }
+
+    #[test]
+    fn apply_tokens_replaces_fill_with_ref() {
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("apple-hig")
+            .expect("apple-hig")
+            .clone();
+        let mut refs = HashMap::new();
+        refs.insert("fill".into(), "primary".into());
+        let style = NodeStyle {
+            fill: Some("#007AFF".into()),
+            design_token_refs: refs,
+            ..Default::default()
+        };
+        let node = rect_node("r1", "box", style);
+        let mut doc = make_doc(vec![node]);
+
+        let result = apply_tokens_to_document(&mut doc, &system);
+        // fill already has token ref, so no fix for it
+        let fill_fixes: Vec<_> = result.details.iter().filter(|d| d.action == "fill→token_ref").collect();
+        assert!(fill_fixes.is_empty());
+    }
+
+    #[test]
+    fn apply_tokens_adds_fill_ref() {
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("apple-hig")
+            .expect("apple-hig")
+            .clone();
+        let style = NodeStyle {
+            fill: Some("#007AFF".into()),
+            ..Default::default()
+        };
+        let node = rect_node("r1", "box", style);
+        let mut doc = make_doc(vec![node]);
+
+        let result = apply_tokens_to_document(&mut doc, &system);
+        assert!(result.fixes_applied > 0);
+        let fill_fixes: Vec<_> = result.details.iter().filter(|d| d.action == "fill→token_ref").collect();
+        assert!(!fill_fixes.is_empty());
+        assert!(doc.pages[0].nodes[0].style.design_token_refs.contains_key("fill"));
+    }
+
+    #[test]
+    fn auto_fix_removes_empty_fill() {
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("apple-hig")
+            .expect("apple-hig")
+            .clone();
+        let style = NodeStyle {
+            fill: Some("".into()),
+            ..Default::default()
+        };
+        let node = rect_node("r1", "Rect", style);
+        let mut doc = make_doc(vec![node]);
+
+        let linter = Linter::new().with_design_system(system);
+        let result = linter.auto_fix(&mut doc);
+        assert!(result.details.iter().any(|d| d.action == "remove_empty_fill"));
+        assert!(doc.pages[0].nodes[0].style.fill.is_none());
+    }
+
+    #[test]
+    fn auto_fix_names_unnamed_node() {
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("apple-hig")
+            .expect("apple-hig")
+            .clone();
+        let node = rect_node("abc12345def", "Rect", NodeStyle::default());
+        let mut doc = make_doc(vec![node]);
+
+        let linter = Linter::new().with_design_system(system);
+        let result = linter.auto_fix(&mut doc);
+        assert!(result.details.iter().any(|d| d.action == "auto_name"));
+        assert!(doc.pages[0].nodes[0].name.starts_with("rect_"));
+    }
+
+    #[test]
+    fn fix_result_serializable() {
+        let result = FixResult {
+            fixes_applied: 3,
+            fixes_skipped: 1,
+            details: vec![FixDetail {
+                rule: LintRule::EmptyEffects,
+                node_id: "n1".into(),
+                action: "remove_empty_fill".into(),
+                before: "".into(),
+                after: "None".into(),
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: FixResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.fixes_applied, 3);
+        assert_eq!(back.details.len(), 1);
+    }
+
+    #[test]
+    fn auto_fix_without_design_system_skips_token_fixes() {
+        let style = NodeStyle {
+            fill: Some("#007AFF".into()),
+            ..Default::default()
+        };
+        let node = rect_node("r1", "box", style);
+        let mut doc = make_doc(vec![node]);
+
+        let linter = Linter::new();
+        let result = linter.auto_fix(&mut doc);
+        assert_eq!(result.fixes_applied, 0);
+        assert!(result.fixes_skipped > 0);
     }
 }

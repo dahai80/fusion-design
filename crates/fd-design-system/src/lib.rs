@@ -70,6 +70,16 @@ pub struct DesignSystem {
     pub id: String,
     pub name: String,
     pub tokens: Vec<Token>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dark_tokens: Option<Vec<Token>>,
+}
+
+/// 主题模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
 }
 
 impl DesignSystem {
@@ -124,6 +134,25 @@ impl DesignSystem {
             .find(|t| t.name == name)
             .map(|t| &t.value)
     }
+
+    /// 按主题模式生成 CSS Custom Properties。
+    /// Light 使用 self.tokens，Dark 使用 self.dark_tokens（如无则回退到 tokens）。
+    pub fn to_css_custom_properties_for_theme(&self, theme: Theme) -> String {
+        let tokens = match theme {
+            Theme::Light => &self.tokens,
+            Theme::Dark => self.dark_tokens.as_ref().unwrap_or(&self.tokens),
+        };
+        let mut lines = vec![":root {".to_string()];
+        let mut visited = std::collections::HashSet::new();
+        for token in tokens {
+            let css_name = token.name.replace('.', "-");
+            let resolved = self.resolve_reference(&token.value, &mut visited);
+            lines.push(format!("  --{}: {};", css_name, resolved));
+            visited.clear();
+        }
+        lines.push("}".to_string());
+        lines.join("\n")
+    }
 }
 
 /// 设计系统注册中心（管理多套规范，支持一键切换）。
@@ -131,6 +160,7 @@ impl DesignSystem {
 pub struct DesignSystemRegistry {
     systems: HashMap<String, DesignSystem>,
     active_id: Option<String>,
+    active_theme: Theme,
 }
 
 impl DesignSystemRegistry {
@@ -154,6 +184,17 @@ impl DesignSystemRegistry {
         }
         self.active_id = Some(id.to_string());
         Ok(())
+    }
+
+    /// 切换主题模式（Light/Dark）。
+    pub fn activate_theme(&mut self, theme: Theme) {
+        self.active_theme = theme;
+        tracing::info!(theme = ?theme, "主题已切换");
+    }
+
+    /// 获取当前主题模式。
+    pub fn current_theme(&self) -> Theme {
+        self.active_theme
     }
 
     /// 获取当前激活的规范。
@@ -231,6 +272,13 @@ pub fn builtin_apple_hig() -> DesignSystem {
             Token { name: "font.size.body".into(), value: TokenValue::Number(17.0), description: "正文字号".into() },
             Token { name: "radius.card".into(), value: TokenValue::Number(10.0), description: "卡片圆角".into() },
         ],
+        dark_tokens: Some(vec![
+            Token { name: "color.bg".into(), value: TokenValue::Color("#1C1C1E".into()), description: "暗色背景".into() },
+            Token { name: "color.fg".into(), value: TokenValue::Color("#F2F2F7".into()), description: "暗色前景".into() },
+            Token { name: "color.accent".into(), value: TokenValue::Color("#0A84FF".into()), description: "暗色强调".into() },
+            Token { name: "font.size.body".into(), value: TokenValue::Number(17.0), description: "正文字号".into() },
+            Token { name: "radius.card".into(), value: TokenValue::Number(10.0), description: "卡片圆角".into() },
+        ]),
     }
 }
 
@@ -245,6 +293,7 @@ fn builtin_minimal_dashboard() -> DesignSystem {
             Token { name: "font.size.body".into(), value: TokenValue::Number(14.0), description: "正文字号".into() },
             Token { name: "radius.card".into(), value: TokenValue::Number(6.0), description: "卡片圆角".into() },
         ],
+        dark_tokens: None,
     }
 }
 
@@ -260,6 +309,7 @@ fn builtin_robot_sim() -> DesignSystem {
             Token { name: "font.size.body".into(), value: TokenValue::Number(13.0), description: "等宽字号".into() },
             Token { name: "radius.panel".into(), value: TokenValue::Number(4.0), description: "面板圆角".into() },
         ],
+        dark_tokens: None,
     }
 }
 
@@ -419,6 +469,7 @@ mod tests {
                 Token { name: "color.primary".into(), value: TokenValue::Color("#007AFF".into()), description: "主色".into() },
                 Token { name: "color.button".into(), value: TokenValue::String("token:color.primary".into()), description: "按钮色引用主色".into() },
             ],
+            dark_tokens: None,
         };
         let css = ds.to_css_custom_properties();
         // 引用 token 解析为实际值
@@ -434,6 +485,7 @@ mod tests {
                 Token { name: "a".into(), value: TokenValue::String("token:b".into()), description: "循环A".into() },
                 Token { name: "b".into(), value: TokenValue::String("token:a".into()), description: "循环B".into() },
             ],
+            dark_tokens: None,
         };
         let css = ds.to_css_custom_properties();
         // 循环引用不会 panic，回退到原始 CSS var 输出
@@ -471,6 +523,7 @@ mod tests {
                 Token { name: "color.mid".into(), value: TokenValue::String("token:color.base".into()), description: "中间引用".into() },
                 Token { name: "color.top".into(), value: TokenValue::String("token:color.mid".into()), description: "顶层引用".into() },
             ],
+            dark_tokens: None,
         };
         let mut visited = std::collections::HashSet::new();
         let val = ds.resolve_reference(

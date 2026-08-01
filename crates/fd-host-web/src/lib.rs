@@ -256,6 +256,8 @@ pub enum BridgeCommand {
     PlanReject,
     /// 设置节点可见性
     SetNodeVisibility { node_id: String, visible: bool },
+    /// 设置节点锁定状态
+    SetNodeLocked { node_id: String, locked: bool },
     /// 重排序节点（移动到目标位置）
     ReorderNode { node_id: String, new_index: usize },
 }
@@ -343,6 +345,9 @@ pub fn fusion_bridge_send_command(command_json: &str) -> Result<(), JsValue> {
         }
         BridgeCommand::SetNodeVisibility { node_id, visible } => {
             set_node_visibility(&node_id, visible);
+        }
+        BridgeCommand::SetNodeLocked { node_id, locked } => {
+            set_node_locked(&node_id, locked);
         }
         BridgeCommand::ReorderNode { node_id, new_index } => {
             reorder_node(&node_id, new_index);
@@ -1917,6 +1922,35 @@ fn set_node_visibility(node_id: &str, visible: bool) {
             let new_style = replace_css_prop(&style, "display", "none");
             el.set_attribute("style", &new_style).ok();
             web_sys::console::log_1(&format!("fd-host-web: node {node_id} set hidden").into());
+        }
+    }
+}
+
+/// 设置节点锁定状态：锁定节点禁止拖拽，虚线边框视觉反馈。
+fn set_node_locked(node_id: &str, locked: bool) {
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return,
+    };
+    let document = match window.document() {
+        Some(d) => d,
+        None => return,
+    };
+    if let Some(el) = document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+        if locked {
+            el.set_attribute("data-fd-locked", "true").ok();
+            let style = el.get_attribute("style").unwrap_or_default();
+            let with_border = replace_css_prop(&style, "border", "2px dashed #999");
+            el.set_attribute("style", &with_border).ok();
+            el.set_attribute("draggable", "false").ok();
+            web_sys::console::log_1(&format!("fd-host-web: node {node_id} locked").into());
+        } else {
+            el.remove_attribute("data-fd-locked").ok();
+            let style = el.get_attribute("style").unwrap_or_default();
+            let with_border = replace_css_prop(&style, "border", "none");
+            el.set_attribute("style", &with_border).ok();
+            el.remove_attribute("draggable").ok();
+            web_sys::console::log_1(&format!("fd-host-web: node {node_id} unlocked").into());
         }
     }
 }

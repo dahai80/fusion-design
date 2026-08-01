@@ -289,7 +289,7 @@ fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::V
 
 // ── 样式 ──
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<String>,
@@ -311,6 +311,33 @@ pub struct NodeStyle {
     pub component_slot: Option<ComponentSlot>,
     #[serde(default)]
     pub design_token_refs: HashMap<String, String>,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NodeStyle {
+    fn default() -> Self {
+        Self {
+            fill: None,
+            stroke: None,
+            stroke_width: None,
+            radius: None,
+            font_size: None,
+            font_family: None,
+            opacity: None,
+            layout: LayoutMode::default(),
+            component_slot: None,
+            design_token_refs: HashMap::new(),
+            locked: false,
+            visible: true,
+        }
+    }
 }
 
 // ── 变量（设计 Token 引用） ──
@@ -421,6 +448,10 @@ impl PenDocument {
         }
         tracing::debug!(count = results.len(), "布局计算完成");
         results
+    }
+
+    pub fn snapshot(&self) -> PenDocument {
+        self.clone()
     }
 }
 
@@ -770,6 +801,230 @@ pub enum CanvasError {
     NodeNotFound(String),
     #[error("页面 {0} 未找到")]
     PageNotFound(String),
+}
+
+// ── 撤销/重做栈 ──
+
+const UNDO_REDO_MAX_DEPTH: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoRedoStack {
+    undo_stack: Vec<PenDocument>,
+    redo_stack: Vec<PenDocument>,
+}
+
+impl UndoRedoStack {
+    pub fn new() -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, snapshot: PenDocument) {
+        if self.undo_stack.len() >= UNDO_REDO_MAX_DEPTH {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(snapshot);
+        self.redo_stack.clear();
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn undo(&mut self) -> Option<PenDocument> {
+        if self.undo_stack.len() < 2 {
+            return None;
+        }
+        let current = self.undo_stack.pop()?;
+        self.redo_stack.push(current);
+        self.undo_stack.last().cloned()
+    }
+
+    pub fn redo(&mut self) -> Option<PenDocument> {
+        let snapshot = self.redo_stack.pop()?;
+        self.undo_stack.push(snapshot.clone());
+        Some(snapshot)
+    }
+}
+
+impl Default for UndoRedoStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── 文档差异对比 ──
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DiffChangeType {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffEntry {
+    pub node_id: String,
+    pub change_type: DiffChangeType,
+    pub field: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PenDocumentDiff {
+    pub entries: Vec<DiffEntry>,
+}
+
+impl PenDocumentDiff {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl PenDocument {
+    /// 计算两个 PenDocument 之间的节点级差异。
+    pub fn diff(&self, other: &PenDocument) -> PenDocumentDiff {
+        let mut entries = Vec::new();
+        let self_nodes = self.all_nodes();
+        let other_nodes = other.all_nodes();
+        let self_ids: Vec<&str> = self_nodes.keys().map(|s| s.as_str()).collect();
+        let other_ids: Vec<&str> = other_nodes.keys().map(|s| s.as_str()).collect();
+
+        for id in &other_ids {
+            if !self_ids.iter().any(|s| *s == *id) {
+                entries.push(DiffEntry {
+                    node_id: id.to_string(),
+                    change_type: DiffChangeType::Added,
+                    field: "*".into(),
+                    old_value: None,
+                    new_value: Some(serde_json::to_value(other_nodes[*id]).ok().unwrap_or_default()),
+                });
+            }
+        }
+        for id in &self_ids {
+            if !other_ids.iter().any(|s| *s == *id) {
+                entries.push(DiffEntry {
+                    node_id: id.to_string(),
+                    change_type: DiffChangeType::Removed,
+                    field: "*".into(),
+                    old_value: Some(serde_json::to_value(self_nodes[*id]).ok().unwrap_or_default()),
+                    new_value: None,
+                });
+            }
+        }
+        for id in &self_ids {
+            if let (Some(old_node), Some(new_node)) = (self_ids.iter().find(|s| **s == *id).and_then(|_| self_nodes.get(*id)), other_ids.iter().find(|s| **s == *id).and_then(|_| other_nodes.get(*id))) {
+                let old_json = serde_json::to_value(old_node).unwrap_or_default();
+                let new_json = serde_json::to_value(new_node).unwrap_or_default();
+                if old_json != new_json {
+                    diff_json_objects(&old_json, &new_json, id, &mut entries);
+                }
+            }
+        }
+
+        PenDocumentDiff { entries }
+    }
+
+    /// 收集文档中所有节点，返回 id → node 的映射。
+    fn all_nodes(&self) -> HashMap<String, &PenNode> {
+        let mut map = HashMap::new();
+        for page in &self.pages {
+            collect_nodes(&page.nodes, &mut map);
+        }
+        map
+    }
+
+    /// 应用补丁（简易版：按 diff 条目增删节点）。
+    pub fn apply_patch(&mut self, patch: &PenDocumentDiff) {
+        for entry in &patch.entries {
+            match entry.change_type {
+                DiffChangeType::Added => {
+                    if let Some(val) = &entry.new_value {
+                        if let Ok(node) = serde_json::from_value::<PenNode>(val.clone()) {
+                            if let Some(page) = self.pages.first_mut() {
+                                page.nodes.push(node);
+                            }
+                        }
+                    }
+                }
+                DiffChangeType::Removed => {
+                    self.remove_node(&entry.node_id);
+                }
+                DiffChangeType::Modified => {
+                    if let Some(node) = self.find_node_mut(&entry.node_id) {
+                        apply_field_change(node, &entry.field, &entry.new_value);
+                    }
+                }
+            }
+        }
+        tracing::info!(count = patch.entries.len(), "apply_patch: 补丁已应用");
+    }
+}
+
+fn collect_nodes<'a>(nodes: &'a [PenNode], map: &mut HashMap<String, &'a PenNode>) {
+    for n in nodes {
+        map.insert(n.id.clone(), n);
+        collect_nodes(&n.children, map);
+    }
+}
+
+fn diff_json_objects(
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+    node_id: &str,
+    entries: &mut Vec<DiffEntry>,
+) {
+    if let (serde_json::Value::Object(old_map), serde_json::Value::Object(new_map)) = (old, new) {
+        for key in new_map.keys() {
+            let old_val = old_map.get(key);
+            let new_val = new_map.get(key);
+            if old_val != new_val {
+                entries.push(DiffEntry {
+                    node_id: node_id.to_string(),
+                    change_type: DiffChangeType::Modified,
+                    field: key.clone(),
+                    old_value: old_val.cloned(),
+                    new_value: new_val.cloned(),
+                });
+            }
+        }
+        for key in old_map.keys() {
+            if !new_map.contains_key(key) {
+                entries.push(DiffEntry {
+                    node_id: node_id.to_string(),
+                    change_type: DiffChangeType::Modified,
+                    field: key.clone(),
+                    old_value: old_map.get(key).cloned(),
+                    new_value: None,
+                });
+            }
+        }
+    }
+}
+
+fn apply_field_change(node: &mut PenNode, field: &str, new_value: &Option<serde_json::Value>) {
+    if let Some(val) = new_value {
+        match field {
+            "x" => { if let Some(v) = val.as_f64() { node.x = v as f32; } }
+            "y" => { if let Some(v) = val.as_f64() { node.y = v as f32; } }
+            "w" => { if let Some(v) = val.as_f64() { node.w = v as f32; } }
+            "h" => { if let Some(v) = val.as_f64() { node.h = v as f32; } }
+            "name" => { if let Some(v) = val.as_str() { node.name = v.to_string(); } }
+            "text" => { node.text = val.as_str().map(String::from); }
+            "rotation" => { if let Some(v) = val.as_f64() { node.rotation = v as f32; } }
+            "z_index" => { if let Some(v) = val.as_i64() { node.z_index = v as i32; } }
+            _ => { tracing::debug!(field, "apply_field_change: 未处理字段"); }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1156,5 +1411,175 @@ mod tests {
         // 原模板未被修改
         let tmpl = reg.get("button").unwrap().variants.get("default").unwrap();
         assert!(tmpl.style.fill.is_none());
+    }
+
+    #[test]
+    fn node_style_locked_visible_default() {
+        let style = NodeStyle::default();
+        assert!(!style.locked);
+        assert!(style.visible);
+    }
+
+    #[test]
+    fn node_style_locked_visible_serde_roundtrip() {
+        let mut style = NodeStyle::default();
+        style.locked = true;
+        style.visible = false;
+        let json = serde_json::to_string(&style).unwrap();
+        let de: NodeStyle = serde_json::from_str(&json).unwrap();
+        assert!(de.locked);
+        assert!(!de.visible);
+    }
+
+    #[test]
+    fn node_style_backward_compat_old_json() {
+        let old = serde_json::json!({
+            "fill": "#FF0000",
+            "layout": "Free",
+            "design_token_refs": {}
+        });
+        let de: NodeStyle = serde_json::from_value(old).unwrap();
+        assert!(!de.locked);
+        assert!(de.visible);
+    }
+
+    #[test]
+    fn undo_redo_basic() {
+        let mut stack = UndoRedoStack::new();
+        let doc_v1 = PenDocument::new();
+        stack.push(doc_v1.clone());
+
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![],
+        });
+        stack.push(doc_v2.clone());
+
+        assert!(stack.can_undo());
+        let undone = stack.undo().unwrap();
+        assert_eq!(undone.pages.len(), 0);
+
+        assert!(stack.can_redo());
+        let redone = stack.redo().unwrap();
+        assert_eq!(redone.pages.len(), 1);
+    }
+
+    #[test]
+    fn undo_redo_empty_safe() {
+        let mut stack = UndoRedoStack::new();
+        assert!(!stack.can_undo());
+        assert!(!stack.can_redo());
+        assert!(stack.undo().is_none());
+        assert!(stack.redo().is_none());
+    }
+
+    #[test]
+    fn undo_redo_max_depth() {
+        let mut stack = UndoRedoStack::new();
+        for i in 0..60 {
+            let mut doc = PenDocument::new();
+            doc.add_page(Page {
+                id: format!("p{i}"),
+                name: format!("Page {i}"),
+                width: 800.0,
+                height: 600.0,
+                nodes: vec![],
+            });
+            stack.push(doc);
+        }
+        // 最多 50 步，超过的应被丢弃
+        assert!(stack.can_undo());
+        let undone = stack.undo().unwrap();
+        // 最旧的 10 个已被丢弃，undo 应退到第 50 步
+        assert_eq!(undone.pages.len(), 1);
+    }
+
+    #[test]
+    fn pen_document_snapshot() {
+        let mut doc = PenDocument::new();
+        doc.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        let snap = doc.snapshot();
+        assert_eq!(snap.pages.len(), 1);
+        assert_eq!(snap.pages[0].nodes.len(), 1);
+    }
+
+    #[test]
+    fn diff_same_document_empty() {
+        let doc = PenDocument::new();
+        let diff = doc.diff(&doc);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn diff_added_node() {
+        let doc_v1 = PenDocument::new();
+        let mut doc_v2 = PenDocument::new();
+        doc_v2.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 0.0, 0.0, 100.0, 50.0)],
+        });
+        let diff = doc_v1.diff(&doc_v2);
+        assert!(diff.entries.iter().any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Added));
+    }
+
+    #[test]
+    fn diff_modified_node() {
+        let mut doc_v1 = PenDocument::new();
+        doc_v1.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.pages[0].nodes[0].w = 200.0;
+        let diff = doc_v1.diff(&doc_v2);
+        assert!(diff.entries.iter().any(|e| e.node_id == "n1" && e.field == "w" && e.change_type == DiffChangeType::Modified));
+    }
+
+    #[test]
+    fn diff_removed_node() {
+        let mut doc_v1 = PenDocument::new();
+        doc_v1.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        let doc_v2 = PenDocument::new();
+        let diff = doc_v1.diff(&doc_v2);
+        assert!(diff.entries.iter().any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Removed));
+    }
+
+    #[test]
+    fn apply_patch_roundtrip() {
+        let mut doc_v1 = PenDocument::new();
+        doc_v1.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.pages[0].nodes[0].w = 200.0;
+        let patch = doc_v1.diff(&doc_v2);
+        doc_v1.apply_patch(&patch);
+        assert_eq!(doc_v1.pages[0].nodes[0].w, 200.0);
     }
 }

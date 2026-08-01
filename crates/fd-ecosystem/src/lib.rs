@@ -295,6 +295,122 @@ impl EcosystemLink {
         tracing::info!(query = %query, count = results.len(), "search_templates: 检索完成");
         Ok(results)
     }
+
+    /// 按 tag 精确匹配检索模板（多 tag 取交集）。
+    pub fn search_templates_by_tags(&self, tags: &[String]) -> anyhow::Result<Vec<DesignTemplate>> {
+        let kb_dir = self.base_dir.join(EcosystemTarget::FusionKB.ipc_dir()).join("templates");
+        if !kb_dir.exists() {
+            return Ok(vec![]);
+        }
+        let lower_tags: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+        let mut results = vec![];
+        for entry in std::fs::read_dir(&kb_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                if let Ok(tmpl) = serde_json::from_str::<DesignTemplate>(&data) {
+                    let tmpl_tags_lower: Vec<String> = tmpl.tags.iter().map(|t| t.to_lowercase()).collect();
+                    let all_match = lower_tags.iter().all(|t| {
+                        tmpl_tags_lower.iter().any(|tt| tt == t)
+                    });
+                    if all_match {
+                        results.push(tmpl);
+                    }
+                }
+            }
+        }
+        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        tracing::info!(tags = ?tags, count = results.len(), "search_templates_by_tags: 检索完成");
+        Ok(results)
+    }
+
+    /// 异步文件监听：持续监控指定目标的 IPC 目录变更。
+    ///
+    /// 返回一个 tokio 任务句柄和关闭通道。每检测到文件变更，调用回调处理。
+    // Callers: fd-cli (ecosystem watch), DesignBridge.swift (async file watch)
+    // Affected API: watch_async(), WatchEvent, WatchEventKind, search_templates_by_tags()
+    // User instruction: "按照方案和prd方案全面落地" — Phase 5
+    pub fn watch_async(
+        &self,
+        target: EcosystemTarget,
+        mut on_change: impl FnMut(WatchEvent) + Send + 'static,
+    ) -> anyhow::Result<(tokio::task::JoinHandle<()>, tokio::sync::oneshot::Sender<()>)> {
+        let watch_dir = self.base_dir.join(target.ipc_dir());
+        std::fs::create_dir_all(&watch_dir)?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        let handle = tokio::spawn(async move {
+            use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+            let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+            let mut watcher = match RecommendedWatcher::new(
+                move |res: Result<Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        let _ = notify_tx.blocking_send(event);
+                    }
+                },
+                notify::Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::error!(?e, "watch_async: 创建 watcher 失败");
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::Recursive) {
+                tracing::error!(?e, "watch_async: 监控目录失败");
+                return;
+            }
+
+            tracing::info!(dir = %watch_dir.display(), "watch_async: 开始监控目录");
+
+            let mut stop_rx = rx;
+            loop {
+                tokio::select! {
+                    Some(event) = notify_rx.recv() => {
+                        let kind = match event.kind {
+                            EventKind::Create(_) => WatchEventKind::Created,
+                            EventKind::Modify(_) => WatchEventKind::Modified,
+                            EventKind::Remove(_) => WatchEventKind::Removed,
+                            _ => continue,
+                        };
+                        for path in &event.paths {
+                            on_change(WatchEvent {
+                                kind,
+                                path: path.clone(),
+                            });
+                        }
+                    }
+                    _ = &mut stop_rx => {
+                        tracing::info!("watch_async: 收到停止信号, 退出监控");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok((handle, tx))
+    }
+}
+
+/// 文件监听事件。
+#[derive(Debug, Clone)]
+pub struct WatchEvent {
+    pub kind: WatchEventKind,
+    pub path: PathBuf,
+}
+
+/// 事件类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEventKind {
+    Created,
+    Modified,
+    Removed,
 }
 
 #[cfg(test)]
@@ -461,5 +577,47 @@ mod tests {
         let link = EcosystemLink::new(tmp.path());
         let results = link.search_templates("anything").unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_templates_by_tags_intersection() {
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+
+        let tmpl1 = DesignTemplate {
+            id: "t1".into(),
+            name: "Login".into(),
+            tags: vec!["auth".into(), "form".into()],
+            category: "表单".into(),
+            document_json: "{}".into(),
+            created_at: 1000,
+        };
+        let tmpl2 = DesignTemplate {
+            id: "t2".into(),
+            name: "Signup".into(),
+            tags: vec!["auth".into(), "register".into()],
+            category: "表单".into(),
+            document_json: "{}".into(),
+            created_at: 2000,
+        };
+        link.save_template(&tmpl1).unwrap();
+        link.save_template(&tmpl2).unwrap();
+
+        // 单 tag 匹配两个
+        let results = link.search_templates_by_tags(&["auth".into()]).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // 双 tag 交集只匹配 tmpl1
+        let results = link.search_templates_by_tags(&["auth".into(), "form".into()]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "t1");
+
+        // 不存在的 tag
+        let results = link.search_templates_by_tags(&["nonexistent".into()]).unwrap();
+        assert!(results.is_empty());
+
+        // 空 tags 返回全部
+        let results = link.search_templates_by_tags(&[]).unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

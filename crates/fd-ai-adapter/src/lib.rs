@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, LazyLock};
 
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 // ── fusion-mlx 本地推理客户端 ──
@@ -196,6 +197,188 @@ fn blocking_post<T: Serialize + ?Sized>(
         }
         Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?)
     })
+}
+
+// ── SSE 流式推理 ──
+
+/// SSE 流式增量 token。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MlxStreamDelta {
+    pub token: String,
+    pub finished: bool,
+}
+
+/// 流式 chat：返回 SSE token 流。
+///
+/// 请求体附加 `stream: true`，解析 `data: {...}` SSE 行，
+/// 每行提取 `choices[0].delta.content` 推送给调用方。
+pub async fn chat_stream(
+    client: FusionMlxClient,
+    model: String,
+    system_prompt: String,
+    user_message: String,
+    max_tokens: u32,
+) -> impl futures::Stream<Item = anyhow::Result<MlxStreamDelta>> {
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_message },
+        ],
+        "max_tokens": max_tokens,
+        "stream": true,
+    });
+    let url = format!("{}/v1/chat/completions", client.endpoint);
+    let http = client.http;
+
+    let resp = match http.post(&url).json(&payload).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "SSE 请求失败");
+            return futures::stream::once(async move { Err(anyhow::anyhow!("SSE 请求失败: {e}")) }).boxed();
+        }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return futures::stream::once(async move { Err(anyhow::anyhow!("fusion-mlx HTTP {status}")) }).boxed();
+    }
+
+    let stream = resp.bytes_stream();
+    futures::stream::unfold((stream, String::new()), |(mut stream, mut buffer)| async move {
+        use futures::StreamExt;
+        loop {
+            match stream.next().await {
+                Some(Ok(bytes)) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(line_end) = buffer.find('\n') {
+                        let line = buffer[..line_end].trim().to_string();
+                        buffer = buffer[line_end + 1..].to_string();
+                        if line.starts_with("data: ") {
+                            let data = &line[6..];
+                            if data == "[DONE]" {
+                                return Some((Ok(MlxStreamDelta { token: String::new(), finished: true }), (stream, buffer)));
+                            }
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+                                let content = parsed["choices"][0]["delta"]["content"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !content.is_empty() {
+                                    return Some((Ok(MlxStreamDelta { token: content, finished: false }), (stream, buffer)));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer)));
+                }
+                None => {
+                    return Some((Ok(MlxStreamDelta { token: String::new(), finished: true }), (stream, buffer)));
+                }
+            }
+        }
+    }).boxed()
+}
+
+// ── MLX 健康检查 ──
+
+/// MLX 服务健康状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthStatus {
+    pub available: bool,
+    pub model: Option<String>,
+    pub gpu: Option<String>,
+}
+
+impl FusionMlxClient {
+    /// 探测 fusion-mlx 健康状态（超时 3s）。
+    pub async fn health_check(&self) -> anyhow::Result<HealthStatus> {
+        let url = format!("{}/v1/models", self.endpoint);
+        let resp = self.http.get(&url).timeout(std::time::Duration::from_secs(3)).send().await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                let model = body["data"][0]["id"].as_str().map(String::from);
+                tracing::info!(available = true, model = ?model, "health_check: MLX 可用");
+                Ok(HealthStatus { available: true, model, gpu: None })
+            }
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), "health_check: MLX 返回非 200");
+                Ok(HealthStatus { available: false, model: None, gpu: None })
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "health_check: MLX 不可达");
+                Ok(HealthStatus { available: false, model: None, gpu: None })
+            }
+        }
+    }
+
+    /// 健康检查同步版（阻塞当前线程）。
+    pub fn health_check_sync(&self) -> anyhow::Result<HealthStatus> {
+        let this = self.clone();
+        BLOCKING_RT.block_on(async move { this.health_check().await })
+    }
+}
+
+// ── 多模态请求（截图/草图 → UI）──
+
+/// Vision 消息内容项。
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum VisionContent<'a> {
+    #[serde(rename = "text")]
+    Text { text: &'a str },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlPayload<'a> },
+}
+
+#[derive(Debug, Serialize)]
+struct ImageUrlPayload<'a> {
+    url: &'a str,
+}
+
+/// 多模态 chat 请求：发送图片 + 文字到 fusion-mlx。
+pub async fn chat_with_image(
+    client: &FusionMlxClient,
+    model: &str,
+    system_prompt: &str,
+    user_text: &str,
+    image_base64: &str,
+    max_tokens: u32,
+) -> anyhow::Result<String> {
+    let image_data_url = format!("data:image/png;base64,{image_base64}");
+    let content = vec![
+        VisionContent::Text { text: user_text },
+        VisionContent::ImageUrl { image_url: ImageUrlPayload { url: &image_data_url } },
+    ];
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": content },
+        ],
+        "max_tokens": max_tokens,
+    });
+    let url = format!("{}/v1/chat/completions", client.endpoint);
+    let resp = client.http.post(&url).json(&payload).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("fusion-mlx vision HTTP {}", resp.status());
+    }
+    let parsed: MlxChatResponse = resp.json().await?;
+    Ok(parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("fusion-mlx 返回空 choices"))?
+        .message
+        .content)
+}
+
+/// 读取图片文件并编码为 base64。
+pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes))
 }
 
 // ── OpenPencil ChatProvider 适配 ──
@@ -778,6 +961,30 @@ impl DesignSkills {
             .client
             .chat_async(&self.default_model, sys, &user, 2048)
             .await?;
+        parse_ui_json(&resp, page_name)
+    }
+
+    /// 截图/草图 → UI：读取图片文件，base64 编码后发送多模态请求。
+    pub async fn screenshot_to_ui(
+        &self,
+        image_path: &std::path::Path,
+        hint: &str,
+        page_name: &str,
+    ) -> anyhow::Result<PenDocument> {
+        let b64 = encode_image_base64(image_path)?;
+        tracing::info!(path = %image_path.display(), size_b64 = b64.len(), "screenshot_to_ui: 图片已编码");
+        let sys = "你是 fusion-design UI 生成器。根据用户提供的截图/草图，\
+输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
+        let user = format!("补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
+        let resp = chat_with_image(
+            &self.client,
+            &self.default_model,
+            sys,
+            &user,
+            &b64,
+            2048,
+        )
+        .await?;
         parse_ui_json(&resp, page_name)
     }
 

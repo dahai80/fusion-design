@@ -24,6 +24,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+futures = { workspace = true }
+base64 = { workspace = true }
+async-stream = "0.3"
 op-ai = { workspace = true }  # vendored OpenPencil subset
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }

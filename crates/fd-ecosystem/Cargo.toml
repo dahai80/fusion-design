@@ -11,6 +11,10 @@ description = "Fusion-Design 生态联动 — 对接 Fusion Code/Simulation/KB/C
 name = "fd_ecosystem"
 path = "src/lib.rs"
 
+# Callers: fd-cli (ecosystem watch), DesignBridge.swift (async file watch)
+# Affected API: EcosystemLink::watch_async(), search_templates_by_tags()
+# Data schemas: LinkMessage IPC files, DesignTemplate with tags, WatchEvent stream
+# User instruction: "按照方案和prd方案全面落地" — Phase 5 async file watch + tag search
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,6 +22,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+notify = { version = "7", features = ["macos_kqueue"] }
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-codegen = { path = "../fd-codegen" }
 # op-mcp = { workspace = true }  # subtree 激活后启用
