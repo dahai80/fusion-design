@@ -3,7 +3,7 @@
 > 审计日期: 2026-08-02
 > 关联 Issue: #1
 > 违规等级: P2
-> 合规评级: A-
+> 合规评级: A
 
 ## 层级定位
 
@@ -13,13 +13,13 @@
 
 ## 违规项与整改
 
-| # | 违规项 | 整改方案 | 截止 |
-|---|--------|----------|------|
-| 1 | SimPanelSkill 硬编码机器人仿真参数 | 移至插件 crate | P2-S1 |
-| 2 | FusionSimulation EcosystemTarget 硬编码仿真路由 | 改为可扩展 trait，移除 FusionSimulation 变体 | P2-S1 |
-| 3 | "机器人仿真控制台"预设 | 从 fd-design-system 移除垂直预设 | P2-S2 |
+| # | 违规项 | 整改方案 | 状态 | 完成日期 |
+|---|--------|----------|------|----------|
+| 1 | SimPanelSkill 硬编码机器人仿真参数 | 移除，由插件 crate 提供 | ✅ 已完成 | 2026-08-02 |
+| 2 | FusionSimulation EcosystemTarget 硬编码仿真路由 | 改为 Custom(String) 可扩展变体，移除 FusionSimulation | ✅ 已完成 | 2026-08-02 |
+| 3 | "机器人仿真控制台"预设 | 从 fd-design-system 移除垂直预设 | ✅ 已完成 | 2026-08-02 |
 
 ## 合规标准
 
 - 不硬编码垂直行业逻辑
-- 通过可扩展机制支持垂直场景
+- 通过可扩展机制支持垂直场景（EcosystemTarget::Custom / 插件 Skill 注册）

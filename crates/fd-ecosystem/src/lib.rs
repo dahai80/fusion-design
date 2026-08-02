@@ -10,26 +10,26 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// 生态联动目标。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EcosystemTarget {
     /// Fusion Code（正向导出代码、反向同步样式）
     FusionCode,
-    /// Fusion-Simulation（生成机器人仿真控制面板）
-    FusionSimulation,
     /// Fusion-KB（保存/检索设计模板）
     FusionKB,
     /// Fusion CLI（命令行批量生成/导出）
     FusionCLI,
+    /// 扩展目标（插件/垂直领域通过此变体接入，不硬编码具体行业）
+    Custom(String),
 }
 
 impl EcosystemTarget {
     /// 约定的 IPC 目录名。
-    pub fn ipc_dir(self) -> &'static str {
+    pub fn ipc_dir(&self) -> String {
         match self {
-            Self::FusionCode => "fusion-code",
-            Self::FusionSimulation => "fusion-simulation",
-            Self::FusionKB => "fusion-kb",
-            Self::FusionCLI => "fusion-cli",
+            Self::FusionCode => "fusion-code".to_string(),
+            Self::FusionKB => "fusion-kb".to_string(),
+            Self::FusionCLI => "fusion-cli".to_string(),
+            Self::Custom(name) => name.clone(),
         }
     }
 }
@@ -461,8 +461,9 @@ mod tests {
     #[test]
     fn ipc_dir_names() {
         assert_eq!(EcosystemTarget::FusionCode.ipc_dir(), "fusion-code");
+        assert_eq!(EcosystemTarget::FusionKB.ipc_dir(), "fusion-kb");
         assert_eq!(
-            EcosystemTarget::FusionSimulation.ipc_dir(),
+            EcosystemTarget::Custom("fusion-simulation".into()).ipc_dir(),
             "fusion-simulation"
         );
     }

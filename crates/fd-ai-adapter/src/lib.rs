@@ -694,13 +694,12 @@ impl SkillRegistry {
         self.skills.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 注册内置 Skill（text-to-ui, image-to-ui, partial-edit, local-edit, sim-panel, multi-variants, spec-doc, page-flow）。
+    /// 注册内置 Skill（text-to-ui, image-to-ui, partial-edit, local-edit, multi-variants, spec-doc, page-flow）。
     pub fn register_builtin(&mut self) {
         self.register(Box::new(TextToUiSkill));
         self.register(Box::new(ImageToUiSkill));
         self.register(Box::new(PartialEditSkill));
         self.register(Box::new(LocalEditSkill));
-        self.register(Box::new(SimPanelSkill));
         self.register(Box::new(MultiVariantsSkill));
         self.register(Box::new(SpecDocSkill));
         self.register(Box::new(PageFlowSkill));
@@ -925,74 +924,6 @@ fn parse_local_edit_input(input: &str) -> (String, &str) {
     let nodes = parts[0].to_string();
     let instr = parts.get(1).unwrap_or(&"修改为更合适的样式");
     (nodes, instr)
-}
-
-/// 仿真控制面板 Skill：根据仿真参数描述生成控制面板 PenDocument。
-///
-/// input 格式: "param_desc|panel_name"
-/// param_desc 示例: "速度:0-100,加速度:0-50,刹车力度:0-10"
-struct SimPanelSkill;
-
-impl DesignSkill for SimPanelSkill {
-    fn id(&self) -> &str {
-        "sim-panel"
-    }
-    fn label(&self) -> &str {
-        "仿真控制面板"
-    }
-
-    fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
-        let (desc, panel_name) = parse_sim_panel_input(input);
-        let mut sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
-页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
-每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
-page 含 width/height（默认 480×640），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
-            .to_string();
-        if let Some(tokens) = ctx.token_prompt_fragment() {
-            sys.push_str("\n\n");
-            sys.push_str(&tokens);
-        }
-        let user = format!("参数描述：{desc}\n生成仿真控制面板「{panel_name}」。");
-        let resp = ctx.chat(&sys, &user, 2048)?;
-        let doc = parse_ui_json(&resp, panel_name)?;
-        Ok(SkillOutput::Document(doc))
-    }
-
-    fn execute_async<'a>(
-        &'a self,
-        ctx: SkillContext<'a>,
-        input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let (desc, panel_name) = parse_sim_panel_input(&input);
-            let mut sys =
-                "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
-页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
-每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
-page 含 width/height（默认 480×640），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
-                    .to_string();
-            if let Some(tokens) = ctx.token_prompt_fragment() {
-                sys.push_str("\n\n");
-                sys.push_str(&tokens);
-            }
-            let user = format!("参数描述：{desc}\n生成仿真控制面板「{panel_name}」。");
-            let resp = ctx.chat_async(&sys, &user, 2048).await?;
-            let doc = parse_ui_json(&resp, panel_name)?;
-            Ok(SkillOutput::Document(doc))
-        })
-    }
-}
-
-fn parse_sim_panel_input(input: &str) -> (&str, &str) {
-    let parts: Vec<&str> = input.splitn(2, '|').collect();
-    let desc = parts[0];
-    let name = parts.get(1).unwrap_or(&"SimPanel");
-    (desc, name)
 }
 
 /// 设计规范文档生成 Skill：从 PenDocument JSON 生成交互规范/组件规范/页面架构文档。
@@ -1499,41 +1430,6 @@ impl DesignSkills {
         self.client
             .chat_async(&self.default_model, sys, &user, 2048)
             .await
-    }
-
-    /// 仿真控制面板：参数描述 → PenDocument 控制面板页面。
-    pub fn sim_panel(&self, param_desc: &str, panel_name: &str) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
-页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
-每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
-page 含 width/height（默认 480×640），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
-        let user = format!("参数描述：{param_desc}\n生成仿真控制面板「{panel_name}」。");
-        let resp = self
-            .client
-            .chat_sync(&self.default_model, sys, &user, 2048)?;
-        parse_ui_json(&resp, panel_name)
-    }
-
-    /// 仿真控制面板（async 变体）。
-    pub async fn sim_panel_async(
-        &self,
-        param_desc: &str,
-        panel_name: &str,
-    ) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
-页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
-每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
-page 含 width/height（默认 480×640），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
-        let user = format!("参数描述：{param_desc}\n生成仿真控制面板「{panel_name}」。");
-        let resp = self
-            .client
-            .chat_async(&self.default_model, sys, &user, 2048)
-            .await?;
-        parse_ui_json(&resp, panel_name)
     }
 
     /// 多方案对比：生成 3 套不同风格设计稿。
@@ -2217,16 +2113,15 @@ mod skills_tests {
     }
 
     #[test]
-    fn skill_registry_builtin_registers_eight() {
+    fn skill_registry_builtin_registers_seven() {
         let mut reg = SkillRegistry::new();
         reg.register_builtin();
         let ids = reg.list();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 7);
         assert!(ids.contains(&"text-to-ui"));
         assert!(ids.contains(&"image-to-ui"));
         assert!(ids.contains(&"partial-edit"));
         assert!(ids.contains(&"local-edit"));
-        assert!(ids.contains(&"sim-panel"));
         assert!(ids.contains(&"multi-variants"));
         assert!(ids.contains(&"spec-doc"));
         assert!(ids.contains(&"page-flow"));
@@ -2302,27 +2197,6 @@ mod skills_tests {
         let skill = LocalEditSkill;
         assert_eq!(skill.id(), "local-edit");
         assert_eq!(skill.label(), "本地编辑");
-    }
-
-    #[test]
-    fn sim_panel_skill_id_and_label() {
-        let skill = SimPanelSkill;
-        assert_eq!(skill.id(), "sim-panel");
-        assert_eq!(skill.label(), "仿真控制面板");
-    }
-
-    #[test]
-    fn parse_sim_panel_input_with_name() {
-        let (desc, name) = parse_sim_panel_input("速度:0-100|RobotPanel");
-        assert_eq!(desc, "速度:0-100");
-        assert_eq!(name, "RobotPanel");
-    }
-
-    #[test]
-    fn parse_sim_panel_input_default_name() {
-        let (desc, name) = parse_sim_panel_input("速度:0-100,加速度:0-50");
-        assert_eq!(desc, "速度:0-100,加速度:0-50");
-        assert_eq!(name, "SimPanel");
     }
 
     #[test]

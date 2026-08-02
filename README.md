@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: V0.2 — 11 crates + vendored op-ai, 324 tests pass, WASM build verified.
+**Status**: V0.2 — 11 crates + vendored op-ai, 321 tests pass, WASM build verified.
 
 ## 📋 Overview
 
@@ -28,7 +28,7 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 
 1. **Infinite vector canvas** — zoom/pan/grid/multi-artboard/layer management, CSS Flex/Grid layout, Taffy layout engine
 2. **Conversational AI design generation** — text-to-UI, image-to-UI, SSE streaming, multimodal visual input
-3. **Local design system** — three built-in specs (Apple HIG / Admin Dashboard / Robot Simulation), Light/Dark themes, global Token sync
+3. **Local design system** — two built-in specs (Apple HIG / Admin Dashboard), Light/Dark themes, global Token sync
 4. **Design lint + auto-fix** — 13 lint rules + auto-fix for Token references / null cleanup / auto-naming
 5. **Fusion Code bidirectional sync** — canvas one-click export to React/HTML/Tailwind, reverse style sync
 6. **Prototype interaction & handoff** — PNG/SVG/PDF/HTML export, batch export
@@ -41,7 +41,7 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 13. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison, 11 tests
 14. **Built-in scene templates** — 4 preset categories (mobile app / admin dashboard / marketing site / mini program), one-click install
 
-## 🗂️ Project Structure (V0.2 — 11 crates + vendored op-ai, 324 tests)
+## 🗂️ Project Structure (V0.2 — 11 crates + vendored op-ai, 321 tests)
 
 ```
 fusion-design/
@@ -53,9 +53,9 @@ fusion-design/
 │   └── INTEGRATION_PLAN.md
 ├── crates/                     ← Fusion-Design custom Rust crates (workspace)
 │   ├── fd-canvas-core/         ← Custom canvas data model (PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument)
-│   ├── fd-ai-adapter/          ← op-ai → fusion-mlx adapter (SSE streaming / multimodal vision / 8 Skills)
+│   ├── fd-ai-adapter/          ← op-ai → fusion-mlx adapter (SSE streaming / multimodal vision / 7 Skills)
 │   ├── fd-codegen/             ← HTML/React+Tailwind code export
-│   ├── fd-design-system/       ← Three built-in design specs + Token + Light/Dark themes
+│   ├── fd-design-system/       ← Two built-in design specs + Token + Light/Dark themes
 │   ├── fd-design-lint/         ← 13 lint rules + auto-fix (Token references / null cleanup / auto-naming)
 │   ├── fd-ecosystem/           ← Ecosystem integration (IPC + async file watching + template tag search + 4 built-in scene templates)
 │   ├── fd-asset/               ← Asset library management (categorization / tagging / annotation / color extraction / Token binding)
@@ -82,14 +82,14 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # ✅ Full workspace compiles
-cargo test --workspace                                         # ✅ 324 tests pass
+cargo test --workspace                                         # ✅ 321 tests pass
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # ✅ WASM build succeeds
 cargo run -p fd-cli -- --help                                  # ✅ CLI available
 ```
 
 Test coverage:
 - `fd-canvas-core`: 53+ tests (PenDocument CRUD + UndoRedo + Diff/Patch + JSON round-trip + layout + named version management)
-- `fd-ai-adapter`: 63+ tests (mock HTTP + SSE streaming + health check + multimodal vision + SpecDoc/PageFlow Skill)
+- `fd-ai-adapter`: 60+ tests (mock HTTP + SSE streaming + health check + multimodal vision + SpecDoc/PageFlow Skill)
 - `fd-design-lint`: 41 tests (13 lint rules + auto-fix + apply_tokens + FixResult serialization)
 - `fd-design-system`: 10+ tests (Token + Theme + Registry + CSS output)
 - `fd-ecosystem`: 16 tests (IPC + sync_to_code + template tag search + built-in scene templates)

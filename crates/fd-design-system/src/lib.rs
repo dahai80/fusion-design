@@ -208,12 +208,11 @@ impl DesignSystemRegistry {
         self.systems.get(id)
     }
 
-    /// 注册三套内置规范（Apple HIG / 极简后台 / 机器人仿真）。
+    /// 注册两套内置规范（Apple HIG / 极简后台）。
     pub fn register_builtin(&mut self) {
         self.systems.extend([
             ("apple-hig".to_string(), builtin_apple_hig()),
             ("minimal-dashboard".to_string(), builtin_minimal_dashboard()),
-            ("robot-sim".to_string(), builtin_robot_sim()),
         ]);
     }
 
@@ -350,46 +349,6 @@ fn builtin_minimal_dashboard() -> DesignSystem {
     }
 }
 
-fn builtin_robot_sim() -> DesignSystem {
-    DesignSystem {
-        id: "robot-sim".into(),
-        name: "机器人仿真控制台".into(),
-        tokens: vec![
-            Token {
-                name: "color.bg".into(),
-                value: TokenValue::Color("#0F172A".into()),
-                description: "深色背景".into(),
-            },
-            Token {
-                name: "color.fg".into(),
-                value: TokenValue::Color("#E2E8F0".into()),
-                description: "浅色前景".into(),
-            },
-            Token {
-                name: "color.warn".into(),
-                value: TokenValue::Color("#F59E0B".into()),
-                description: "警告色".into(),
-            },
-            Token {
-                name: "color.danger".into(),
-                value: TokenValue::Color("#EF4444".into()),
-                description: "危险/急停色".into(),
-            },
-            Token {
-                name: "font.size.body".into(),
-                value: TokenValue::Number(13.0),
-                description: "等宽字号".into(),
-            },
-            Token {
-                name: "radius.panel".into(),
-                value: TokenValue::Number(4.0),
-                description: "面板圆角".into(),
-            },
-        ],
-        dark_tokens: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,12 +376,12 @@ mod tests {
     }
 
     #[test]
-    fn register_builtin_loads_three() {
+    fn register_builtin_loads_two() {
         let mut reg = DesignSystemRegistry::new();
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 3);
-        reg.activate("robot-sim").unwrap();
-        assert!(reg.lookup("color.danger").is_some());
+        assert_eq!(reg.list().len(), 2);
+        reg.activate("apple-hig").unwrap();
+        assert!(reg.lookup("color.bg").is_some());
     }
 
     #[test]

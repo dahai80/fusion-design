@@ -2,7 +2,7 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：V0.2 — 11 个 crate + vendored op-ai，324 个测试通过，WASM 构建验证通过。
+**状态**：V0.2 — 11 个 crate + vendored op-ai，321 个测试通过，WASM 构建验证通过。
 
 ## 📋 概览
 
@@ -41,7 +41,7 @@ Fusion-Design 是 Fusion-MLX「一核九端」产品矩阵的旗舰主力之一�
 13. **命名版本管理** — 版本快照/切换/重命名/删除/相邻 diff 对比，11 项测试
 14. **内置场景模板** — 4 类预设（移动端/B 端后台/营销网站/小程序），一键安装
 
-## 🗂️ 项目结构（V0.2 — 11 个 crate + vendored op-ai，324 个测试）
+## 🗂️ 项目结构（V0.2 — 11 个 crate + vendored op-ai，321 个测试）
 
 ```
 fusion-design/
@@ -53,9 +53,9 @@ fusion-design/
 │   └── INTEGRATION_PLAN.md
 ├── crates/                     ← Fusion-Design 自研 Rust crate（workspace）
 │   ├── fd-canvas-core/         ← 自研画布数据模型（PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument）
-│   ├── fd-ai-adapter/          ← op-ai → fusion-mlx 适配层（SSE 流式/多模态视觉/8 个 Skill）
+│   ├── fd-ai-adapter/          ← op-ai → fusion-mlx 适配层（SSE 流式/多模态视觉/7 个 Skill）
 │   ├── fd-codegen/             ← HTML/React+Tailwind 代码导出
-│   ├── fd-design-system/       ← 三套内置设计规范 + Token + Light/Dark 主题
+│   ├── fd-design-system/       ← 两套内置设计规范 + Token + Light/Dark 主题
 │   ├── fd-design-lint/         ← 13 条 Lint 规则 + auto_fix（Token 引用/空值清理/自动命名）
 │   ├── fd-ecosystem/           ← 生态联动（IPC + 异步文件监听 + 模板标签检索 + 4 类内置场景模板）
 │   ├── fd-asset/               ← 素材库管理（分类/标签/标注/颜色提取/Token 绑定）
@@ -82,14 +82,14 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # ✅ 全套编译通过
-cargo test --workspace                                         # ✅ 324 个测试全通过
+cargo test --workspace                                         # ✅ 321 个测试全通过
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # ✅ WASM 编译通过
 cargo run -p fd-cli -- --help                                  # ✅ CLI 可用
 ```
 
 测试覆盖：
 - `fd-canvas-core`：53+ 测试（PenDocument CRUD + UndoRedo + Diff/Patch + JSON 往返 + 布局 + 命名版本管理）
-- `fd-ai-adapter`：63+ 测试（mock HTTP + SSE 流 + 健康检查 + 多模态视觉 + SpecDoc/PageFlow Skill）
+- `fd-ai-adapter`：60+ 测试（mock HTTP + SSE 流 + 健康检查 + 多模态视觉 + SpecDoc/PageFlow Skill）
 - `fd-design-lint`：41 测试（13 条 Lint 规则 + auto_fix + apply_tokens + FixResult 序列化）
 - `fd-design-system`：10+ 测试（Token + Theme + Registry + CSS 输出）
 - `fd-ecosystem`：16 测试（IPC + sync_to_code + 模板标签检索 + 内置场景模板）
