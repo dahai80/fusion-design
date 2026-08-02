@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "fusion-design", version, about = "Fusion-Design 本地 AI 设计工作台 CLI")]
+#[command(
+    name = "fusion-design",
+    version,
+    about = "Fusion-Design 本地 AI 设计工作台 CLI"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -241,10 +245,12 @@ impl From<ThemeModeArg> for fd_design_system::Theme {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-    ).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
 
     let cli = Cli::parse();
     let rt = tokio::runtime::Runtime::new()?;
@@ -270,7 +276,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("已激活: {id}");
             Ok(())
         }
-        Command::Export { input, format, out, ipc_base } => {
+        Command::Export {
+            input,
+            format,
+            out,
+            ipc_base,
+        } => {
             let json = std::fs::read_to_string(&input)?;
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
             let format_str = format!("{:?}", format);
@@ -291,7 +302,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::ExportBatch { input, format, formats, out } => {
+        Command::ExportBatch {
+            input,
+            format,
+            formats,
+            out,
+        } => {
             let json = std::fs::read_to_string(&input)?;
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
             let fmt_list: Vec<fd_export::ExportFormat> = if let Some(ref fmts) = formats {
@@ -308,7 +324,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("已批量导出 {} 个页面到 {out:?}", total);
             Ok(())
         }
-        Command::Generate { prompt, page, model, endpoint, out, ipc_base, stream } => {
+        Command::Generate {
+            prompt,
+            page,
+            model,
+            endpoint,
+            out,
+            ipc_base,
+            stream,
+        } => {
             let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
             if stream {
                 let model_owned = model.clone();
@@ -321,7 +345,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     sys.to_string(),
                     user_msg,
                     2048,
-                ).await;
+                )
+                .await;
                 use futures::StreamExt;
                 futures::pin_mut!(s);
                 while let Some(delta) = s.next().await {
@@ -400,17 +425,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::TokenCSS { design_system } => {
             let mut reg = design::DesignSystemRegistry::new();
             reg.register_builtin();
-            let system = reg.get(&design_system)
-                .ok_or_else(|| anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list()))?;
+            let system = reg.get(&design_system).ok_or_else(|| {
+                anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list())
+            })?;
             println!("{}", system.to_css_custom_properties());
             Ok(())
         }
-        Command::Lint { input, design_system, rules, fix, dry_run } => {
+        Command::Lint {
+            input,
+            design_system,
+            rules,
+            fix,
+            dry_run,
+        } => {
             let json = std::fs::read_to_string(&input)?;
             let mut doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
 
             let mut linter = match rules {
-                Some(r) => fd_design_lint::Linter::with_rules(r.into_iter().map(Into::into).collect()),
+                Some(r) => {
+                    fd_design_lint::Linter::with_rules(r.into_iter().map(Into::into).collect())
+                }
                 None => fd_design_lint::Linter::new(),
             };
 
@@ -442,7 +476,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             Ok(())
         }
-        Command::Codegen { input, target, component, out } => {
+        Command::Codegen {
+            input,
+            target,
+            component,
+            out,
+        } => {
             let json = match input {
                 Some(p) => std::fs::read_to_string(&p)?,
                 None => {
@@ -462,7 +501,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     use fd_codegen::Codegen;
                     fd_codegen::ReactTailwindCodegen {
                         component_name: component.clone(),
-                    }.generate(&doc)
+                    }
+                    .generate(&doc)
                 }
                 CodegenTargetArg::TailwindOnly => {
                     use fd_codegen::Codegen;
@@ -472,7 +512,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     use fd_codegen::Codegen;
                     fd_codegen::SwiftUiCodegen {
                         view_name: component.clone(),
-                    }.generate(&doc)
+                    }
+                    .generate(&doc)
                 }
             };
             match out {
@@ -547,11 +588,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{output}");
             Ok(())
         }
-        Command::Theme { design_system, mode } => {
+        Command::Theme {
+            design_system,
+            mode,
+        } => {
             let mut reg = fd_design_system::DesignSystemRegistry::new();
             reg.register_builtin();
-            let system = reg.get(&design_system)
-                .ok_or_else(|| anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list()))?;
+            let system = reg.get(&design_system).ok_or_else(|| {
+                anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list())
+            })?;
             let css = system.to_css_custom_properties_for_theme(mode.into());
             println!("{css}");
             Ok(())

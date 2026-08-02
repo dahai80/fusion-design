@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TokenValue {
-    Color(String),        // hex, e.g. "#FFFFFF"
-    Number(f32),          // 字号/间距/圆角
-    Shadow(String),       // CSS box-shadow
-    String(String),       // 字体族等 / token:xxx 引用
+    Color(String),  // hex, e.g. "#FFFFFF"
+    Number(f32),    // 字号/间距/圆角
+    Shadow(String), // CSS box-shadow
+    String(String), // 字体族等 / token:xxx 引用
 }
 
 impl TokenValue {
@@ -108,11 +108,7 @@ impl DesignSystem {
     ) -> String {
         if let Some(target) = value.reference_target() {
             if visited.contains(target) {
-                tracing::warn!(
-                    "检测到循环 token 引用: {:?}, 已访问: {:?}",
-                    target,
-                    visited
-                );
+                tracing::warn!("检测到循环 token 引用: {:?}, 已访问: {:?}", target, visited);
                 return value.to_css_value();
             }
             visited.insert(target.to_string());
@@ -199,9 +195,7 @@ impl DesignSystemRegistry {
 
     /// 获取当前激活的规范。
     pub fn active(&self) -> Option<&DesignSystem> {
-        self.active_id
-            .as_ref()
-            .and_then(|id| self.systems.get(id))
+        self.active_id.as_ref().and_then(|id| self.systems.get(id))
     }
 
     /// 列出全部已注册规范 ID。
@@ -240,8 +234,7 @@ impl DesignSystemRegistry {
 
     /// 从 JSON 导入一套规范。
     pub fn import_json(&mut self, json: &str) -> Result<(), ImportError> {
-        let system: DesignSystem =
-            serde_json::from_str(json).map_err(ImportError)?;
+        let system: DesignSystem = serde_json::from_str(json).map_err(ImportError)?;
         self.systems.insert(system.id.clone(), system);
         Ok(())
     }
@@ -266,18 +259,58 @@ pub fn builtin_apple_hig() -> DesignSystem {
         id: "apple-hig".into(),
         name: "Apple HIG".into(),
         tokens: vec![
-            Token { name: "color.bg".into(), value: TokenValue::Color("#F2F2F7".into()), description: "系统背景".into() },
-            Token { name: "color.fg".into(), value: TokenValue::Color("#1C1C1E".into()), description: "主前景".into() },
-            Token { name: "color.accent".into(), value: TokenValue::Color("#007AFF".into()), description: "系统强调色".into() },
-            Token { name: "font.size.body".into(), value: TokenValue::Number(17.0), description: "正文字号".into() },
-            Token { name: "radius.card".into(), value: TokenValue::Number(10.0), description: "卡片圆角".into() },
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#F2F2F7".into()),
+                description: "系统背景".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#1C1C1E".into()),
+                description: "主前景".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#007AFF".into()),
+                description: "系统强调色".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(17.0),
+                description: "正文字号".into(),
+            },
+            Token {
+                name: "radius.card".into(),
+                value: TokenValue::Number(10.0),
+                description: "卡片圆角".into(),
+            },
         ],
         dark_tokens: Some(vec![
-            Token { name: "color.bg".into(), value: TokenValue::Color("#1C1C1E".into()), description: "暗色背景".into() },
-            Token { name: "color.fg".into(), value: TokenValue::Color("#F2F2F7".into()), description: "暗色前景".into() },
-            Token { name: "color.accent".into(), value: TokenValue::Color("#0A84FF".into()), description: "暗色强调".into() },
-            Token { name: "font.size.body".into(), value: TokenValue::Number(17.0), description: "正文字号".into() },
-            Token { name: "radius.card".into(), value: TokenValue::Number(10.0), description: "卡片圆角".into() },
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#1C1C1E".into()),
+                description: "暗色背景".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#F2F2F7".into()),
+                description: "暗色前景".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#0A84FF".into()),
+                description: "暗色强调".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(17.0),
+                description: "正文字号".into(),
+            },
+            Token {
+                name: "radius.card".into(),
+                value: TokenValue::Number(10.0),
+                description: "卡片圆角".into(),
+            },
         ]),
     }
 }
@@ -287,11 +320,31 @@ fn builtin_minimal_dashboard() -> DesignSystem {
         id: "minimal-dashboard".into(),
         name: "极简后台".into(),
         tokens: vec![
-            Token { name: "color.bg".into(), value: TokenValue::Color("#FFFFFF".into()), description: "纯白背景".into() },
-            Token { name: "color.fg".into(), value: TokenValue::Color("#374151".into()), description: "深灰前景".into() },
-            Token { name: "color.accent".into(), value: TokenValue::Color("#10B981".into()), description: "绿色强调".into() },
-            Token { name: "font.size.body".into(), value: TokenValue::Number(14.0), description: "正文字号".into() },
-            Token { name: "radius.card".into(), value: TokenValue::Number(6.0), description: "卡片圆角".into() },
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#FFFFFF".into()),
+                description: "纯白背景".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#374151".into()),
+                description: "深灰前景".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#10B981".into()),
+                description: "绿色强调".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(14.0),
+                description: "正文字号".into(),
+            },
+            Token {
+                name: "radius.card".into(),
+                value: TokenValue::Number(6.0),
+                description: "卡片圆角".into(),
+            },
         ],
         dark_tokens: None,
     }
@@ -302,12 +355,36 @@ fn builtin_robot_sim() -> DesignSystem {
         id: "robot-sim".into(),
         name: "机器人仿真控制台".into(),
         tokens: vec![
-            Token { name: "color.bg".into(), value: TokenValue::Color("#0F172A".into()), description: "深色背景".into() },
-            Token { name: "color.fg".into(), value: TokenValue::Color("#E2E8F0".into()), description: "浅色前景".into() },
-            Token { name: "color.warn".into(), value: TokenValue::Color("#F59E0B".into()), description: "警告色".into() },
-            Token { name: "color.danger".into(), value: TokenValue::Color("#EF4444".into()), description: "危险/急停色".into() },
-            Token { name: "font.size.body".into(), value: TokenValue::Number(13.0), description: "等宽字号".into() },
-            Token { name: "radius.panel".into(), value: TokenValue::Number(4.0), description: "面板圆角".into() },
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#0F172A".into()),
+                description: "深色背景".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#E2E8F0".into()),
+                description: "浅色前景".into(),
+            },
+            Token {
+                name: "color.warn".into(),
+                value: TokenValue::Color("#F59E0B".into()),
+                description: "警告色".into(),
+            },
+            Token {
+                name: "color.danger".into(),
+                value: TokenValue::Color("#EF4444".into()),
+                description: "危险/急停色".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(13.0),
+                description: "等宽字号".into(),
+            },
+            Token {
+                name: "radius.panel".into(),
+                value: TokenValue::Number(4.0),
+                description: "面板圆角".into(),
+            },
         ],
         dark_tokens: None,
     }
@@ -466,8 +543,16 @@ mod tests {
             id: "ref-test".into(),
             name: "Ref Test".into(),
             tokens: vec![
-                Token { name: "color.primary".into(), value: TokenValue::Color("#007AFF".into()), description: "主色".into() },
-                Token { name: "color.button".into(), value: TokenValue::String("token:color.primary".into()), description: "按钮色引用主色".into() },
+                Token {
+                    name: "color.primary".into(),
+                    value: TokenValue::Color("#007AFF".into()),
+                    description: "主色".into(),
+                },
+                Token {
+                    name: "color.button".into(),
+                    value: TokenValue::String("token:color.primary".into()),
+                    description: "按钮色引用主色".into(),
+                },
             ],
             dark_tokens: None,
         };
@@ -482,8 +567,16 @@ mod tests {
             id: "circular".into(),
             name: "Circular".into(),
             tokens: vec![
-                Token { name: "a".into(), value: TokenValue::String("token:b".into()), description: "循环A".into() },
-                Token { name: "b".into(), value: TokenValue::String("token:a".into()), description: "循环B".into() },
+                Token {
+                    name: "a".into(),
+                    value: TokenValue::String("token:b".into()),
+                    description: "循环A".into(),
+                },
+                Token {
+                    name: "b".into(),
+                    value: TokenValue::String("token:a".into()),
+                    description: "循环B".into(),
+                },
             ],
             dark_tokens: None,
         };
@@ -519,17 +612,26 @@ mod tests {
             id: "chain".into(),
             name: "Chain".into(),
             tokens: vec![
-                Token { name: "color.base".into(), value: TokenValue::Color("#007AFF".into()), description: "基础色".into() },
-                Token { name: "color.mid".into(), value: TokenValue::String("token:color.base".into()), description: "中间引用".into() },
-                Token { name: "color.top".into(), value: TokenValue::String("token:color.mid".into()), description: "顶层引用".into() },
+                Token {
+                    name: "color.base".into(),
+                    value: TokenValue::Color("#007AFF".into()),
+                    description: "基础色".into(),
+                },
+                Token {
+                    name: "color.mid".into(),
+                    value: TokenValue::String("token:color.base".into()),
+                    description: "中间引用".into(),
+                },
+                Token {
+                    name: "color.top".into(),
+                    value: TokenValue::String("token:color.mid".into()),
+                    description: "顶层引用".into(),
+                },
             ],
             dark_tokens: None,
         };
         let mut visited = std::collections::HashSet::new();
-        let val = ds.resolve_reference(
-            &TokenValue::String("token:color.top".into()),
-            &mut visited,
-        );
+        let val = ds.resolve_reference(&TokenValue::String("token:color.top".into()), &mut visited);
         assert_eq!(val, "#007AFF");
     }
 

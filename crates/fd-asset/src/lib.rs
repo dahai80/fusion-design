@@ -10,9 +10,9 @@
 //! Data schemas: AssetItem (image metadata + annotations + color palette), AssetLibrary (collection + search)
 //! User instruction: "按照你建议的优先级马上启动落地" — P0 素材库管理模块
 
+use image::GenericImageView;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use image::GenericImageView;
 
 use serde::{Deserialize, Serialize};
 
@@ -204,9 +204,9 @@ impl AssetLibrary {
         self.items
             .values()
             .filter(|i| {
-                lower_tags.iter().all(|t| {
-                    i.tags.iter().any(|it| it.to_lowercase() == *t)
-                })
+                lower_tags
+                    .iter()
+                    .all(|t| i.tags.iter().any(|it| it.to_lowercase() == *t))
             })
             .collect()
     }
@@ -218,9 +218,10 @@ impl AssetLibrary {
 
     /// 给素材添加标注。
     pub fn add_annotation(&mut self, item_id: &str, annotation: Annotation) -> anyhow::Result<()> {
-        let item = self.items.get_mut(item_id).ok_or_else(|| {
-            AssetError::NotFound(item_id.to_string())
-        })?;
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| AssetError::NotFound(item_id.to_string()))?;
         item.annotations.push(annotation);
         item.updated_at = default_timestamp();
         tracing::info!(item_id = %item_id, "add_annotation: 标注已添加");
@@ -233,9 +234,10 @@ impl AssetLibrary {
         item_id: &str,
         extraction: ColorExtraction,
     ) -> anyhow::Result<()> {
-        let item = self.items.get_mut(item_id).ok_or_else(|| {
-            AssetError::NotFound(item_id.to_string())
-        })?;
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| AssetError::NotFound(item_id.to_string()))?;
         item.color_extraction = Some(extraction);
         item.updated_at = default_timestamp();
         tracing::info!(item_id = %item_id, "set_color_extraction: 色彩提取已设置");
@@ -248,9 +250,10 @@ impl AssetLibrary {
         item_id: &str,
         design_system_id: &str,
     ) -> anyhow::Result<()> {
-        let item = self.items.get_mut(item_id).ok_or_else(|| {
-            AssetError::NotFound(item_id.to_string())
-        })?;
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| AssetError::NotFound(item_id.to_string()))?;
         item.design_system_id = Some(design_system_id.to_string());
         item.updated_at = default_timestamp();
         tracing::info!(item_id = %item_id, ds = %design_system_id, "bind_design_system: 已绑定");
@@ -263,9 +266,10 @@ impl AssetLibrary {
         item_id: &str,
         token_map: &HashMap<String, String>,
     ) -> anyhow::Result<()> {
-        let item = self.items.get_mut(item_id).ok_or_else(|| {
-            AssetError::NotFound(item_id.to_string())
-        })?;
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| AssetError::NotFound(item_id.to_string()))?;
         if let Some(ref mut extraction) = item.color_extraction {
             extraction.bound_tokens.extend(token_map.clone());
             tracing::info!(
@@ -413,7 +417,9 @@ pub fn extract_colors(file_path: &Path) -> anyhow::Result<ColorExtraction> {
     let raw_pixels = rgb.as_raw();
     let pixel_count = raw_pixels.len() / 3;
     for i in (0..pixel_count).step_by(step) {
-        if i % step != 0 { continue; }
+        if i % step != 0 {
+            continue;
+        }
         // 量化到 32 级（每通道 8 档），减少颜色碎片
         let base = i * 3;
         let qr = (raw_pixels[base] / 32) * 32;
@@ -618,7 +624,10 @@ mod tests {
         let mut lib = AssetLibrary::new();
         let ann = Annotation {
             id: "ann1".into(),
-            x: 0.0, y: 0.0, w: 0.0, h: 0.0,
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
             label: String::new(),
             color: None,
             note: None,
@@ -637,7 +646,14 @@ mod tests {
         };
         lib.set_color_extraction("a1", extraction).unwrap();
         let item = lib.get("a1").unwrap();
-        assert_eq!(item.color_extraction.as_ref().unwrap().dominant_colors.len(), 2);
+        assert_eq!(
+            item.color_extraction
+                .as_ref()
+                .unwrap()
+                .dominant_colors
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -645,7 +661,10 @@ mod tests {
         let mut lib = AssetLibrary::new();
         lib.add(sample_item("a1"));
         lib.bind_design_system("a1", "apple-hig").unwrap();
-        assert_eq!(lib.get("a1").unwrap().design_system_id.as_deref(), Some("apple-hig"));
+        assert_eq!(
+            lib.get("a1").unwrap().design_system_id.as_deref(),
+            Some("apple-hig")
+        );
     }
 
     #[test]
@@ -665,7 +684,11 @@ mod tests {
 
         let item = lib.get("a1").unwrap();
         assert_eq!(
-            item.color_extraction.as_ref().unwrap().bound_tokens.get("color.primary"),
+            item.color_extraction
+                .as_ref()
+                .unwrap()
+                .bound_tokens
+                .get("color.primary"),
             Some(&"#FF5733".to_string())
         );
     }
@@ -725,7 +748,10 @@ mod tests {
     fn annotation_serde() {
         let ann = Annotation {
             id: "ann1".into(),
-            x: 10.0, y: 20.0, w: 50.0, h: 30.0,
+            x: 10.0,
+            y: 20.0,
+            w: 50.0,
+            h: 30.0,
             label: "按钮".into(),
             color: Some("#FF0000".into()),
             note: Some("主按钮".into()),
@@ -764,7 +790,11 @@ mod tests {
         assert!(!result.dominant_colors.is_empty());
         assert!(!result.weights.is_empty());
         // 主色应接近红色 #E00000（量化后 255/32*32=224）
-        assert!(result.dominant_colors[0].starts_with("#E0"), "got {}", result.dominant_colors[0]);
+        assert!(
+            result.dominant_colors[0].starts_with("#E0"),
+            "got {}",
+            result.dominant_colors[0]
+        );
     }
 
     #[test]

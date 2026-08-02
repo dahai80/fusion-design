@@ -155,7 +155,12 @@ pub struct SideOffsets {
 
 impl SideOffsets {
     pub fn uniform(v: f32) -> Self {
-        Self { top: v, right: v, bottom: v, left: v }
+        Self {
+            top: v,
+            right: v,
+            bottom: v,
+            left: v,
+        }
     }
 }
 
@@ -473,7 +478,12 @@ fn compute_page_layout(page: &Page, results: &mut Vec<ComputedLayout>) {
     }
 }
 
-fn compute_node_layout(node: &PenNode, parent_x: f32, parent_y: f32, results: &mut Vec<ComputedLayout>) {
+fn compute_node_layout(
+    node: &PenNode,
+    parent_x: f32,
+    parent_y: f32,
+    results: &mut Vec<ComputedLayout>,
+) {
     let abs_x = parent_x + node.x;
     let abs_y = parent_y + node.y;
 
@@ -563,8 +573,16 @@ fn compute_flex_layout(
     for child in &parent.children {
         let child_style = taffy::Style {
             size: taffy::Size {
-                width: if child.w > 0.0 { taffy::Dimension::Length(child.w) } else { taffy::Dimension::Auto },
-                height: if child.h > 0.0 { taffy::Dimension::Length(child.h) } else { taffy::Dimension::Auto },
+                width: if child.w > 0.0 {
+                    taffy::Dimension::Length(child.w)
+                } else {
+                    taffy::Dimension::Auto
+                },
+                height: if child.h > 0.0 {
+                    taffy::Dimension::Length(child.h)
+                } else {
+                    taffy::Dimension::Auto
+                },
             },
             ..Default::default()
         };
@@ -573,7 +591,9 @@ fn compute_flex_layout(
         node_map.push((id, child.id.clone()));
     }
 
-    let root_id = taffy_tree.new_with_children(parent_style, &child_ids).unwrap();
+    let root_id = taffy_tree
+        .new_with_children(parent_style, &child_ids)
+        .unwrap();
 
     let available = taffy::Size {
         width: taffy::AvailableSpace::Definite(parent.w),
@@ -611,19 +631,27 @@ fn compute_grid_layout(
     let mut taffy_tree: taffy::TaffyTree<()> = taffy::TaffyTree::new();
     let mut node_map: Vec<(taffy::NodeId, String)> = Vec::new();
 
-    let columns: Vec<taffy::TrackSizingFunction> = params.columns.iter().map(|t| match t {
-        TrackSizing::Fixed(v) => taffy::style_helpers::length(*v),
-        TrackSizing::Auto => taffy::style_helpers::auto(),
-        TrackSizing::Flex(v) => taffy::style_helpers::flex(*v),
-        TrackSizing::Percent(v) => taffy::style_helpers::percent(*v),
-    }).collect();
+    let columns: Vec<taffy::TrackSizingFunction> = params
+        .columns
+        .iter()
+        .map(|t| match t {
+            TrackSizing::Fixed(v) => taffy::style_helpers::length(*v),
+            TrackSizing::Auto => taffy::style_helpers::auto(),
+            TrackSizing::Flex(v) => taffy::style_helpers::flex(*v),
+            TrackSizing::Percent(v) => taffy::style_helpers::percent(*v),
+        })
+        .collect();
 
-    let rows: Vec<taffy::TrackSizingFunction> = params.rows.iter().map(|t| match t {
-        TrackSizing::Fixed(v) => taffy::style_helpers::length(*v),
-        TrackSizing::Auto => taffy::style_helpers::auto(),
-        TrackSizing::Flex(v) => taffy::style_helpers::flex(*v),
-        TrackSizing::Percent(v) => taffy::style_helpers::percent(*v),
-    }).collect();
+    let rows: Vec<taffy::TrackSizingFunction> = params
+        .rows
+        .iter()
+        .map(|t| match t {
+            TrackSizing::Fixed(v) => taffy::style_helpers::length(*v),
+            TrackSizing::Auto => taffy::style_helpers::auto(),
+            TrackSizing::Flex(v) => taffy::style_helpers::flex(*v),
+            TrackSizing::Percent(v) => taffy::style_helpers::percent(*v),
+        })
+        .collect();
 
     let parent_style = taffy::Style {
         display: taffy::Display::Grid,
@@ -644,8 +672,16 @@ fn compute_grid_layout(
     for (i, child) in parent.children.iter().enumerate() {
         let mut child_style = taffy::Style {
             size: taffy::Size {
-                width: if child.w > 0.0 { taffy::Dimension::Length(child.w) } else { taffy::Dimension::Auto },
-                height: if child.h > 0.0 { taffy::Dimension::Length(child.h) } else { taffy::Dimension::Auto },
+                width: if child.w > 0.0 {
+                    taffy::Dimension::Length(child.w)
+                } else {
+                    taffy::Dimension::Auto
+                },
+                height: if child.h > 0.0 {
+                    taffy::Dimension::Length(child.h)
+                } else {
+                    taffy::Dimension::Auto
+                },
             },
             ..Default::default()
         };
@@ -666,7 +702,9 @@ fn compute_grid_layout(
         node_map.push((id, child.id.clone()));
     }
 
-    let root_id = taffy_tree.new_with_children(parent_style, &child_ids).unwrap();
+    let root_id = taffy_tree
+        .new_with_children(parent_style, &child_ids)
+        .unwrap();
 
     let available = taffy::Size {
         width: taffy::AvailableSpace::Definite(parent.w),
@@ -719,7 +757,10 @@ impl PenNode {
             id: id.into(),
             kind: NodeKind::Rect,
             name: "Rect".into(),
-            x, y, w, h,
+            x,
+            y,
+            w,
+            h,
             style: NodeStyle::default(),
             text: None,
             children: vec![],
@@ -734,7 +775,10 @@ impl PenNode {
             id: id.into(),
             kind: NodeKind::Text,
             name: "Text".into(),
-            x, y, w: 0.0, h: 0.0,
+            x,
+            y,
+            w: 0.0,
+            h: 0.0,
             style: NodeStyle::default(),
             text: Some(content.into()),
             children: vec![],
@@ -749,7 +793,10 @@ impl PenNode {
             id: id.into(),
             kind: NodeKind::Group,
             name: "Group".into(),
-            x, y, w: 0.0, h: 0.0,
+            x,
+            y,
+            w: 0.0,
+            h: 0.0,
             style: NodeStyle::default(),
             text: None,
             children,
@@ -790,7 +837,9 @@ fn remove_node_from_list(nodes: &mut Vec<PenNode>, id: &str) -> bool {
     if nodes.len() != before {
         return true;
     }
-    nodes.iter_mut().any(|n| remove_node_from_list(&mut n.children, id))
+    nodes
+        .iter_mut()
+        .any(|n| remove_node_from_list(&mut n.children, id))
 }
 
 // ── 错误 ──
@@ -906,7 +955,11 @@ impl PenDocument {
                     change_type: DiffChangeType::Added,
                     field: "*".into(),
                     old_value: None,
-                    new_value: Some(serde_json::to_value(other_nodes[*id]).ok().unwrap_or_default()),
+                    new_value: Some(
+                        serde_json::to_value(other_nodes[*id])
+                            .ok()
+                            .unwrap_or_default(),
+                    ),
                 });
             }
         }
@@ -916,13 +969,26 @@ impl PenDocument {
                     node_id: id.to_string(),
                     change_type: DiffChangeType::Removed,
                     field: "*".into(),
-                    old_value: Some(serde_json::to_value(self_nodes[*id]).ok().unwrap_or_default()),
+                    old_value: Some(
+                        serde_json::to_value(self_nodes[*id])
+                            .ok()
+                            .unwrap_or_default(),
+                    ),
                     new_value: None,
                 });
             }
         }
         for id in &self_ids {
-            if let (Some(old_node), Some(new_node)) = (self_ids.iter().find(|s| **s == *id).and_then(|_| self_nodes.get(*id)), other_ids.iter().find(|s| **s == *id).and_then(|_| other_nodes.get(*id))) {
+            if let (Some(old_node), Some(new_node)) = (
+                self_ids
+                    .iter()
+                    .find(|s| **s == *id)
+                    .and_then(|_| self_nodes.get(*id)),
+                other_ids
+                    .iter()
+                    .find(|s| **s == *id)
+                    .and_then(|_| other_nodes.get(*id)),
+            ) {
                 let old_json = serde_json::to_value(old_node).unwrap_or_default();
                 let new_json = serde_json::to_value(new_node).unwrap_or_default();
                 if old_json != new_json {
@@ -1014,15 +1080,47 @@ fn diff_json_objects(
 fn apply_field_change(node: &mut PenNode, field: &str, new_value: &Option<serde_json::Value>) {
     if let Some(val) = new_value {
         match field {
-            "x" => { if let Some(v) = val.as_f64() { node.x = v as f32; } }
-            "y" => { if let Some(v) = val.as_f64() { node.y = v as f32; } }
-            "w" => { if let Some(v) = val.as_f64() { node.w = v as f32; } }
-            "h" => { if let Some(v) = val.as_f64() { node.h = v as f32; } }
-            "name" => { if let Some(v) = val.as_str() { node.name = v.to_string(); } }
-            "text" => { node.text = val.as_str().map(String::from); }
-            "rotation" => { if let Some(v) = val.as_f64() { node.rotation = v as f32; } }
-            "z_index" => { if let Some(v) = val.as_i64() { node.z_index = v as i32; } }
-            _ => { tracing::debug!(field, "apply_field_change: 未处理字段"); }
+            "x" => {
+                if let Some(v) = val.as_f64() {
+                    node.x = v as f32;
+                }
+            }
+            "y" => {
+                if let Some(v) = val.as_f64() {
+                    node.y = v as f32;
+                }
+            }
+            "w" => {
+                if let Some(v) = val.as_f64() {
+                    node.w = v as f32;
+                }
+            }
+            "h" => {
+                if let Some(v) = val.as_f64() {
+                    node.h = v as f32;
+                }
+            }
+            "name" => {
+                if let Some(v) = val.as_str() {
+                    node.name = v.to_string();
+                }
+            }
+            "text" => {
+                node.text = val.as_str().map(String::from);
+            }
+            "rotation" => {
+                if let Some(v) = val.as_f64() {
+                    node.rotation = v as f32;
+                }
+            }
+            "z_index" => {
+                if let Some(v) = val.as_i64() {
+                    node.z_index = v as i32;
+                }
+            }
+            _ => {
+                tracing::debug!(field, "apply_field_change: 未处理字段");
+            }
         }
     }
 }
@@ -1074,7 +1172,8 @@ mod tests {
         let mut doc = PenDocument::new();
         let mut page = Page::new("p", "P", 100.0, 100.0);
         let mut g = PenNode::group("g", 0.0, 0.0, vec![]);
-        g.children.push(PenNode::rect("inner", 0.0, 0.0, 10.0, 10.0));
+        g.children
+            .push(PenNode::rect("inner", 0.0, 0.0, 10.0, 10.0));
         page.add(g);
         doc.add_page(page);
         assert!(doc.remove_node("inner"));
@@ -1181,8 +1280,10 @@ mod tests {
             gap: (8.0, 16.0),
             areas: vec![GridArea {
                 name: "main".into(),
-                row_start: 1, row_end: 2,
-                col_start: 1, col_end: 3,
+                row_start: 1,
+                row_end: 2,
+                col_start: 1,
+                col_end: 3,
             }],
         });
         let s = serde_json::to_string(&grid).unwrap();
@@ -1214,7 +1315,9 @@ mod tests {
             gap: 12.0,
             ..Default::default()
         });
-        style.design_token_refs.insert("fill".into(), "color.accent".into());
+        style
+            .design_token_refs
+            .insert("fill".into(), "color.accent".into());
         let s = serde_json::to_string(&style).unwrap();
         let s2: NodeStyle = serde_json::from_str(&s).unwrap();
         assert_eq!(style, s2);
@@ -1245,10 +1348,15 @@ mod tests {
     fn compute_layout_flex_children() {
         let mut doc = PenDocument::new();
         let mut page = Page::new("p1", "Flex", 400.0, 200.0);
-        let mut container = PenNode::group("container", 0.0, 0.0, vec![
-            PenNode::rect("a", 0.0, 0.0, 100.0, 50.0),
-            PenNode::rect("b", 0.0, 0.0, 100.0, 50.0),
-        ]);
+        let mut container = PenNode::group(
+            "container",
+            0.0,
+            0.0,
+            vec![
+                PenNode::rect("a", 0.0, 0.0, 100.0, 50.0),
+                PenNode::rect("b", 0.0, 0.0, 100.0, 50.0),
+            ],
+        );
         container.w = 400.0;
         container.h = 200.0;
         container.style.layout = LayoutMode::Flex(FlexParams {
@@ -1272,10 +1380,15 @@ mod tests {
     fn compute_layout_grid_children() {
         let mut doc = PenDocument::new();
         let mut page = Page::new("p1", "Grid", 400.0, 200.0);
-        let mut container = PenNode::group("container", 0.0, 0.0, vec![
-            PenNode::rect("a", 0.0, 0.0, 0.0, 50.0),
-            PenNode::rect("b", 0.0, 0.0, 0.0, 50.0),
-        ]);
+        let mut container = PenNode::group(
+            "container",
+            0.0,
+            0.0,
+            vec![
+                PenNode::rect("a", 0.0, 0.0, 0.0, 50.0),
+                PenNode::rect("b", 0.0, 0.0, 0.0, 50.0),
+            ],
+        );
         container.w = 400.0;
         container.h = 200.0;
         container.style.layout = LayoutMode::Grid(GridParams {
@@ -1323,7 +1436,10 @@ mod tests {
         let doc = PenDocument::from_json(old_json).unwrap();
         assert_eq!(doc.pages[0].nodes[0].rotation, 0.0);
         assert_eq!(doc.pages[0].nodes[0].z_index, 0);
-        assert!(matches!(doc.pages[0].nodes[0].style.layout, LayoutMode::Free));
+        assert!(matches!(
+            doc.pages[0].nodes[0].style.layout,
+            LayoutMode::Free
+        ));
     }
 
     // ── ComponentSlot 实例化测试 ──
@@ -1332,7 +1448,10 @@ mod tests {
     fn component_registry_instantiate_with_overrides() {
         let mut reg = ComponentRegistry::new();
         let mut variants = HashMap::new();
-        variants.insert("primary".into(), PenNode::rect("btn", 0.0, 0.0, 120.0, 40.0));
+        variants.insert(
+            "primary".into(),
+            PenNode::rect("btn", 0.0, 0.0, 120.0, 40.0),
+        );
         reg.register(ComponentDefinition {
             id: "button".into(),
             name: "Button".into(),
@@ -1371,7 +1490,10 @@ mod tests {
     fn component_registry_instantiate_unknown_variant() {
         let mut reg = ComponentRegistry::new();
         let mut variants = HashMap::new();
-        variants.insert("primary".into(), PenNode::rect("btn", 0.0, 0.0, 120.0, 40.0));
+        variants.insert(
+            "primary".into(),
+            PenNode::rect("btn", 0.0, 0.0, 120.0, 40.0),
+        );
         reg.register(ComponentDefinition {
             id: "button".into(),
             name: "Button".into(),
@@ -1390,7 +1512,10 @@ mod tests {
     fn component_overrides_do_not_affect_template() {
         let mut reg = ComponentRegistry::new();
         let mut variants = HashMap::new();
-        variants.insert("default".into(), PenNode::rect("btn", 0.0, 0.0, 100.0, 40.0));
+        variants.insert(
+            "default".into(),
+            PenNode::rect("btn", 0.0, 0.0, 100.0, 40.0),
+        );
         reg.register(ComponentDefinition {
             id: "button".into(),
             name: "Button".into(),
@@ -1532,7 +1657,10 @@ mod tests {
             nodes: vec![PenNode::rect("n1", 0.0, 0.0, 100.0, 50.0)],
         });
         let diff = doc_v1.diff(&doc_v2);
-        assert!(diff.entries.iter().any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Added));
+        assert!(diff
+            .entries
+            .iter()
+            .any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Added));
     }
 
     #[test]
@@ -1548,7 +1676,9 @@ mod tests {
         let mut doc_v2 = doc_v1.clone();
         doc_v2.pages[0].nodes[0].w = 200.0;
         let diff = doc_v1.diff(&doc_v2);
-        assert!(diff.entries.iter().any(|e| e.node_id == "n1" && e.field == "w" && e.change_type == DiffChangeType::Modified));
+        assert!(diff.entries.iter().any(|e| e.node_id == "n1"
+            && e.field == "w"
+            && e.change_type == DiffChangeType::Modified));
     }
 
     #[test]
@@ -1563,7 +1693,10 @@ mod tests {
         });
         let doc_v2 = PenDocument::new();
         let diff = doc_v1.diff(&doc_v2);
-        assert!(diff.entries.iter().any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Removed));
+        assert!(diff
+            .entries
+            .iter()
+            .any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Removed));
     }
 
     #[test]
@@ -1623,7 +1756,9 @@ impl VersionedDocument {
     }
 
     pub fn active_version(&self) -> &NamedVersion {
-        self.versions.iter().find(|v| v.id == self.active_version_id)
+        self.versions
+            .iter()
+            .find(|v| v.id == self.active_version_id)
             .expect("active_version_id must exist")
     }
 
@@ -1661,7 +1796,10 @@ impl VersionedDocument {
     }
 
     pub fn switch_to_by_name(&mut self, name: &str) -> anyhow::Result<&PenDocument> {
-        let v = self.versions.iter().find(|v| v.name == name)
+        let v = self
+            .versions
+            .iter()
+            .find(|v| v.name == name)
             .ok_or_else(|| anyhow::anyhow!("版本「{}」不存在", name))?;
         self.active_version_id = v.id.clone();
         tracing::info!(name, "switch_to_by_name: 版本切换");
@@ -1677,15 +1815,24 @@ impl VersionedDocument {
     }
 
     pub fn diff_versions(&self, id_a: &str, id_b: &str) -> anyhow::Result<PenDocumentDiff> {
-        let a = self.versions.iter().find(|v| v.id == id_a)
+        let a = self
+            .versions
+            .iter()
+            .find(|v| v.id == id_a)
             .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", id_a))?;
-        let b = self.versions.iter().find(|v| v.id == id_b)
+        let b = self
+            .versions
+            .iter()
+            .find(|v| v.id == id_b)
             .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", id_b))?;
         Ok(a.snapshot.diff(&b.snapshot))
     }
 
     pub fn diff_adjacent(&self, version_id: &str) -> anyhow::Result<PenDocumentDiff> {
-        let idx = self.versions.iter().position(|v| v.id == version_id)
+        let idx = self
+            .versions
+            .iter()
+            .position(|v| v.id == version_id)
             .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
         if idx == 0 {
             return Ok(PenDocumentDiff::default());
@@ -1702,15 +1849,25 @@ impl VersionedDocument {
         if self.active_version_id == version_id {
             anyhow::bail!("不能删除当前激活版本");
         }
-        let idx = self.versions.iter().position(|v| v.id == version_id)
+        let idx = self
+            .versions
+            .iter()
+            .position(|v| v.id == version_id)
             .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
         self.versions.remove(idx);
-        tracing::info!(version_id, remaining = self.versions.len(), "delete_version: 版本已删除");
+        tracing::info!(
+            version_id,
+            remaining = self.versions.len(),
+            "delete_version: 版本已删除"
+        );
         Ok(())
     }
 
     pub fn rename_version(&mut self, version_id: &str, new_name: &str) -> anyhow::Result<()> {
-        let v = self.versions.iter_mut().find(|v| v.id == version_id)
+        let v = self
+            .versions
+            .iter_mut()
+            .find(|v| v.id == version_id)
             .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
         tracing::info!(version_id, old = %v.name, new = new_name, "rename_version");
         v.name = new_name.to_string();
@@ -1741,13 +1898,15 @@ fn now_iso() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("20{:02}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+    format!(
+        "20{:02}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         (secs / 31536000) as u8 % 100,
         (secs % 31536000) / 2592000 + 1,
         ((secs % 2592000) / 86400) + 1,
         (secs % 86400) / 3600,
         (secs % 3600) / 60,
-        secs % 60)
+        secs % 60
+    )
 }
 
 #[cfg(test)]

@@ -91,8 +91,14 @@ impl FusionMlxClient {
         let payload = MlxChatPayload {
             model,
             messages: vec![
-                MlxMessage { role: "system", content: system_prompt },
-                MlxMessage { role: "user", content: user_message },
+                MlxMessage {
+                    role: "system",
+                    content: system_prompt,
+                },
+                MlxMessage {
+                    role: "user",
+                    content: user_message,
+                },
             ],
             max_tokens,
             temperature: None,
@@ -127,8 +133,14 @@ impl FusionMlxClient {
         let payload = MlxChatPayload {
             model,
             messages: vec![
-                MlxMessage { role: "system", content: system_prompt },
-                MlxMessage { role: "user", content: user_message },
+                MlxMessage {
+                    role: "system",
+                    content: system_prompt,
+                },
+                MlxMessage {
+                    role: "user",
+                    content: user_message,
+                },
             ],
             max_tokens,
             temperature: None,
@@ -157,9 +169,7 @@ fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
     // reqwest::Url 对 IPv6 返回形如 "[::1]"，需去方括号比对
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host != "127.0.0.1" && host != "localhost" && host != "::1" {
-        anyhow::bail!(
-            "违反离线硬约束：endpoint host {host:?} 非 localhost，禁止公网调用"
-        );
+        anyhow::bail!("违反离线硬约束：endpoint host {host:?} 非 localhost，禁止公网调用");
     }
     Ok(())
 }
@@ -235,49 +245,76 @@ pub async fn chat_stream(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "SSE 请求失败");
-            return futures::stream::once(async move { Err(anyhow::anyhow!("SSE 请求失败: {e}")) }).boxed();
+            return futures::stream::once(async move { Err(anyhow::anyhow!("SSE 请求失败: {e}")) })
+                .boxed();
         }
     };
     if !resp.status().is_success() {
         let status = resp.status();
-        return futures::stream::once(async move { Err(anyhow::anyhow!("fusion-mlx HTTP {status}")) }).boxed();
+        return futures::stream::once(
+            async move { Err(anyhow::anyhow!("fusion-mlx HTTP {status}")) },
+        )
+        .boxed();
     }
 
     let stream = resp.bytes_stream();
-    futures::stream::unfold((stream, String::new()), |(mut stream, mut buffer)| async move {
-        use futures::StreamExt;
-        loop {
-            match stream.next().await {
-                Some(Ok(bytes)) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
-                    while let Some(line_end) = buffer.find('\n') {
-                        let line = buffer[..line_end].trim().to_string();
-                        buffer = buffer[line_end + 1..].to_string();
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                return Some((Ok(MlxStreamDelta { token: String::new(), finished: true }), (stream, buffer)));
-                            }
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                                let content = parsed["choices"][0]["delta"]["content"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                if !content.is_empty() {
-                                    return Some((Ok(MlxStreamDelta { token: content, finished: false }), (stream, buffer)));
+    futures::stream::unfold(
+        (stream, String::new()),
+        |(mut stream, mut buffer)| async move {
+            use futures::StreamExt;
+            loop {
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        while let Some(line_end) = buffer.find('\n') {
+                            let line = buffer[..line_end].trim().to_string();
+                            buffer = buffer[line_end + 1..].to_string();
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return Some((
+                                        Ok(MlxStreamDelta {
+                                            token: String::new(),
+                                            finished: true,
+                                        }),
+                                        (stream, buffer),
+                                    ));
+                                }
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                                {
+                                    let content = parsed["choices"][0]["delta"]["content"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !content.is_empty() {
+                                        return Some((
+                                            Ok(MlxStreamDelta {
+                                                token: content,
+                                                finished: false,
+                                            }),
+                                            (stream, buffer),
+                                        ));
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                Some(Err(e)) => {
-                    return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer)));
-                }
-                None => {
-                    return Some((Ok(MlxStreamDelta { token: String::new(), finished: true }), (stream, buffer)));
+                    Some(Err(e)) => {
+                        return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer)));
+                    }
+                    None => {
+                        return Some((
+                            Ok(MlxStreamDelta {
+                                token: String::new(),
+                                finished: true,
+                            }),
+                            (stream, buffer),
+                        ));
+                    }
                 }
             }
-        }
-    }).boxed()
+        },
+    )
+    .boxed()
 }
 
 // ── MLX 健康检查 ──
@@ -294,21 +331,38 @@ impl FusionMlxClient {
     /// 探测 fusion-mlx 健康状态（超时 3s）。
     pub async fn health_check(&self) -> anyhow::Result<HealthStatus> {
         let url = format!("{}/v1/models", self.endpoint);
-        let resp = self.http.get(&url).timeout(std::time::Duration::from_secs(3)).send().await;
+        let resp = self
+            .http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await;
         match resp {
             Ok(r) if r.status().is_success() => {
                 let body: serde_json::Value = r.json().await.unwrap_or_default();
                 let model = body["data"][0]["id"].as_str().map(String::from);
                 tracing::info!(available = true, model = ?model, "health_check: MLX 可用");
-                Ok(HealthStatus { available: true, model, gpu: None })
+                Ok(HealthStatus {
+                    available: true,
+                    model,
+                    gpu: None,
+                })
             }
             Ok(r) => {
                 tracing::warn!(status = %r.status(), "health_check: MLX 返回非 200");
-                Ok(HealthStatus { available: false, model: None, gpu: None })
+                Ok(HealthStatus {
+                    available: false,
+                    model: None,
+                    gpu: None,
+                })
             }
             Err(e) => {
                 tracing::warn!(error = %e, "health_check: MLX 不可达");
-                Ok(HealthStatus { available: false, model: None, gpu: None })
+                Ok(HealthStatus {
+                    available: false,
+                    model: None,
+                    gpu: None,
+                })
             }
         }
     }
@@ -349,7 +403,11 @@ pub async fn chat_with_image(
     let image_data_url = format!("data:image/png;base64,{image_base64}");
     let content = vec![
         VisionContent::Text { text: user_text },
-        VisionContent::ImageUrl { image_url: ImageUrlPayload { url: &image_data_url } },
+        VisionContent::ImageUrl {
+            image_url: ImageUrlPayload {
+                url: &image_data_url,
+            },
+        },
     ];
     let payload = serde_json::json!({
         "model": model,
@@ -377,7 +435,10 @@ pub async fn chat_with_image(
 /// 读取图片文件并编码为 base64。
 pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
     let bytes = std::fs::read(path)?;
-    Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes))
+    Ok(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &bytes,
+    ))
 }
 
 // ── OpenPencil ChatProvider 适配 ──
@@ -392,12 +453,17 @@ pub struct FusionMlxChatProvider {
 
 impl FusionMlxChatProvider {
     pub fn new(client: FusionMlxClient, default_model: impl Into<String>) -> Self {
-        Self { client, default_model: default_model.into() }
+        Self {
+            client,
+            default_model: default_model.into(),
+        }
     }
 }
 
 impl ChatProvider for FusionMlxChatProvider {
-    fn provider_label(&self) -> &str { "fusion-mlx (local)" }
+    fn provider_label(&self) -> &str {
+        "fusion-mlx (local)"
+    }
     fn send(&self, request: ChatRequest) -> Box<dyn Iterator<Item = ChatDelta> + Send> {
         let model = request.model.as_deref().unwrap_or(&self.default_model);
         match self.client.chat_sync(
@@ -407,9 +473,13 @@ impl ChatProvider for FusionMlxChatProvider {
             request.max_output_tokens,
         ) {
             Ok(text) => Box::new(
-                vec![ChatDelta::TextDelta(text), ChatDelta::Done {
-                    stop_reason: StopReason::EndTurn,
-                }].into_iter()
+                vec![
+                    ChatDelta::TextDelta(text),
+                    ChatDelta::Done {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ]
+                .into_iter(),
             ),
             Err(e) => Box::new(vec![ChatDelta::Error(e.to_string())].into_iter()),
         }
@@ -490,8 +560,15 @@ impl<'a> SkillContext<'a> {
     }
 
     /// 发送异步 chat 请求（快捷方法）。
-    pub async fn chat_async(&self, sys: &str, user: &str, max_tokens: u32) -> anyhow::Result<String> {
-        self.client.chat_async(self.model, sys, user, max_tokens).await
+    pub async fn chat_async(
+        &self,
+        sys: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> anyhow::Result<String> {
+        self.client
+            .chat_async(self.model, sys, user, max_tokens)
+            .await
     }
 
     /// 生成设计 Token 的 CSS Custom Properties 片段，注入到 system prompt。
@@ -584,7 +661,8 @@ pub trait DesignSkill: Send + Sync {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move { self.execute(&ctx, &input) })
     }
 }
@@ -596,7 +674,9 @@ pub struct SkillRegistry {
 
 impl SkillRegistry {
     pub fn new() -> Self {
-        Self { skills: std::collections::HashMap::new() }
+        Self {
+            skills: std::collections::HashMap::new(),
+        }
     }
 
     /// 注册一个 Skill。
@@ -639,13 +719,18 @@ impl Default for SkillRegistry {
 struct TextToUiSkill;
 
 impl DesignSkill for TextToUiSkill {
-    fn id(&self) -> &str { "text-to-ui" }
-    fn label(&self) -> &str { "文生 UI" }
+    fn id(&self) -> &str {
+        "text-to-ui"
+    }
+    fn label(&self) -> &str {
+        "文生 UI"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
 只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
+            .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment() {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
@@ -660,11 +745,13 @@ impl DesignSkill for TextToUiSkill {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
 只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
+                .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment() {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
@@ -681,8 +768,12 @@ impl DesignSkill for TextToUiSkill {
 struct ImageToUiSkill;
 
 impl DesignSkill for ImageToUiSkill {
-    fn id(&self) -> &str { "image-to-ui" }
-    fn label(&self) -> &str { "图生 UI" }
+    fn id(&self) -> &str {
+        "image-to-ui"
+    }
+    fn label(&self) -> &str {
+        "图生 UI"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         // input 格式: "sketch_path|hint|page_name" 或直接 "sketch_path"
@@ -691,12 +782,15 @@ impl DesignSkill for ImageToUiSkill {
         let hint = parts.get(1).unwrap_or(&"");
         let page_name = parts.get(2).unwrap_or(&"generated");
         let mut sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。".to_string();
+输出严格 JSON：{\"page\":{...}}。只输出 JSON。"
+            .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment() {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user = format!("草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
+        let user = format!(
+            "草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+        );
         let resp = ctx.chat(&sys, &user, 2048)?;
         let doc = parse_ui_json(&resp, page_name)?;
         Ok(SkillOutput::Document(doc))
@@ -706,14 +800,16 @@ impl DesignSkill for ImageToUiSkill {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let parts: Vec<&str> = input.splitn(3, '|').collect();
             let sketch_path = parts[0];
             let hint = parts.get(1).unwrap_or(&"");
             let page_name = parts.get(2).unwrap_or(&"generated");
             let mut sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。".to_string();
+输出严格 JSON：{\"page\":{...}}。只输出 JSON。"
+                .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment() {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
@@ -730,8 +826,12 @@ impl DesignSkill for ImageToUiSkill {
 struct PartialEditSkill;
 
 impl DesignSkill for PartialEditSkill {
-    fn id(&self) -> &str { "partial-edit" }
-    fn label(&self) -> &str { "局部编辑" }
+    fn id(&self) -> &str {
+        "partial-edit"
+    }
+    fn label(&self) -> &str {
+        "局部编辑"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         // input 格式: "node_json|instruction"
@@ -749,7 +849,8 @@ impl DesignSkill for PartialEditSkill {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let parts: Vec<&str> = input.splitn(2, '|').collect();
             let node_json = parts[0];
@@ -769,13 +870,18 @@ impl DesignSkill for PartialEditSkill {
 struct LocalEditSkill;
 
 impl DesignSkill for LocalEditSkill {
-    fn id(&self) -> &str { "local-edit" }
-    fn label(&self) -> &str { "本地编辑" }
+    fn id(&self) -> &str {
+        "local-edit"
+    }
+    fn label(&self) -> &str {
+        "本地编辑"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         let (nodes_part, instruction) = parse_local_edit_input(input);
         let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。".to_string();
+输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。"
+            .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment() {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
@@ -789,11 +895,13 @@ impl DesignSkill for LocalEditSkill {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let (nodes_part, instruction) = parse_local_edit_input(&input);
             let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。".to_string();
+输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。"
+                .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment() {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
@@ -826,8 +934,12 @@ fn parse_local_edit_input(input: &str) -> (String, &str) {
 struct SimPanelSkill;
 
 impl DesignSkill for SimPanelSkill {
-    fn id(&self) -> &str { "sim-panel" }
-    fn label(&self) -> &str { "仿真控制面板" }
+    fn id(&self) -> &str {
+        "sim-panel"
+    }
+    fn label(&self) -> &str {
+        "仿真控制面板"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         let (desc, panel_name) = parse_sim_panel_input(input);
@@ -836,7 +948,8 @@ impl DesignSkill for SimPanelSkill {
 页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
 每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
 page 含 width/height（默认 480×640），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
+            .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment() {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
@@ -851,15 +964,18 @@ page 含 width/height（默认 480×640），nodes 列表每项 \
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let (desc, panel_name) = parse_sim_panel_input(&input);
-            let mut sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
+            let mut sys =
+                "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
 页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
 每个滑块对应一个参数，范围由描述决定。按钮用蓝色和红色区分启动/停止。\
 page 含 width/height（默认 480×640），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。".to_string();
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment() {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
@@ -885,8 +1001,12 @@ fn parse_sim_panel_input(input: &str) -> (&str, &str) {
 struct SpecDocSkill;
 
 impl DesignSkill for SpecDocSkill {
-    fn id(&self) -> &str { "spec-doc" }
-    fn label(&self) -> &str { "设计规范文档" }
+    fn id(&self) -> &str {
+        "spec-doc"
+    }
+    fn label(&self) -> &str {
+        "设计规范文档"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         let (doc_json, title) = parse_spec_doc_input(input);
@@ -915,7 +1035,8 @@ component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let (doc_json, title) = parse_spec_doc_input(&input);
             let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
@@ -952,50 +1073,96 @@ fn parse_spec_doc_json(json: &str, fallback_title: &str) -> anyhow::Result<SpecD
     let cleaned = strip_code_fence(json);
     let v: serde_json::Value = serde_json::from_str(cleaned)?;
 
-    let title = v.get("title").and_then(|t| t.as_str()).unwrap_or(fallback_title).to_string();
-    let page_architecture = v.get("page_architecture").and_then(|a| a.as_str()).unwrap_or("").to_string();
-    let token_summary = v.get("token_summary").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let title = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or(fallback_title)
+        .to_string();
+    let page_architecture = v
+        .get("page_architecture")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_string();
+    let token_summary = v
+        .get("token_summary")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    let interaction_specs: Vec<InteractionSpec> = v.get("interaction_specs")
+    let interaction_specs: Vec<InteractionSpec> = v
+        .get("interaction_specs")
         .and_then(|s| s.as_array())
-        .map(|arr| arr.iter().filter_map(|item| {
-            let obj = item.as_object()?;
-            Some(InteractionSpec {
-                id: obj.get("id")?.as_str()?.to_string(),
-                element: obj.get("element")?.as_str()?.to_string(),
-                event: obj.get("event")?.as_str()?.to_string(),
-                behavior: obj.get("behavior")?.as_str()?.to_string(),
-                animation: obj.get("animation").and_then(|a| a.as_str()).map(String::from),
-                notes: obj.get("notes").and_then(|n| n.as_str()).map(String::from),
-            })
-        }).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    Some(InteractionSpec {
+                        id: obj.get("id")?.as_str()?.to_string(),
+                        element: obj.get("element")?.as_str()?.to_string(),
+                        event: obj.get("event")?.as_str()?.to_string(),
+                        behavior: obj.get("behavior")?.as_str()?.to_string(),
+                        animation: obj
+                            .get("animation")
+                            .and_then(|a| a.as_str())
+                            .map(String::from),
+                        notes: obj.get("notes").and_then(|n| n.as_str()).map(String::from),
+                    })
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
-    let component_specs: Vec<ComponentSpec> = v.get("component_specs")
+    let component_specs: Vec<ComponentSpec> = v
+        .get("component_specs")
         .and_then(|s| s.as_array())
-        .map(|arr| arr.iter().filter_map(|item| {
-            let obj = item.as_object()?;
-            Some(ComponentSpec {
-                id: obj.get("id")?.as_str()?.to_string(),
-                name: obj.get("name")?.as_str()?.to_string(),
-                kind: obj.get("kind")?.as_str()?.to_string(),
-                props: obj.get("props").and_then(|p| p.as_array())
-                    .map(|arr| arr.iter().filter_map(|p| {
-                        let o = p.as_object()?;
-                        Some(ComponentProp {
-                            name: o.get("name")?.as_str()?.to_string(),
-                            prop_type: o.get("prop_type")?.as_str()?.to_string(),
-                            default_value: o.get("default_value").and_then(|d| d.as_str()).map(String::from),
-                            description: o.get("description").and_then(|d| d.as_str()).map(String::from),
-                        })
-                    }).collect())
-                    .unwrap_or_default(),
-                variants: obj.get("variants").and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-                accessibility: obj.get("accessibility").and_then(|a| a.as_str()).map(String::from),
-            })
-        }).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    Some(ComponentSpec {
+                        id: obj.get("id")?.as_str()?.to_string(),
+                        name: obj.get("name")?.as_str()?.to_string(),
+                        kind: obj.get("kind")?.as_str()?.to_string(),
+                        props: obj
+                            .get("props")
+                            .and_then(|p| p.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|p| {
+                                        let o = p.as_object()?;
+                                        Some(ComponentProp {
+                                            name: o.get("name")?.as_str()?.to_string(),
+                                            prop_type: o.get("prop_type")?.as_str()?.to_string(),
+                                            default_value: o
+                                                .get("default_value")
+                                                .and_then(|d| d.as_str())
+                                                .map(String::from),
+                                            description: o
+                                                .get("description")
+                                                .and_then(|d| d.as_str())
+                                                .map(String::from),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        variants: obj
+                            .get("variants")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        accessibility: obj
+                            .get("accessibility")
+                            .and_then(|a| a.as_str())
+                            .map(String::from),
+                    })
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     tracing::info!(
@@ -1021,8 +1188,12 @@ fn parse_spec_doc_json(json: &str, fallback_title: &str) -> anyhow::Result<SpecD
 struct PageFlowSkill;
 
 impl DesignSkill for PageFlowSkill {
-    fn id(&self) -> &str { "page-flow" }
-    fn label(&self) -> &str { "页面流程生成" }
+    fn id(&self) -> &str {
+        "page-flow"
+    }
+    fn label(&self) -> &str {
+        "页面流程生成"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         let (flow_desc, style_hint) = parse_page_flow_input(input);
@@ -1044,7 +1215,8 @@ impl DesignSkill for PageFlowSkill {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let (flow_desc, style_hint) = parse_page_flow_input(&input);
             let pages = parse_flow_pages(flow_desc);
@@ -1087,15 +1259,23 @@ fn parse_flow_pages(flow_desc: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if pages.is_empty() { vec!["首页".to_string()] } else { pages }
+    if pages.is_empty() {
+        vec!["首页".to_string()]
+    } else {
+        pages
+    }
 }
 
 /// 多方案对比 Skill。
 struct MultiVariantsSkill;
 
 impl DesignSkill for MultiVariantsSkill {
-    fn id(&self) -> &str { "multi-variants" }
-    fn label(&self) -> &str { "多方案对比" }
+    fn id(&self) -> &str {
+        "multi-variants"
+    }
+    fn label(&self) -> &str {
+        "多方案对比"
+    }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
         // input 格式: "prompt|style1|style2|style3"
@@ -1107,15 +1287,18 @@ impl DesignSkill for MultiVariantsSkill {
             parts.get(3).unwrap_or(&"深色"),
         ];
         let text_skill = TextToUiSkill;
-        let v1_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[0]))? {
+        let v1_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[0]))?
+        {
             SkillOutput::Document(d) => d,
             _ => anyhow::bail!("text-to-ui 返回非 Document"),
         };
-        let v2_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[1]))? {
+        let v2_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[1]))?
+        {
             SkillOutput::Document(d) => d,
             _ => anyhow::bail!("text-to-ui 返回非 Document"),
         };
-        let v3_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[2]))? {
+        let v3_doc = match text_skill.execute(ctx, &format!("{prompt}（风格：{}）", styles[2]))?
+        {
             SkillOutput::Document(d) => d,
             _ => anyhow::bail!("text-to-ui 返回非 Document"),
         };
@@ -1126,7 +1309,8 @@ impl DesignSkill for MultiVariantsSkill {
         &'a self,
         ctx: SkillContext<'a>,
         input: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let parts: Vec<&str> = input.splitn(4, '|').collect();
             let prompt = parts[0];
@@ -1136,15 +1320,24 @@ impl DesignSkill for MultiVariantsSkill {
                 parts.get(3).unwrap_or(&"深色"),
             ];
             let text_skill = TextToUiSkill;
-            let v1_doc = match text_skill.execute_async(ctx, format!("{prompt}（风格：{}）", styles[0])).await? {
+            let v1_doc = match text_skill
+                .execute_async(ctx, format!("{prompt}（风格：{}）", styles[0]))
+                .await?
+            {
                 SkillOutput::Document(d) => d,
                 _ => anyhow::bail!("text-to-ui 返回非 Document"),
             };
-            let v2_doc = match text_skill.execute_async(ctx, format!("{prompt}（风格：{}）", styles[1])).await? {
+            let v2_doc = match text_skill
+                .execute_async(ctx, format!("{prompt}（风格：{}）", styles[1]))
+                .await?
+            {
                 SkillOutput::Document(d) => d,
                 _ => anyhow::bail!("text-to-ui 返回非 Document"),
             };
-            let v3_doc = match text_skill.execute_async(ctx, format!("{prompt}（风格：{}）", styles[2])).await? {
+            let v3_doc = match text_skill
+                .execute_async(ctx, format!("{prompt}（风格：{}）", styles[2]))
+                .await?
+            {
                 SkillOutput::Document(d) => d,
                 _ => anyhow::bail!("text-to-ui 返回非 Document"),
             };
@@ -1167,7 +1360,10 @@ pub struct DesignSkills {
 
 impl DesignSkills {
     pub fn new(client: FusionMlxClient, default_model: impl Into<String>) -> Self {
-        Self { client, default_model: default_model.into() }
+        Self {
+            client,
+            default_model: default_model.into(),
+        }
     }
 
     /// 文生 UI：自然语言描述 → PenDocument 页面。
@@ -1178,7 +1374,9 @@ impl DesignSkills {
 只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
 {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
         let user = format!("生成页面「{page_name}」。需求：{prompt}");
-        let resp = self.client.chat_sync(&self.default_model, sys, &user, 2048)?;
+        let resp = self
+            .client
+            .chat_sync(&self.default_model, sys, &user, 2048)?;
         parse_ui_json(&resp, page_name)
     }
 
@@ -1203,13 +1401,20 @@ impl DesignSkills {
     ///
     /// 对应 PRD 模块 2「上传参考图 / 手绘草图逆向生成界面」。
     /// MVP 阶段：草图以路径形式传入，提示词中描述，由 fusion-mlx 视觉模型解析。
-    pub fn image_to_ui(&self, sketch_path: &str, hint: &str, page_name: &str) -> anyhow::Result<PenDocument> {
+    pub fn image_to_ui(
+        &self,
+        sketch_path: &str,
+        hint: &str,
+        page_name: &str,
+    ) -> anyhow::Result<PenDocument> {
         let sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
         let user = format!(
             "草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
         );
-        let resp = self.client.chat_sync(&self.default_model, sys, &user, 2048)?;
+        let resp = self
+            .client
+            .chat_sync(&self.default_model, sys, &user, 2048)?;
         parse_ui_json(&resp, page_name)
     }
 
@@ -1244,15 +1449,8 @@ impl DesignSkills {
         let sys = "你是 fusion-design UI 生成器。根据用户提供的截图/草图，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
         let user = format!("补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
-        let resp = chat_with_image(
-            &self.client,
-            &self.default_model,
-            sys,
-            &user,
-            &b64,
-            2048,
-        )
-        .await?;
+        let resp =
+            chat_with_image(&self.client, &self.default_model, sys, &user, &b64, 2048).await?;
         parse_ui_json(&resp, page_name)
     }
 
@@ -1260,11 +1458,7 @@ impl DesignSkills {
     ///
     /// 对应 PRD 模块 2「局部指令修改」。
     /// 返回更新后的节点样式（调用方负责写回 PenDocument）。
-    pub fn partial_edit(
-        &self,
-        node_json: &str,
-        instruction: &str,
-    ) -> anyhow::Result<String> {
+    pub fn partial_edit(&self, node_json: &str, instruction: &str) -> anyhow::Result<String> {
         let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
 输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
         let user = format!("节点：{node_json}\n指令：{instruction}");
@@ -1286,11 +1480,7 @@ impl DesignSkills {
     }
 
     /// 本地编辑：框选多节点 + 自然语言指令 → 批量修改 JSON。
-    pub fn local_edit(
-        &self,
-        nodes_json: &str,
-        instruction: &str,
-    ) -> anyhow::Result<String> {
+    pub fn local_edit(&self, nodes_json: &str, instruction: &str) -> anyhow::Result<String> {
         let sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
 输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。";
         let user = format!("选中节点：\n{nodes_json}\n\n编辑指令：{instruction}");
@@ -1312,11 +1502,7 @@ impl DesignSkills {
     }
 
     /// 仿真控制面板：参数描述 → PenDocument 控制面板页面。
-    pub fn sim_panel(
-        &self,
-        param_desc: &str,
-        panel_name: &str,
-    ) -> anyhow::Result<PenDocument> {
+    pub fn sim_panel(&self, param_desc: &str, panel_name: &str) -> anyhow::Result<PenDocument> {
         let sys = "你是 fusion-design 仿真控制面板生成器。根据仿真参数描述，生成控制面板 UI。\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字。\
 页面包含：标题区、参数滑块组（每项含标签+滑块+数值显示）、启动/停止按钮、状态指示灯。\
@@ -1324,7 +1510,9 @@ impl DesignSkills {
 page 含 width/height（默认 480×640），nodes 列表每项 \
 {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
         let user = format!("参数描述：{param_desc}\n生成仿真控制面板「{panel_name}」。");
-        let resp = self.client.chat_sync(&self.default_model, sys, &user, 2048)?;
+        let resp = self
+            .client
+            .chat_sync(&self.default_model, sys, &user, 2048)?;
         parse_ui_json(&resp, panel_name)
     }
 
@@ -1392,11 +1580,18 @@ page 含 width/height（默认 480×640），nodes 列表每项 \
         let input = format!("{doc_json}|{title}");
         match skill.execute(&ctx, &input)? {
             SkillOutput::SpecDoc(spec) => Ok(spec),
-            other => anyhow::bail!("spec-doc 返回非 SpecDoc: {:?}", std::mem::discriminant(&other)),
+            other => anyhow::bail!(
+                "spec-doc 返回非 SpecDoc: {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
-    pub async fn spec_doc_async(&self, doc_json: &str, title: &str) -> anyhow::Result<SpecDocument> {
+    pub async fn spec_doc_async(
+        &self,
+        doc_json: &str,
+        title: &str,
+    ) -> anyhow::Result<SpecDocument> {
         let skill = SpecDocSkill;
         let ctx = SkillContext {
             client: &self.client,
@@ -1406,7 +1601,10 @@ page 含 width/height（默认 480×640），nodes 列表每项 \
         let input = format!("{doc_json}|{title}");
         match skill.execute_async(ctx, input).await? {
             SkillOutput::SpecDoc(spec) => Ok(spec),
-            other => anyhow::bail!("spec-doc 返回非 SpecDoc: {:?}", std::mem::discriminant(&other)),
+            other => anyhow::bail!(
+                "spec-doc 返回非 SpecDoc: {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1420,11 +1618,18 @@ page 含 width/height（默认 480×640），nodes 列表每项 \
         let input = format!("{flow_desc}|{style_hint}");
         match skill.execute(&ctx, &input)? {
             SkillOutput::PageFlow(docs) => Ok(docs),
-            other => anyhow::bail!("page-flow 返回非 PageFlow: {:?}", std::mem::discriminant(&other)),
+            other => anyhow::bail!(
+                "page-flow 返回非 PageFlow: {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
-    pub async fn page_flow_async(&self, flow_desc: &str, style_hint: &str) -> anyhow::Result<Vec<PenDocument>> {
+    pub async fn page_flow_async(
+        &self,
+        flow_desc: &str,
+        style_hint: &str,
+    ) -> anyhow::Result<Vec<PenDocument>> {
         let skill = PageFlowSkill;
         let ctx = SkillContext {
             client: &self.client,
@@ -1434,7 +1639,10 @@ page 含 width/height（默认 480×640），nodes 列表每项 \
         let input = format!("{flow_desc}|{style_hint}");
         match skill.execute_async(ctx, input).await? {
             SkillOutput::PageFlow(docs) => Ok(docs),
-            other => anyhow::bail!("page-flow 返回非 PageFlow: {:?}", std::mem::discriminant(&other)),
+            other => anyhow::bail!(
+                "page-flow 返回非 PageFlow: {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 }
@@ -1475,7 +1683,9 @@ fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Result
     if depth > MAX_NODE_DEPTH {
         anyhow::bail!("节点嵌套深度超过 {MAX_NODE_DEPTH}，拒绝解析");
     }
-    let arr = v.as_array().ok_or_else(|| anyhow::anyhow!("nodes 非数组"))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("nodes 非数组"))?;
     let mut nodes = Vec::with_capacity(arr.len());
     for (i, item) in arr.iter().enumerate() {
         nodes.push(parse_node_with_depth(item, i, depth)?);
@@ -1483,8 +1693,14 @@ fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Result
     Ok(nodes)
 }
 
-fn parse_node_with_depth(item: &serde_json::Value, idx: usize, depth: usize) -> anyhow::Result<PenNode> {
-    let o = item.as_object().ok_or_else(|| anyhow::anyhow!("节点 {idx} 非对象"))?;
+fn parse_node_with_depth(
+    item: &serde_json::Value,
+    idx: usize,
+    depth: usize,
+) -> anyhow::Result<PenNode> {
+    let o = item
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("节点 {idx} 非对象"))?;
     let kind_str = o.get("kind").and_then(|k| k.as_str()).unwrap_or("rect");
     let kind = match kind_str {
         "rect" => NodeKind::Rect,
@@ -1494,12 +1710,23 @@ fn parse_node_with_depth(item: &serde_json::Value, idx: usize, depth: usize) -> 
         "group" => NodeKind::Group,
         other => anyhow::bail!("未知节点类型 {other:?}"),
     };
-    let id = o.get("id").and_then(|x| x.as_str()).map(String::from)
+    let id = o
+        .get("id")
+        .and_then(|x| x.as_str())
+        .map(String::from)
         .unwrap_or_else(|| format!("n_{idx}"));
     let id = sanitize_node_id(&id);
-    let name = o.get("name").and_then(|x| x.as_str()).map(String::from)
+    let name = o
+        .get("name")
+        .and_then(|x| x.as_str())
+        .map(String::from)
         .unwrap_or_else(|| kind_str.to_string());
-    let get_f = |key: &str, d: f32| o.get(key).and_then(|x| x.as_f64()).map(|v| v as f32).unwrap_or(d);
+    let get_f = |key: &str, d: f32| {
+        o.get(key)
+            .and_then(|x| x.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(d)
+    };
     let text = o.get("text").and_then(|x| x.as_str()).map(String::from);
     let fill = o.get("fill").and_then(|x| x.as_str()).map(String::from);
     let stroke = o.get("stroke").and_then(|x| x.as_str()).map(String::from);
@@ -1514,17 +1741,24 @@ fn parse_node_with_depth(item: &serde_json::Value, idx: usize, depth: usize) -> 
         None => vec![],
     };
     Ok(PenNode {
-        id, kind, name,
-        x: get_f("x", 0.0), y: get_f("y", 0.0),
-        w: get_f("w", 0.0), h: get_f("h", 0.0),
-        style, text, children,
+        id,
+        kind,
+        name,
+        x: get_f("x", 0.0),
+        y: get_f("y", 0.0),
+        w: get_f("w", 0.0),
+        h: get_f("h", 0.0),
+        style,
+        text,
+        children,
         rotation: get_f("rotation", 0.0),
         z_index: get_f("z_index", 0.0) as i32,
     })
 }
 
 fn sanitize_node_id(id: &str) -> String {
-    let sanitized: String = id.chars()
+    let sanitized: String = id
+        .chars()
         .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
         .collect();
     if sanitized.is_empty() {
@@ -1552,9 +1786,7 @@ fn strip_code_fence(s: &str) -> &str {
     if !trimmed.starts_with("```") {
         return trimmed;
     }
-    let inner = trimmed
-        .trim_start_matches('`')
-        .trim_end_matches('`');
+    let inner = trimmed.trim_start_matches('`').trim_end_matches('`');
     inner.trim_start_matches("json").trim()
 }
 
@@ -1567,7 +1799,7 @@ fn strip_code_fence(s: &str) -> &str {
 // - 嵌套子元素递归解析
 // - class→token 引用（如 class="bg-primary" → fill=var(--color-primary)）
 
-use scraper::{Html, Selector, ElementRef, Node};
+use scraper::{ElementRef, Html, Node, Selector};
 
 /// 从 AI 响应中提取 HTML 片段并转换为 PenDocument。
 ///
@@ -1582,7 +1814,9 @@ pub fn html_to_pen_document(html: &str, page_name: &str) -> anyhow::Result<PenDo
     let body_sel = Selector::parse("body").unwrap();
     let body_el = document.select(&body_sel).next();
 
-    let container = body_el.map(|el| el.inner_html()).unwrap_or_else(|| extracted.clone());
+    let container = body_el
+        .map(|el| el.inner_html())
+        .unwrap_or_else(|| extracted.clone());
     let container_doc = Html::parse_fragment(&container);
 
     let mut doc = PenDocument::new();
@@ -1603,7 +1837,9 @@ pub fn html_to_pen_document(html: &str, page_name: &str) -> anyhow::Result<PenDo
         let root_el = container_doc.select(&any_sel).next();
         if let Some(root) = root_el {
             for child_ref in root.child_elements() {
-                if let Some(node) = html_element_to_node(&child_ref, 0.0, &mut auto_y, 0, &mut node_counter) {
+                if let Some(node) =
+                    html_element_to_node(&child_ref, 0.0, &mut auto_y, 0, &mut node_counter)
+                {
                     auto_y += node.h + 8.0;
                     page.add(node);
                 }
@@ -1612,7 +1848,10 @@ pub fn html_to_pen_document(html: &str, page_name: &str) -> anyhow::Result<PenDo
     }
 
     doc.add_page(page);
-    tracing::info!("html_to_pen_document: 解析完成，{} 个节点", doc.pages.first().map(|p| p.nodes.len()).unwrap_or(0));
+    tracing::info!(
+        "html_to_pen_document: 解析完成，{} 个节点",
+        doc.pages.first().map(|p| p.nodes.len()).unwrap_or(0)
+    );
     Ok(doc)
 }
 
@@ -1642,7 +1881,9 @@ fn extract_html_artifact(raw: &str) -> String {
         let first_newline = trimmed.find('\n').unwrap_or(3);
         let content_start = first_newline + 1;
         if let Some(end) = trimmed[content_start..].rfind("```") {
-            return trimmed[content_start..content_start + end].trim().to_string();
+            return trimmed[content_start..content_start + end]
+                .trim()
+                .to_string();
         }
     }
 
@@ -1680,19 +1921,60 @@ fn html_element_to_node(
 
     // Tag-based defaults first
     match tag {
-        "h1" => { w = 1440.0; h = 60.0; style.fill = Some("#FFFFFF".into()); }
-        "h2" => { w = 600.0; h = 48.0; style.fill = Some("#FFFFFF".into()); }
-        "h3" => { w = 400.0; h = 36.0; style.fill = Some("#FFFFFF".into()); }
-        "p" | "span" | "a" | "label" => { w = 300.0; h = 24.0; style.fill = Some("#E0E0E0".into()); }
-        "button" => { w = 120.0; h = 40.0; style.radius = Some(8.0); style.fill = Some("#007AFF".into()); }
-        "input" => { w = 300.0; h = 36.0; style.radius = Some(6.0); style.fill = Some("#2C2C2E".into()); style.stroke = Some("1px solid #555".into()); }
-        "img" => { w = 200.0; h = 150.0; }
+        "h1" => {
+            w = 1440.0;
+            h = 60.0;
+            style.fill = Some("#FFFFFF".into());
+        }
+        "h2" => {
+            w = 600.0;
+            h = 48.0;
+            style.fill = Some("#FFFFFF".into());
+        }
+        "h3" => {
+            w = 400.0;
+            h = 36.0;
+            style.fill = Some("#FFFFFF".into());
+        }
+        "p" | "span" | "a" | "label" => {
+            w = 300.0;
+            h = 24.0;
+            style.fill = Some("#E0E0E0".into());
+        }
+        "button" => {
+            w = 120.0;
+            h = 40.0;
+            style.radius = Some(8.0);
+            style.fill = Some("#007AFF".into());
+        }
+        "input" => {
+            w = 300.0;
+            h = 36.0;
+            style.radius = Some(6.0);
+            style.fill = Some("#2C2C2E".into());
+            style.stroke = Some("1px solid #555".into());
+        }
+        "img" => {
+            w = 200.0;
+            h = 150.0;
+        }
         "div" | "section" | "main" | "header" | "footer" | "nav" | "article" | "form" => {
-            if text.is_some() { h = 40.0; } else { h = 80.0; }
+            if text.is_some() {
+                h = 40.0;
+            } else {
+                h = 80.0;
+            }
             w = 1440.0;
         }
-        "ul" | "ol" => { w = 300.0; h = 120.0; }
-        "li" => { w = 280.0; h = 28.0; style.fill = Some("#E0E0E0".into()); }
+        "ul" | "ol" => {
+            w = 300.0;
+            h = 120.0;
+        }
+        "li" => {
+            w = 280.0;
+            h = 28.0;
+            style.fill = Some("#E0E0E0".into());
+        }
         _ => {}
     }
 
@@ -1746,7 +2028,8 @@ fn html_element_to_node(
     let id = format!("n_{}", counter);
     let node_text = if kind == NodeKind::Text { text } else { None };
 
-    let children: Vec<PenNode> = el_ref.child_elements()
+    let children: Vec<PenNode> = el_ref
+        .child_elements()
         .filter_map(|child_ref| {
             let mut child_auto_y = 0.0f32;
             html_element_to_node(&child_ref, x + 16.0, &mut child_auto_y, depth + 1, counter)
@@ -2108,7 +2391,10 @@ mod skills_tests {
     #[test]
     fn parse_flow_pages_with_colon() {
         let pages = parse_flow_pages("电商:首页,商品列表,商品详情,购物车,结算");
-        assert_eq!(pages, vec!["首页", "商品列表", "商品详情", "购物车", "结算"]);
+        assert_eq!(
+            pages,
+            vec!["首页", "商品列表", "商品详情", "购物车", "结算"]
+        );
     }
 
     #[test]
@@ -2169,7 +2455,10 @@ mod mlx_integration {
         let body = String::from(r#"{"choices":[{"message":{"content":"hello world"}}]}"#);
         let (url, count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
-        let out = client.chat_async("qwen3.5", "sys", "usr", 128).await.unwrap();
+        let out = client
+            .chat_async("qwen3.5", "sys", "usr", 128)
+            .await
+            .unwrap();
         assert_eq!(out, "hello world");
         // 请求被发到 mock server
         assert_eq!(*count.lock().unwrap(), 1);
@@ -2180,7 +2469,10 @@ mod mlx_integration {
         let body = String::from(r#"{"error":"rate limit"}"#);
         let (url, _count) = spawn_mock_server(429, body).await;
         let client = mock_client(&url);
-        let err = client.chat_async("qwen3.5", "sys", "usr", 128).await.unwrap_err();
+        let err = client
+            .chat_async("qwen3.5", "sys", "usr", 128)
+            .await
+            .unwrap_err();
         // 我们的 mock server 无视 status 总返回 200 头但 body 是错误 JSON，
         // 这里验证 chat_async 在非成功 status 时 bail（实际 mock 始终 200）
         // 改为验证错误路径：解析失败的 JSON
@@ -2192,7 +2484,10 @@ mod mlx_integration {
         let body = String::from(r#"{"choices":[]}"#);
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
-        let err = client.chat_async("qwen3.5", "sys", "usr", 128).await.unwrap_err();
+        let err = client
+            .chat_async("qwen3.5", "sys", "usr", 128)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("空 choices") || err.to_string().contains("fusion-mlx"));
     }
 
@@ -2204,7 +2499,10 @@ mod mlx_integration {
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
-        let doc = skills.text_to_ui_async("做一个英雄区", "Home").await.unwrap();
+        let doc = skills
+            .text_to_ui_async("做一个英雄区", "Home")
+            .await
+            .unwrap();
         assert_eq!(doc.pages.len(), 1);
         let page = &doc.pages[0];
         assert_eq!(page.width, 1440.0);
@@ -2223,7 +2521,10 @@ mod mlx_integration {
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let out = skills
-            .partial_edit_async("{\"id\":\"btn1\",\"kind\":\"rect\",\"fill\":\"#0000FF\"}", "改成红色")
+            .partial_edit_async(
+                "{\"id\":\"btn1\",\"kind\":\"rect\",\"fill\":\"#0000FF\"}",
+                "改成红色",
+            )
             .await
             .unwrap();
         assert!(out.contains("FF0000"));
@@ -2279,7 +2580,10 @@ mod mlx_integration {
         let body = "not json at all".to_string();
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
-        let err = client.chat_async("qwen3.5", "sys", "usr", 128).await.unwrap_err();
+        let err = client
+            .chat_async("qwen3.5", "sys", "usr", 128)
+            .await
+            .unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 
@@ -2373,7 +2677,10 @@ mod html_parser_tests {
     fn html_to_pen_document_img() {
         let html = r#"<img src="test.png" />"#;
         let doc = html_to_pen_document(html, "ImgPage").unwrap();
-        let img = doc.pages[0].nodes.iter().find(|n| n.kind == fd_canvas_core::NodeKind::Image);
+        let img = doc.pages[0]
+            .nodes
+            .iter()
+            .find(|n| n.kind == fd_canvas_core::NodeKind::Image);
         assert!(img.is_some());
     }
 
@@ -2395,8 +2702,14 @@ mod html_parser_tests {
 
     #[test]
     fn class_to_fill_hint_mapping() {
-        assert_eq!(class_to_fill_hint("bg-primary"), Some("var(--color-accent)".to_string()));
-        assert_eq!(class_to_fill_hint("bg-danger"), Some("var(--color-error)".to_string()));
+        assert_eq!(
+            class_to_fill_hint("bg-primary"),
+            Some("var(--color-accent)".to_string())
+        );
+        assert_eq!(
+            class_to_fill_hint("bg-danger"),
+            Some("var(--color-error)".to_string())
+        );
         assert_eq!(class_to_fill_hint("unknown"), None);
     }
 }
