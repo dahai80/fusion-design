@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // 兼容 OpenAI API 形状（/v1/chat/completions），便于复用既有生态工具。
 // 真实端口由 fusion-mlx 启动时分配，写入本地配置文件。
 
-const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:8080";
+const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11434";
 
 /// fusion-mlx chat 请求体（OpenAI 兼容形状）。
 #[derive(Debug, Serialize)]
@@ -61,7 +61,7 @@ pub struct FusionMlxClient {
 }
 
 impl FusionMlxClient {
-    /// 用默认 endpoint `http://127.0.0.1:8080` 构造。
+    /// 用默认 endpoint `http://127.0.0.1:11434` 构造。
     pub fn new() -> anyhow::Result<Self> {
         Self::with_endpoint(DEFAULT_MLX_ENDPOINT)
     }
