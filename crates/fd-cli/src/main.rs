@@ -66,7 +66,7 @@ pub enum Command {
     CheckFrontend {
         #[arg(long)]
         dir: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        #[arg(long, default_value = "http://127.0.0.1:11434")]
         backend: String,
     },
     /// 校验 fusion-mlx endpoint 是否为 localhost
