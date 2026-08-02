@@ -170,9 +170,18 @@ impl Linter {
             }
         }
 
-        let errors = violations.iter().filter(|v| v.severity == LintSeverity::Error).count();
-        let warnings = violations.iter().filter(|v| v.severity == LintSeverity::Warning).count();
-        let infos = violations.iter().filter(|v| v.severity == LintSeverity::Info).count();
+        let errors = violations
+            .iter()
+            .filter(|v| v.severity == LintSeverity::Error)
+            .count();
+        let warnings = violations
+            .iter()
+            .filter(|v| v.severity == LintSeverity::Warning)
+            .count();
+        let infos = violations
+            .iter()
+            .filter(|v| v.severity == LintSeverity::Info)
+            .count();
 
         info!(
             "lint: 检测完成, 总节点={}, 违规={}, error={}, warning={}, info={}",
@@ -239,7 +248,9 @@ impl Linter {
                 LintRule::OverlappingNodes => (),
                 LintRule::HardcodedSpacing => self.check_hardcoded_spacing(node, violations),
                 LintRule::HardcodedFontSize => self.check_hardcoded_font_size(node, violations),
-                LintRule::MissingInteractionState => self.check_missing_interaction_state(node, violations),
+                LintRule::MissingInteractionState => {
+                    self.check_missing_interaction_state(node, violations)
+                }
                 LintRule::LayoutInconsistency => (),
             }
         }
@@ -352,10 +363,7 @@ impl Linter {
             violations.push(LintViolation {
                 rule: LintRule::AbnormalRotation,
                 node_id: node.id.clone(),
-                message: format!(
-                    "节点 '{}' 旋转角度 {:.1}° 非 15° 倍数",
-                    node.name, rotation
-                ),
+                message: format!("节点 '{}' 旋转角度 {:.1}° 非 15° 倍数", node.name, rotation),
                 suggestion: "建议使用 15° 倍数的旋转角度以保持对齐一致".to_string(),
                 severity: LintSeverity::Info,
             });
@@ -482,10 +490,7 @@ impl Linter {
                     violations.push(LintViolation {
                         rule: LintRule::OverlappingNodes,
                         node_id: format!("{}+{}", a.id, b.id),
-                        message: format!(
-                            "节点 '{}' 与 '{}' 边界框重叠",
-                            a.name, b.name
-                        ),
+                        message: format!("节点 '{}' 与 '{}' 边界框重叠", a.name, b.name),
                         suggestion: "调整节点位置或使用不同的 z-index 避免遮挡".to_string(),
                         severity: LintSeverity::Warning,
                     });
@@ -553,10 +558,7 @@ impl Linter {
                 violations.push(LintViolation {
                     rule: LintRule::HardcodedFontSize,
                     node_id: node.id.clone(),
-                    message: format!(
-                        "节点 '{}' font_size={} 未引用设计 Token",
-                        node.name, fs
-                    ),
+                    message: format!("节点 '{}' font_size={} 未引用设计 Token", node.name, fs),
                     suggestion: "使用 design_token_refs 引用 typography Token".to_string(),
                     severity: LintSeverity::Info,
                 });
@@ -598,7 +600,11 @@ impl Linter {
         }
     }
 
-    fn check_layout_inconsistency(&self, siblings: &[PenNode], violations: &mut Vec<LintViolation>) {
+    fn check_layout_inconsistency(
+        &self,
+        siblings: &[PenNode],
+        violations: &mut Vec<LintViolation>,
+    ) {
         use fd_canvas_core::LayoutMode;
         if siblings.len() < 2 {
             return;
@@ -713,7 +719,9 @@ fn apply_tokens_to_nodes(
             if !node.style.design_token_refs.contains_key("fill") {
                 if let Some(token_name) = token_map.get(fill) {
                     let before = fill.clone();
-                    node.style.design_token_refs.insert("fill".into(), token_name.clone());
+                    node.style
+                        .design_token_refs
+                        .insert("fill".into(), token_name.clone());
                     result.fixes_applied += 1;
                     result.details.push(FixDetail {
                         rule: LintRule::TokenInconsistency,
@@ -731,7 +739,9 @@ fn apply_tokens_to_nodes(
             if !node.style.design_token_refs.contains_key("stroke") {
                 if let Some(token_name) = token_map.get(stroke) {
                     let before = stroke.clone();
-                    node.style.design_token_refs.insert("stroke".into(), token_name.clone());
+                    node.style
+                        .design_token_refs
+                        .insert("stroke".into(), token_name.clone());
                     result.fixes_applied += 1;
                     result.details.push(FixDetail {
                         rule: LintRule::TokenInconsistency,
@@ -751,7 +761,9 @@ fn apply_tokens_to_nodes(
                     let key = format!("{}", flex.gap);
                     if let Some(token_name) = numeric_map.get(&key) {
                         let before = format!("{}", flex.gap);
-                        node.style.design_token_refs.insert("gap".into(), token_name.clone());
+                        node.style
+                            .design_token_refs
+                            .insert("gap".into(), token_name.clone());
                         result.fixes_applied += 1;
                         result.details.push(FixDetail {
                             rule: LintRule::HardcodedSpacing,
@@ -770,7 +782,9 @@ fn apply_tokens_to_nodes(
                     let key = format!("{}", grid.gap.0);
                     if let Some(token_name) = numeric_map.get(&key) {
                         let before = format!("({}, {})", grid.gap.0, grid.gap.1);
-                        node.style.design_token_refs.insert("gap".into(), token_name.clone());
+                        node.style
+                            .design_token_refs
+                            .insert("gap".into(), token_name.clone());
                         result.fixes_applied += 1;
                         result.details.push(FixDetail {
                             rule: LintRule::HardcodedSpacing,
@@ -791,7 +805,9 @@ fn apply_tokens_to_nodes(
                 let key = format!("{}", fs);
                 if let Some(token_name) = numeric_map.get(&key) {
                     let before = format!("{}", fs);
-                    node.style.design_token_refs.insert("font_size".into(), token_name.clone());
+                    node.style
+                        .design_token_refs
+                        .insert("font_size".into(), token_name.clone());
                     result.fixes_applied += 1;
                     result.details.push(FixDetail {
                         rule: LintRule::HardcodedFontSize,
@@ -805,7 +821,12 @@ fn apply_tokens_to_nodes(
         }
 
         // empty effects cleanup
-        if node.style.fill.as_deref().is_some_and(|v| v.trim().is_empty()) {
+        if node
+            .style
+            .fill
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty())
+        {
             let before = node.style.fill.clone().unwrap_or_default();
             node.style.fill = None;
             result.fixes_applied += 1;
@@ -817,7 +838,12 @@ fn apply_tokens_to_nodes(
                 after: "None".into(),
             });
         }
-        if node.style.stroke.as_deref().is_some_and(|v| v.trim().is_empty()) {
+        if node
+            .style
+            .stroke
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty())
+        {
             let before = node.style.stroke.clone().unwrap_or_default();
             node.style.stroke = None;
             result.fixes_applied += 1;
@@ -890,7 +916,10 @@ impl Linter {
             info!("auto_fix: 无设计规范, 跳过 Token 修复");
         }
 
-        info!("auto_fix: 完成, applied={}, skipped={}", result.fixes_applied, result.fixes_skipped);
+        info!(
+            "auto_fix: 完成, applied={}, skipped={}",
+            result.fixes_applied, result.fixes_skipped
+        );
         result
     }
 }
@@ -1407,7 +1436,7 @@ mod tests {
 
     #[test]
     fn hardcoded_spacing_flex_gap_detected() {
-        use fd_canvas_core::{FlexParams, FlexDirection, LayoutMode};
+        use fd_canvas_core::{FlexDirection, FlexParams, LayoutMode};
         let style = NodeStyle {
             layout: LayoutMode::Flex(FlexParams {
                 gap: 16.0,
@@ -1426,7 +1455,7 @@ mod tests {
 
     #[test]
     fn token_ref_spacing_no_violation() {
-        use fd_canvas_core::{FlexParams, FlexDirection, LayoutMode};
+        use fd_canvas_core::{FlexDirection, FlexParams, LayoutMode};
         let mut refs = HashMap::new();
         refs.insert("gap".to_string(), "spacing-md".to_string());
         let style = NodeStyle {
@@ -1540,9 +1569,7 @@ mod tests {
     fn apply_tokens_replaces_fill_with_ref() {
         let mut reg = fd_design_system::DesignSystemRegistry::new();
         reg.register_builtin();
-        let system = reg.get("apple-hig")
-            .expect("apple-hig")
-            .clone();
+        let system = reg.get("apple-hig").expect("apple-hig").clone();
         let mut refs = HashMap::new();
         refs.insert("fill".into(), "primary".into());
         let style = NodeStyle {
@@ -1555,7 +1582,11 @@ mod tests {
 
         let result = apply_tokens_to_document(&mut doc, &system);
         // fill already has token ref, so no fix for it
-        let fill_fixes: Vec<_> = result.details.iter().filter(|d| d.action == "fill→token_ref").collect();
+        let fill_fixes: Vec<_> = result
+            .details
+            .iter()
+            .filter(|d| d.action == "fill→token_ref")
+            .collect();
         assert!(fill_fixes.is_empty());
     }
 
@@ -1563,9 +1594,7 @@ mod tests {
     fn apply_tokens_adds_fill_ref() {
         let mut reg = fd_design_system::DesignSystemRegistry::new();
         reg.register_builtin();
-        let system = reg.get("apple-hig")
-            .expect("apple-hig")
-            .clone();
+        let system = reg.get("apple-hig").expect("apple-hig").clone();
         let style = NodeStyle {
             fill: Some("#007AFF".into()),
             ..Default::default()
@@ -1575,18 +1604,23 @@ mod tests {
 
         let result = apply_tokens_to_document(&mut doc, &system);
         assert!(result.fixes_applied > 0);
-        let fill_fixes: Vec<_> = result.details.iter().filter(|d| d.action == "fill→token_ref").collect();
+        let fill_fixes: Vec<_> = result
+            .details
+            .iter()
+            .filter(|d| d.action == "fill→token_ref")
+            .collect();
         assert!(!fill_fixes.is_empty());
-        assert!(doc.pages[0].nodes[0].style.design_token_refs.contains_key("fill"));
+        assert!(doc.pages[0].nodes[0]
+            .style
+            .design_token_refs
+            .contains_key("fill"));
     }
 
     #[test]
     fn auto_fix_removes_empty_fill() {
         let mut reg = fd_design_system::DesignSystemRegistry::new();
         reg.register_builtin();
-        let system = reg.get("apple-hig")
-            .expect("apple-hig")
-            .clone();
+        let system = reg.get("apple-hig").expect("apple-hig").clone();
         let style = NodeStyle {
             fill: Some("".into()),
             ..Default::default()
@@ -1596,7 +1630,10 @@ mod tests {
 
         let linter = Linter::new().with_design_system(system);
         let result = linter.auto_fix(&mut doc);
-        assert!(result.details.iter().any(|d| d.action == "remove_empty_fill"));
+        assert!(result
+            .details
+            .iter()
+            .any(|d| d.action == "remove_empty_fill"));
         assert!(doc.pages[0].nodes[0].style.fill.is_none());
     }
 
@@ -1604,9 +1641,7 @@ mod tests {
     fn auto_fix_names_unnamed_node() {
         let mut reg = fd_design_system::DesignSystemRegistry::new();
         reg.register_builtin();
-        let system = reg.get("apple-hig")
-            .expect("apple-hig")
-            .clone();
+        let system = reg.get("apple-hig").expect("apple-hig").clone();
         let node = rect_node("abc12345def", "Rect", NodeStyle::default());
         let mut doc = make_doc(vec![node]);
 

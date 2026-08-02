@@ -16,8 +16,7 @@ use wasm_bindgen::JsCast;
 use fd_canvas_core::PenDocument;
 
 fn css_escape_attr_value(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn node_selector(node_id: &str) -> String {
@@ -26,8 +25,7 @@ fn node_selector(node_id: &str) -> String {
 
 // ── 全局状态 ──
 
-static SHELL: LazyLock<Mutex<Option<WebShellInner>>> =
-    LazyLock::new(|| Mutex::new(None));
+static SHELL: LazyLock<Mutex<Option<WebShellInner>>> = LazyLock::new(|| Mutex::new(None));
 
 // ── WebShell ──
 
@@ -56,8 +54,7 @@ const MAX_PENDING_MESSAGES: usize = 200;
 pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
     // 浏览器异常时 Rust 侧 panic 信息通过 wasm-bindgen 默认机制输出
 
-    let window = web_sys::window()
-        .ok_or_else(|| JsValue::from_str("mount: window unavailable"))?;
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("mount: window unavailable"))?;
     let document = window
         .document()
         .ok_or_else(|| JsValue::from_str("mount: document unavailable"))?;
@@ -156,14 +153,48 @@ fn handle_host_message(json: &str) {
                     let y = payload.get("y").and_then(|v| v.as_f64()).map(|v| v as f32);
                     let w = payload.get("w").and_then(|v| v.as_f64()).map(|v| v as f32);
                     let h = payload.get("h").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let fill = payload.get("fill").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let stroke = payload.get("stroke").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let stroke_width = payload.get("stroke_width").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let radius = payload.get("radius").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let font_size = payload.get("font_size").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let font_family = payload.get("font_family").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let opacity = payload.get("opacity").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    mutate_node(node_id, x, y, w, h, &fill, &stroke, stroke_width, radius, font_size, &font_family, opacity);
+                    let fill = payload
+                        .get("fill")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let stroke = payload
+                        .get("stroke")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let stroke_width = payload
+                        .get("stroke_width")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as f32);
+                    let radius = payload
+                        .get("radius")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as f32);
+                    let font_size = payload
+                        .get("font_size")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as f32);
+                    let font_family = payload
+                        .get("font_family")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let opacity = payload
+                        .get("opacity")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as f32);
+                    mutate_node(
+                        node_id,
+                        x,
+                        y,
+                        w,
+                        h,
+                        &fill,
+                        &stroke,
+                        stroke_width,
+                        radius,
+                        font_size,
+                        &font_family,
+                        opacity,
+                    );
                 }
             }
         }
@@ -176,7 +207,10 @@ fn handle_host_message(json: &str) {
         "node.set-visibility" => {
             if let Some(payload) = msg.get("payload") {
                 if let Some(node_id) = payload.get("node_id").and_then(|n| n.as_str()) {
-                    let visible = payload.get("visible").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let visible = payload
+                        .get("visible")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
                     set_node_visibility(node_id, visible);
                 }
             }
@@ -184,7 +218,10 @@ fn handle_host_message(json: &str) {
         "node.reorder" => {
             if let Some(payload) = msg.get("payload") {
                 if let Some(node_id) = payload.get("node_id").and_then(|n| n.as_str()) {
-                    let new_index = payload.get("new_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let new_index = payload
+                        .get("new_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
                     reorder_node(node_id, new_index);
                 }
             }
@@ -193,9 +230,7 @@ fn handle_host_message(json: &str) {
             web_sys::console::log_1(&"fd-host-web: 宿主就绪".into());
         }
         other => {
-            web_sys::console::debug_1(
-                &format!("fd-host-web: 未处理消息 kind={other}").into(),
-            );
+            web_sys::console::debug_1(&format!("fd-host-web: 未处理消息 kind={other}").into());
         }
     }
 }
@@ -326,8 +361,34 @@ pub fn fusion_bridge_send_command(command_json: &str) -> Result<(), JsValue> {
         BridgeCommand::SelectNode { node_id } => {
             select_node(&node_id);
         }
-        BridgeCommand::MutateNode { node_id, x, y, w, h, fill, stroke, stroke_width, radius, font_size, font_family, opacity } => {
-            mutate_node(&node_id, x, y, w, h, &fill, &stroke, stroke_width, radius, font_size, &font_family, opacity);
+        BridgeCommand::MutateNode {
+            node_id,
+            x,
+            y,
+            w,
+            h,
+            fill,
+            stroke,
+            stroke_width,
+            radius,
+            font_size,
+            font_family,
+            opacity,
+        } => {
+            mutate_node(
+                &node_id,
+                x,
+                y,
+                w,
+                h,
+                &fill,
+                &stroke,
+                stroke_width,
+                radius,
+                font_size,
+                &font_family,
+                opacity,
+            );
         }
         BridgeCommand::ClearCanvas => {
             clear_canvas();
@@ -368,7 +429,9 @@ fn render_dom(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            web_sys::console::error_1(&format!("fd-host-web: DOM 渲染 PenDocument 解析失败: {e}").into());
+            web_sys::console::error_1(
+                &format!("fd-host-web: DOM 渲染 PenDocument 解析失败: {e}").into(),
+            );
             return;
         }
     };
@@ -388,7 +451,11 @@ fn render_dom(doc_json: &str) {
         .unwrap_or_else(|| {
             let div = document.create_element("div").unwrap();
             div.set_id("fusion-dom-root");
-            div.set_attribute("style", "position:relative;width:100%;height:100%;overflow:hidden;").ok();
+            div.set_attribute(
+                "style",
+                "position:relative;width:100%;height:100%;overflow:hidden;",
+            )
+            .ok();
             document.body().unwrap().append_child(&div).ok();
             div
         });
@@ -421,7 +488,9 @@ fn render_dom(doc_json: &str) {
     }
     container.append_child(&fragment).ok();
 
-    web_sys::console::log_1(&format!("fd-host-web: DOM 渲染完成, {node_count} 节点（视口剔除后）").into());
+    web_sys::console::log_1(
+        &format!("fd-host-web: DOM 渲染完成, {node_count} 节点（视口剔除后）").into(),
+    );
 
     // 事件委托：在容器级别注册单处理器，替代逐节点绑定
     setup_delegated_click_listener("fusion-dom-root");
@@ -436,16 +505,36 @@ fn render_dom(doc_json: &str) {
 
 /// 判断节点是否在当前视口内（考虑 zoom/pan）。
 fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Element) -> bool {
-    let zoom: f32 = container.get_attribute("data-fd-zoom").unwrap_or_default().parse().unwrap_or(1.0);
-    let pan_x: f32 = container.get_attribute("data-fd-pan-x").unwrap_or_default().parse().unwrap_or(0.0);
-    let pan_y: f32 = container.get_attribute("data-fd-pan-y").unwrap_or_default().parse().unwrap_or(0.0);
+    let zoom: f32 = container
+        .get_attribute("data-fd-zoom")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(1.0);
+    let pan_x: f32 = container
+        .get_attribute("data-fd-pan-x")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0.0);
+    let pan_y: f32 = container
+        .get_attribute("data-fd-pan-y")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0.0);
 
     let window = match web_sys::window() {
         Some(w) => w,
         None => return true,
     };
-    let vp_w = window.inner_width().unwrap_or_default().as_f64().unwrap_or(1920.0) as f32;
-    let vp_h = window.inner_height().unwrap_or_default().as_f64().unwrap_or(1080.0) as f32;
+    let vp_w = window
+        .inner_width()
+        .unwrap_or_default()
+        .as_f64()
+        .unwrap_or(1920.0) as f32;
+    let vp_h = window
+        .inner_height()
+        .unwrap_or_default()
+        .as_f64()
+        .unwrap_or(1080.0) as f32;
 
     // 节点在画布坐标中的边界
     let node_left = node.x * zoom + pan_x;
@@ -523,10 +612,9 @@ fn viewport_cull_update() {
         container.append_child(&fragment).ok();
     }
 
-    web_sys::console::log_1(&format!(
-        "fd-host-web: 视口剔除更新, 添加 {} 节点",
-        ids_to_add.len()
-    ).into());
+    web_sys::console::log_1(
+        &format!("fd-host-web: 视口剔除更新, 添加 {} 节点", ids_to_add.len()).into(),
+    );
 }
 
 /// 递归收集视口内节点 id，与现有 id 对比找新增。
@@ -542,7 +630,11 @@ fn collect_visible_node_ids(
             // 检查 DOM 中是否已存在
             let window = web_sys::window().unwrap();
             let document = window.document().unwrap();
-            if document.query_selector(&node_selector(&node.id)).unwrap_or(None).is_none() {
+            if document
+                .query_selector(&node_selector(&node.id))
+                .unwrap_or(None)
+                .is_none()
+            {
                 ids_to_add.push(node.id.clone());
             }
         }
@@ -613,7 +705,10 @@ fn render_node_to_dom(
     if node.kind == fd_canvas_core::NodeKind::Text {
         let font_size = node.style.font_size.unwrap_or(16.0);
         let font_family = node.style.font_family.as_deref().unwrap_or("system-ui");
-        style.push_str(&format!("font-size:{}px;font-family:{};", font_size, font_family));
+        style.push_str(&format!(
+            "font-size:{}px;font-family:{};",
+            font_size, font_family
+        ));
         if let Some(text) = &node.text {
             el.set_text_content(Some(text));
         }
@@ -625,9 +720,13 @@ fn render_node_to_dom(
             style.push_str("display:flex;");
             match params.direction {
                 fd_canvas_core::FlexDirection::Row => style.push_str("flex-direction:row;"),
-                fd_canvas_core::FlexDirection::RowReverse => style.push_str("flex-direction:row-reverse;"),
+                fd_canvas_core::FlexDirection::RowReverse => {
+                    style.push_str("flex-direction:row-reverse;")
+                }
                 fd_canvas_core::FlexDirection::Column => style.push_str("flex-direction:column;"),
-                fd_canvas_core::FlexDirection::ColumnReverse => style.push_str("flex-direction:column-reverse;"),
+                fd_canvas_core::FlexDirection::ColumnReverse => {
+                    style.push_str("flex-direction:column-reverse;")
+                }
             }
             if params.gap > 0.0 {
                 style.push_str(&format!("gap:{}px;", params.gap));
@@ -639,24 +738,36 @@ fn render_node_to_dom(
                 fd_canvas_core::AlignItems::Stretch => style.push_str("align-items:stretch;"),
             }
             match params.justify_content {
-                fd_canvas_core::JustifyContent::Start => style.push_str("justify-content:flex-start;"),
+                fd_canvas_core::JustifyContent::Start => {
+                    style.push_str("justify-content:flex-start;")
+                }
                 fd_canvas_core::JustifyContent::Center => style.push_str("justify-content:center;"),
                 fd_canvas_core::JustifyContent::End => style.push_str("justify-content:flex-end;"),
-                fd_canvas_core::JustifyContent::SpaceBetween => style.push_str("justify-content:space-between;"),
-                fd_canvas_core::JustifyContent::SpaceAround => style.push_str("justify-content:space-around;"),
-                fd_canvas_core::JustifyContent::SpaceEvenly => style.push_str("justify-content:space-evenly;"),
+                fd_canvas_core::JustifyContent::SpaceBetween => {
+                    style.push_str("justify-content:space-between;")
+                }
+                fd_canvas_core::JustifyContent::SpaceAround => {
+                    style.push_str("justify-content:space-around;")
+                }
+                fd_canvas_core::JustifyContent::SpaceEvenly => {
+                    style.push_str("justify-content:space-evenly;")
+                }
             }
             match params.wrap {
                 fd_canvas_core::FlexWrap::NoWrap => style.push_str("flex-wrap:nowrap;"),
                 fd_canvas_core::FlexWrap::Wrap => style.push_str("flex-wrap:wrap;"),
             }
-            if params.padding.top > 0.0 || params.padding.right > 0.0
-                || params.padding.bottom > 0.0 || params.padding.left > 0.0
+            if params.padding.top > 0.0
+                || params.padding.right > 0.0
+                || params.padding.bottom > 0.0
+                || params.padding.left > 0.0
             {
                 style.push_str(&format!(
                     "padding:{}px {}px {}px {}px;",
-                    params.padding.top, params.padding.right,
-                    params.padding.bottom, params.padding.left
+                    params.padding.top,
+                    params.padding.right,
+                    params.padding.bottom,
+                    params.padding.left
                 ));
             }
         }
@@ -831,8 +942,7 @@ fn hide_snap_lines() {
 // ── requestAnimationFrame 节流 ──
 
 /// 全局 rAF 句柄，避免同一帧多次调度。
-static RAF_SCHEDULED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static RAF_SCHEDULED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 通过 requestAnimationFrame 节流执行回调，确保每帧最多执行一次。
 fn schedule_raf<F>(callback: F)
@@ -851,7 +961,9 @@ where
         Some(w) => w,
         None => return,
     };
-    window.request_animation_frame(cb.as_ref().unchecked_ref()).ok();
+    window
+        .request_animation_frame(cb.as_ref().unchecked_ref())
+        .ok();
     cb.forget();
 }
 
@@ -887,24 +999,37 @@ fn setup_delegated_click_listener(container_id: &str) {
             if el.has_attribute("data-node-id") {
                 el.get_attribute("data-node-id")
             } else {
-                el.closest("[data-node-id]").ok().flatten()?.get_attribute("data-node-id")
+                el.closest("[data-node-id]")
+                    .ok()
+                    .flatten()?
+                    .get_attribute("data-node-id")
             }
         });
 
         if let Some(node_id) = node_id {
             if shift {
-                send_bridge_event(BridgeEvent::NodeMultiSelect { node_id: node_id.clone() });
+                send_bridge_event(BridgeEvent::NodeMultiSelect {
+                    node_id: node_id.clone(),
+                });
                 toggle_node_selection(&node_id);
             } else {
-                send_bridge_event(BridgeEvent::NodeClick { node_id: node_id.clone(), x, y });
-                send_bridge_event(BridgeEvent::NodeSelect { node_id: node_id.clone() });
+                send_bridge_event(BridgeEvent::NodeClick {
+                    node_id: node_id.clone(),
+                    x,
+                    y,
+                });
+                send_bridge_event(BridgeEvent::NodeSelect {
+                    node_id: node_id.clone(),
+                });
                 select_node(&node_id);
             }
             event.stop_propagation();
             event.prevent_default();
         }
     }) as Box<dyn FnMut(web_sys::Event)>);
-    container.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref()).ok();
+    container
+        .add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref())
+        .ok();
     on_click.forget();
     web_sys::console::log_1(&"fd-host-web: delegated click listener installed".into());
 }
@@ -936,7 +1061,10 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             if el.has_attribute("data-node-id") {
                 el.get_attribute("data-node-id")
             } else {
-                el.closest("[data-node-id]").ok().flatten()?.get_attribute("data-node-id")
+                el.closest("[data-node-id]")
+                    .ok()
+                    .flatten()?
+                    .get_attribute("data-node-id")
             }
         });
 
@@ -990,9 +1118,15 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                     (0.0, raw_x)
                 };
                 let mut lines = Vec::new();
-                if sn_l { lines.push(line_l); }
-                if sn_r { lines.push(line_r); }
-                if sn_c { lines.push(line_c); }
+                if sn_l {
+                    lines.push(line_l);
+                }
+                if sn_r {
+                    lines.push(line_r);
+                }
+                if sn_c {
+                    lines.push(line_c);
+                }
                 (best.0, best.1, lines)
             };
             let (snap_dy, _snap_y, snap_y_lines) = {
@@ -1012,9 +1146,15 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                     (0.0, raw_y)
                 };
                 let mut lines = Vec::new();
-                if sn_t { lines.push(line_t); }
-                if sn_b { lines.push(line_b); }
-                if sn_c { lines.push(line_c); }
+                if sn_t {
+                    lines.push(line_t);
+                }
+                if sn_b {
+                    lines.push(line_b);
+                }
+                if sn_c {
+                    lines.push(line_c);
+                }
                 (best.0, best.1, lines)
             };
 
@@ -1044,14 +1184,20 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
         }) as Box<dyn FnMut(web_sys::Event)>);
 
         let window = web_sys::window().unwrap();
-        window.add_event_listener_with_callback("mousemove", on_mousemove.as_ref().unchecked_ref()).ok();
+        window
+            .add_event_listener_with_callback("mousemove", on_mousemove.as_ref().unchecked_ref())
+            .ok();
 
         let up_id = node_id.clone();
-        let move_js: JsValue = on_mousemove.as_ref().unchecked_ref::<js_sys::Function>().into();
+        let move_js: JsValue = on_mousemove
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .into();
         let on_mouseup = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
-            w.remove_event_listener_with_callback("mousemove", move_ref).ok();
+            w.remove_event_listener_with_callback("mousemove", move_ref)
+                .ok();
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (raw_dx, raw_dy) = match mm {
                 Some(m) => (m.client_x() as f32 - start_x, m.client_y() as f32 - start_y),
@@ -1066,10 +1212,15 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                 let (ol, sl, _) = find_snap_offset(left, &snap_x_candidates_up);
                 let (or, sr, _) = find_snap_offset(right, &snap_x_candidates_up);
                 let (oc, sc, _) = find_snap_offset(center_h, &snap_x_candidates_up);
-                if sl && ol.abs() <= or.abs() && ol.abs() <= oc.abs() { ol }
-                else if sr && or.abs() <= oc.abs() { or }
-                else if sc { oc }
-                else { 0.0 }
+                if sl && ol.abs() <= or.abs() && ol.abs() <= oc.abs() {
+                    ol
+                } else if sr && or.abs() <= oc.abs() {
+                    or
+                } else if sc {
+                    oc
+                } else {
+                    0.0
+                }
             };
             let off_y = {
                 let top = raw_y;
@@ -1078,10 +1229,15 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                 let (ot, st, _) = find_snap_offset(top, &snap_y_candidates_up);
                 let (ob, sb, _) = find_snap_offset(bottom, &snap_y_candidates_up);
                 let (oc, sc, _) = find_snap_offset(center_v, &snap_y_candidates_up);
-                if st && ot.abs() <= ob.abs() && ot.abs() <= oc.abs() { ot }
-                else if sb && ob.abs() <= oc.abs() { ob }
-                else if sc { oc }
-                else { 0.0 }
+                if st && ot.abs() <= ob.abs() && ot.abs() <= oc.abs() {
+                    ot
+                } else if sb && ob.abs() <= oc.abs() {
+                    ob
+                } else if sc {
+                    oc
+                } else {
+                    0.0
+                }
             };
             let final_dx = raw_dx + off_x;
             let final_dy = raw_dy + off_y;
@@ -1092,14 +1248,18 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             });
             hide_snap_lines();
         }) as Box<dyn FnMut(web_sys::Event)>);
-        window.add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref()).ok();
+        window
+            .add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref())
+            .ok();
         on_mouseup.forget();
         on_mousemove.forget();
 
         event.stop_propagation();
         event.prevent_default();
     }) as Box<dyn FnMut(web_sys::Event)>);
-    container.add_event_listener_with_callback("mousedown", on_mousedown.as_ref().unchecked_ref()).ok();
+    container
+        .add_event_listener_with_callback("mousedown", on_mousedown.as_ref().unchecked_ref())
+        .ok();
     on_mousedown.forget();
     web_sys::console::log_1(&"fd-host-web: delegated mousedown listener installed".into());
 }
@@ -1191,7 +1351,9 @@ fn setup_canvas_click_listener(container_id: &str) {
         };
         send_bridge_event(BridgeEvent::CanvasClick { x, y });
     }) as Box<dyn FnMut(web_sys::Event)>);
-    container.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref()).ok();
+    container
+        .add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref())
+        .ok();
     on_click.forget();
 }
 
@@ -1223,7 +1385,9 @@ fn setup_canvas_zoom_listener(container_id: &str) {
         event.prevent_default();
         event.stop_propagation();
     }) as Box<dyn FnMut(web_sys::Event)>);
-    container.add_event_listener_with_callback("wheel", on_wheel.as_ref().unchecked_ref()).ok();
+    container
+        .add_event_listener_with_callback("wheel", on_wheel.as_ref().unchecked_ref())
+        .ok();
     on_wheel.forget();
     web_sys::console::log_1(&"fd-host-web: canvas zoom listener installed".into());
 }
@@ -1269,13 +1433,15 @@ fn setup_canvas_pan_listener(container_id: &str) {
         }) as Box<dyn FnMut(web_sys::Event)>);
 
         let win = web_sys::window().unwrap();
-        win.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref()).ok();
+        win.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref())
+            .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
-            w.remove_event_listener_with_callback("mousemove", move_ref).ok();
+            w.remove_event_listener_with_callback("mousemove", move_ref)
+                .ok();
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
                 Some(m) => (m.client_x() as f32 - start_x, m.client_y() as f32 - start_y),
@@ -1283,14 +1449,17 @@ fn setup_canvas_pan_listener(container_id: &str) {
             };
             send_bridge_event(BridgeEvent::CanvasPan { dx, dy });
         }) as Box<dyn FnMut(web_sys::Event)>);
-        win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref()).ok();
+        win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
+            .ok();
         on_up.forget();
         on_move.forget();
 
         event.prevent_default();
         event.stop_propagation();
     }) as Box<dyn FnMut(web_sys::Event)>);
-    container.add_event_listener_with_callback("mousedown", on_mousedown.as_ref().unchecked_ref()).ok();
+    container
+        .add_event_listener_with_callback("mousedown", on_mousedown.as_ref().unchecked_ref())
+        .ok();
     on_mousedown.forget();
     web_sys::console::log_1(&"fd-host-web: canvas pan listener installed".into());
 }
@@ -1321,9 +1490,13 @@ fn setup_marquee_listener(container_id: &str) {
         }
         // 如果点击到了节点元素，不做框选（节点拖拽已有处理）
         let target = event.target();
-        let target_el = target.as_ref().and_then(|t| t.dyn_ref::<web_sys::Element>());
+        let target_el = target
+            .as_ref()
+            .and_then(|t| t.dyn_ref::<web_sys::Element>());
         if let Some(el) = target_el {
-            if el.has_attribute("data-node-id") || el.closest("[data-node-id]").unwrap_or(None).is_some() {
+            if el.has_attribute("data-node-id")
+                || el.closest("[data-node-id]").unwrap_or(None).is_some()
+            {
                 return;
             }
         }
@@ -1335,9 +1508,13 @@ fn setup_marquee_listener(container_id: &str) {
         let doc = web_sys::window().unwrap().document().unwrap();
         let marquee_el = doc.create_element("div").unwrap();
         marquee_el.set_id("fd-marquee");
-        marquee_el.set_attribute("style",
-            "position:fixed;border:2px dashed #007AFF;background:rgba(0,122,255,0.1);\
-             pointer-events:none;z-index:99999;display:none;").unwrap();
+        marquee_el
+            .set_attribute(
+                "style",
+                "position:fixed;border:2px dashed #007AFF;background:rgba(0,122,255,0.1);\
+             pointer-events:none;z-index:99999;display:none;",
+            )
+            .unwrap();
         doc.body().unwrap().append_child(&marquee_el).ok();
 
         let on_move = Closure::wrap(Box::new(move |event: web_sys::Event| {
@@ -1351,25 +1528,35 @@ fn setup_marquee_listener(container_id: &str) {
             let top = start_y.min(cur_y);
             let width = (cur_x - start_x).abs();
             let height = (cur_y - start_y).abs();
-            let m_el = web_sys::window().unwrap().document().unwrap().get_element_by_id("fd-marquee");
+            let m_el = web_sys::window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .get_element_by_id("fd-marquee");
             if let Some(m) = m_el {
-                m.set_attribute("style", &format!(
-                    "position:fixed;border:2px dashed #007AFF;background:rgba(0,122,255,0.1);\
+                m.set_attribute(
+                    "style",
+                    &format!(
+                        "position:fixed;border:2px dashed #007AFF;background:rgba(0,122,255,0.1);\
                      pointer-events:none;z-index:99999;display:block;\
                      left:{}px;top:{}px;width:{}px;height:{}px;",
-                    left, top, width, height
-                )).unwrap();
+                        left, top, width, height
+                    ),
+                )
+                .unwrap();
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
         let win = web_sys::window().unwrap();
-        win.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref()).ok();
+        win.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref())
+            .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
-            w.remove_event_listener_with_callback("mousemove", move_ref).ok();
+            w.remove_event_listener_with_callback("mousemove", move_ref)
+                .ok();
 
             // 移除选框 DOM
             if let Some(doc) = w.document() {
@@ -1390,7 +1577,9 @@ fn setup_marquee_listener(container_id: &str) {
             let rect_bottom = start_y.max(end_y);
 
             // 至少 5px 才算有效框选
-            if (rect_right - rect_left) < MIN_MARQUEE_SIZE && (rect_bottom - rect_top) < MIN_MARQUEE_SIZE {
+            if (rect_right - rect_left) < MIN_MARQUEE_SIZE
+                && (rect_bottom - rect_top) < MIN_MARQUEE_SIZE
+            {
                 return;
             }
 
@@ -1400,12 +1589,15 @@ fn setup_marquee_listener(container_id: &str) {
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
-        win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref()).ok();
+        win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
+            .ok();
         on_up.forget();
         on_move.forget();
     }) as Box<dyn FnMut(web_sys::Event)>);
 
-    container.add_event_listener_with_callback("mousedown", on_mousedown.as_ref().unchecked_ref()).ok();
+    container
+        .add_event_listener_with_callback("mousedown", on_mousedown.as_ref().unchecked_ref())
+        .ok();
     on_mousedown.forget();
     web_sys::console::log_1(&"fd-host-web: marquee listener installed".into());
 }
@@ -1468,10 +1660,20 @@ fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
     let factor = if delta < 0.0 { 1.1 } else { 1.0 / 1.1 };
     let new_scale = (current_scale * factor).clamp(0.1, 10.0);
 
-    container.set_attribute("data-fd-zoom", &new_scale.to_string()).ok();
+    container
+        .set_attribute("data-fd-zoom", &new_scale.to_string())
+        .ok();
 
-    let pan_x: f32 = container.get_attribute("data-fd-pan-x").unwrap_or_default().parse().unwrap_or(0.0);
-    let pan_y: f32 = container.get_attribute("data-fd-pan-y").unwrap_or_default().parse().unwrap_or(0.0);
+    let pan_x: f32 = container
+        .get_attribute("data-fd-pan-x")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0.0);
+    let pan_y: f32 = container
+        .get_attribute("data-fd-pan-y")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0.0);
 
     // rAF 节流：避免每帧多次 DOM 更新
     schedule_raf(move || {
@@ -1492,7 +1694,9 @@ fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
             container.set_attribute("style", &style).ok();
         }
         // 延迟触发视口剔除（缩放后可能需要加载/卸载节点）
-        schedule_raf(|| { viewport_cull_update(); });
+        schedule_raf(|| {
+            viewport_cull_update();
+        });
     });
 }
 
@@ -1512,15 +1716,31 @@ fn apply_canvas_pan(dx: f32, dy: f32) {
         None => return,
     };
 
-    let pan_x: f32 = container.get_attribute("data-fd-pan-x").unwrap_or_default().parse().unwrap_or(0.0);
-    let pan_y: f32 = container.get_attribute("data-fd-pan-y").unwrap_or_default().parse().unwrap_or(0.0);
+    let pan_x: f32 = container
+        .get_attribute("data-fd-pan-x")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0.0);
+    let pan_y: f32 = container
+        .get_attribute("data-fd-pan-y")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0.0);
     let new_x = pan_x + dx;
     let new_y = pan_y + dy;
 
-    container.set_attribute("data-fd-pan-x", &new_x.to_string()).ok();
-    container.set_attribute("data-fd-pan-y", &new_y.to_string()).ok();
+    container
+        .set_attribute("data-fd-pan-x", &new_x.to_string())
+        .ok();
+    container
+        .set_attribute("data-fd-pan-y", &new_y.to_string())
+        .ok();
 
-    let zoom: f32 = container.get_attribute("data-fd-zoom").unwrap_or_default().parse().unwrap_or(1.0);
+    let zoom: f32 = container
+        .get_attribute("data-fd-zoom")
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(1.0);
 
     // rAF 节流：避免每帧多次 DOM 更新
     schedule_raf(move || {
@@ -1540,7 +1760,9 @@ fn apply_canvas_pan(dx: f32, dy: f32) {
             container.set_attribute("style", &style).ok();
         }
         // 延迟触发视口剔除（平移后可能需要加载/卸载节点）
-        schedule_raf(|| { viewport_cull_update(); });
+        schedule_raf(|| {
+            viewport_cull_update();
+        });
     });
 }
 
@@ -1555,7 +1777,10 @@ fn toggle_node_selection(node_id: &str) {
         None => return,
     };
 
-    if let Some(el) = document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+    if let Some(el) = document
+        .query_selector(&node_selector(node_id))
+        .unwrap_or(None)
+    {
         let is_selected = el.get_attribute("data-fd-selected").unwrap_or_default() == "true";
         if is_selected {
             let style = el.get_attribute("style").unwrap_or_default();
@@ -1572,10 +1797,11 @@ fn toggle_node_selection(node_id: &str) {
         } else {
             el.set_attribute("data-fd-selected", "true").ok();
             let style = el.get_attribute("style").unwrap_or_default();
-            el.set_attribute("style", &format!(
-                "{};outline:2px solid #007AFF;outline-offset:2px;",
-                style
-            )).ok();
+            el.set_attribute(
+                "style",
+                &format!("{};outline:2px solid #007AFF;outline-offset:2px;", style),
+            )
+            .ok();
         }
     }
 }
@@ -1649,13 +1875,17 @@ fn select_node(node_id: &str) {
     }
 
     // 设置新选中
-    if let Some(el) = document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+    if let Some(el) = document
+        .query_selector(&node_selector(node_id))
+        .unwrap_or(None)
+    {
         el.set_attribute("data-fd-selected", "true").ok();
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &format!(
-            "{};outline:2px solid #007AFF;outline-offset:2px;",
-            style
-        )).ok();
+        el.set_attribute(
+            "style",
+            &format!("{};outline:2px solid #007AFF;outline-offset:2px;", style),
+        )
+        .ok();
 
         // 添加 8 个 resize handles
         let (w, h) = read_node_size(&el);
@@ -1740,18 +1970,24 @@ fn create_resize_handle(
             let dx = mm.client_x() as f32 - start_x;
             let dy = mm.client_y() as f32 - start_y;
 
-            let (nx, ny, nw, nh) = compute_resize(&resize_dir, orig_x, orig_y, orig_w, orig_h, dx, dy);
+            let (nx, ny, nw, nh) =
+                compute_resize(&resize_dir, orig_x, orig_y, orig_w, orig_h, dx, dy);
 
             // live preview: update element size + position
             let doc2 = web_sys::window().unwrap().document().unwrap();
-            if let Some(el) = doc2.query_selector(&node_selector(&resize_id)).unwrap_or(None) {
+            if let Some(el) = doc2
+                .query_selector(&node_selector(&resize_id))
+                .unwrap_or(None)
+            {
                 update_node_position(&el, nx, ny);
                 update_node_size(&el, nw, nh);
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
         let window = web_sys::window().unwrap();
-        window.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref()).ok();
+        window
+            .add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref())
+            .ok();
 
         let rid = nid.clone();
         let rdir = dir_str.clone();
@@ -1759,7 +1995,8 @@ fn create_resize_handle(
         let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
-            w.remove_event_listener_with_callback("mousemove", move_ref).ok();
+            w.remove_event_listener_with_callback("mousemove", move_ref)
+                .ok();
 
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
@@ -1767,38 +2004,84 @@ fn create_resize_handle(
                 None => (0.0, 0.0),
             };
             let (nx, ny, nw, nh) = compute_resize(&rdir, orig_x, orig_y, orig_w, orig_h, dx, dy);
-            send_bridge_event(BridgeEvent::NodeResize { node_id: rid.clone(), w: nw, h: nh });
-            send_bridge_event(BridgeEvent::NodeDrag { node_id: rid.clone(), dx: nx - orig_x, dy: ny - orig_y });
+            send_bridge_event(BridgeEvent::NodeResize {
+                node_id: rid.clone(),
+                w: nw,
+                h: nh,
+            });
+            send_bridge_event(BridgeEvent::NodeDrag {
+                node_id: rid.clone(),
+                dx: nx - orig_x,
+                dy: ny - orig_y,
+            });
 
             // refresh handles after resize
             select_node(&rid);
         }) as Box<dyn FnMut(web_sys::Event)>);
-        window.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref()).ok();
+        window
+            .add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
+            .ok();
         on_up.forget();
         on_move.forget();
 
         event.stop_propagation();
         event.prevent_default();
     }) as Box<dyn FnMut(web_sys::Event)>);
-    handle.add_event_listener_with_callback("mousedown", on_handle_mousedown.as_ref().unchecked_ref()).ok();
+    handle
+        .add_event_listener_with_callback("mousedown", on_handle_mousedown.as_ref().unchecked_ref())
+        .ok();
     on_handle_mousedown.forget();
 
     Some(handle)
 }
 
 /// 根据 resize 方向计算新位置/尺寸。
-fn compute_resize(dir: &str, ox: f32, oy: f32, ow: f32, oh: f32, dx: f32, dy: f32) -> (f32, f32, f32, f32) {
+fn compute_resize(
+    dir: &str,
+    ox: f32,
+    oy: f32,
+    ow: f32,
+    oh: f32,
+    dx: f32,
+    dy: f32,
+) -> (f32, f32, f32, f32) {
     let min_size = 10.0;
     let (mut nx, mut ny, mut nw, mut nh) = (ox, oy, ow, oh);
     match dir {
-        "se" => { nw = (ow + dx).max(min_size); nh = (oh + dy).max(min_size); }
-        "e"  => { nw = (ow + dx).max(min_size); }
-        "s"  => { nh = (oh + dy).max(min_size); }
-        "nw" => { nx = ox + dx; ny = oy + dy; nw = (ow - dx).max(min_size); nh = (oh - dy).max(min_size); }
-        "n"  => { ny = oy + dy; nh = (oh - dy).max(min_size); }
-        "ne" => { ny = oy + dy; nw = (ow + dx).max(min_size); nh = (oh - dy).max(min_size); }
-        "sw" => { nx = ox + dx; nw = (ow - dx).max(min_size); nh = (oh + dy).max(min_size); }
-        "w"  => { nx = ox + dx; nw = (ow - dx).max(min_size); }
+        "se" => {
+            nw = (ow + dx).max(min_size);
+            nh = (oh + dy).max(min_size);
+        }
+        "e" => {
+            nw = (ow + dx).max(min_size);
+        }
+        "s" => {
+            nh = (oh + dy).max(min_size);
+        }
+        "nw" => {
+            nx = ox + dx;
+            ny = oy + dy;
+            nw = (ow - dx).max(min_size);
+            nh = (oh - dy).max(min_size);
+        }
+        "n" => {
+            ny = oy + dy;
+            nh = (oh - dy).max(min_size);
+        }
+        "ne" => {
+            ny = oy + dy;
+            nw = (ow + dx).max(min_size);
+            nh = (oh - dy).max(min_size);
+        }
+        "sw" => {
+            nx = ox + dx;
+            nw = (ow - dx).max(min_size);
+            nh = (oh + dy).max(min_size);
+        }
+        "w" => {
+            nx = ox + dx;
+            nw = (ow - dx).max(min_size);
+        }
         _ => {}
     }
     (nx, ny, nw, nh)
@@ -1816,8 +2099,10 @@ fn update_node_size(el: &web_sys::Element, w: f32, h: f32) {
 #[allow(clippy::too_many_arguments)]
 fn mutate_node(
     node_id: &str,
-    x: Option<f32>, y: Option<f32>,
-    w: Option<f32>, h: Option<f32>,
+    x: Option<f32>,
+    y: Option<f32>,
+    w: Option<f32>,
+    h: Option<f32>,
     fill: &Option<String>,
     stroke: &Option<String>,
     stroke_width: Option<f32>,
@@ -1834,10 +2119,15 @@ fn mutate_node(
         Some(d) => d,
         None => return,
     };
-    let el = match document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+    let el = match document
+        .query_selector(&node_selector(node_id))
+        .unwrap_or(None)
+    {
         Some(e) => e,
         None => {
-            web_sys::console::warn_1(&format!("fd-host-web: mutate_node 找不到节点 {node_id}").into());
+            web_sys::console::warn_1(
+                &format!("fd-host-web: mutate_node 找不到节点 {node_id}").into(),
+            );
             return;
         }
     };
@@ -1847,11 +2137,19 @@ fn mutate_node(
     } else {
         if let Some(nx) = x {
             let style = el.get_attribute("style").unwrap_or_default();
-            el.set_attribute("style", &replace_css_prop(&style, "left", &format!("{}px", nx))).ok();
+            el.set_attribute(
+                "style",
+                &replace_css_prop(&style, "left", &format!("{}px", nx)),
+            )
+            .ok();
         }
         if let Some(ny) = y {
             let style = el.get_attribute("style").unwrap_or_default();
-            el.set_attribute("style", &replace_css_prop(&style, "top", &format!("{}px", ny))).ok();
+            el.set_attribute(
+                "style",
+                &replace_css_prop(&style, "top", &format!("{}px", ny)),
+            )
+            .ok();
         }
     }
     if let (Some(nw), Some(nh)) = (w, h) {
@@ -1859,42 +2157,69 @@ fn mutate_node(
     } else {
         if let Some(nw) = w {
             let style = el.get_attribute("style").unwrap_or_default();
-            el.set_attribute("style", &replace_css_prop(&style, "width", &format!("{}px", nw))).ok();
+            el.set_attribute(
+                "style",
+                &replace_css_prop(&style, "width", &format!("{}px", nw)),
+            )
+            .ok();
         }
         if let Some(nh) = h {
             let style = el.get_attribute("style").unwrap_or_default();
-            el.set_attribute("style", &replace_css_prop(&style, "height", &format!("{}px", nh))).ok();
+            el.set_attribute(
+                "style",
+                &replace_css_prop(&style, "height", &format!("{}px", nh)),
+            )
+            .ok();
         }
     }
 
     // Style mutations
     if let Some(f) = fill {
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "background-color", f)).ok();
+        el.set_attribute("style", &replace_css_prop(&style, "background-color", f))
+            .ok();
     }
     if let Some(s) = stroke {
         let sw = stroke_width.unwrap_or(1.0);
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(
-            &replace_css_prop(&style, "border", &format!("{}px solid {}", sw, s)),
-            "border-color", s
-        )).ok();
+        el.set_attribute(
+            "style",
+            &replace_css_prop(
+                &replace_css_prop(&style, "border", &format!("{}px solid {}", sw, s)),
+                "border-color",
+                s,
+            ),
+        )
+        .ok();
     }
     if let Some(r) = radius {
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "border-radius", &format!("{}px", r))).ok();
+        el.set_attribute(
+            "style",
+            &replace_css_prop(&style, "border-radius", &format!("{}px", r)),
+        )
+        .ok();
     }
     if let Some(fs) = font_size {
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "font-size", &format!("{}px", fs))).ok();
+        el.set_attribute(
+            "style",
+            &replace_css_prop(&style, "font-size", &format!("{}px", fs)),
+        )
+        .ok();
     }
     if let Some(ff) = font_family {
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "font-family", ff)).ok();
+        el.set_attribute("style", &replace_css_prop(&style, "font-family", ff))
+            .ok();
     }
     if let Some(o) = opacity {
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "opacity", &o.to_string())).ok();
+        el.set_attribute(
+            "style",
+            &replace_css_prop(&style, "opacity", &o.to_string()),
+        )
+        .ok();
     }
 }
 
@@ -1908,7 +2233,10 @@ fn set_node_visibility(node_id: &str, visible: bool) {
         Some(d) => d,
         None => return,
     };
-    if let Some(el) = document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+    if let Some(el) = document
+        .query_selector(&node_selector(node_id))
+        .unwrap_or(None)
+    {
         if visible {
             el.remove_attribute("data-fd-hidden").ok();
             let style = el.get_attribute("style").unwrap_or_default();
@@ -1935,7 +2263,10 @@ fn set_node_locked(node_id: &str, locked: bool) {
         Some(d) => d,
         None => return,
     };
-    if let Some(el) = document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+    if let Some(el) = document
+        .query_selector(&node_selector(node_id))
+        .unwrap_or(None)
+    {
         if locked {
             el.set_attribute("data-fd-locked", "true").ok();
             let style = el.get_attribute("style").unwrap_or_default();
@@ -1968,7 +2299,10 @@ fn reorder_node(node_id: &str, new_index: usize) {
         Some(c) => c,
         None => return,
     };
-    if let Some(el) = document.query_selector(&node_selector(node_id)).unwrap_or(None) {
+    if let Some(el) = document
+        .query_selector(&node_selector(node_id))
+        .unwrap_or(None)
+    {
         let node: &web_sys::Node = container.unchecked_ref();
         let child_nodes = node.child_nodes();
         let count = child_nodes.length() as usize;
@@ -1979,7 +2313,9 @@ fn reorder_node(node_id: &str, new_index: usize) {
         } else {
             node.append_child(&el).ok();
         }
-        web_sys::console::log_1(&format!("fd-host-web: node {node_id} reordered to {new_index}").into());
+        web_sys::console::log_1(
+            &format!("fd-host-web: node {node_id} reordered to {new_index}").into(),
+        );
     }
 }
 
@@ -2070,7 +2406,10 @@ fn render_plan_preview(doc_json: &str) {
             let style = format!(
                 "position:absolute;left:{}px;top:{}px;width:{}px;height:{}px;\
                  border:2px dashed #007AFF;border-radius:{}px;opacity:0.6;",
-                node.x as i32, node.y as i32, node.w as i32, node.h as i32,
+                node.x as i32,
+                node.y as i32,
+                node.w as i32,
+                node.h as i32,
                 node.style.radius.map(|r| r as i32).unwrap_or(0)
             );
             el.set_attribute("style", &style).unwrap();
@@ -2212,25 +2551,34 @@ fn render_node(node: &fd_canvas_core::PenNode, ctx: &web_sys::CanvasRenderingCon
 }
 
 /// 绘制圆角矩形。
-fn round_rect(
-    ctx: &web_sys::CanvasRenderingContext2d,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    r: f64,
-) {
+fn round_rect(ctx: &web_sys::CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w / 2.0).min(h / 2.0);
     ctx.begin_path();
     ctx.move_to(x + r, y);
     ctx.line_to(x + w - r, y);
-    ctx.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0).ok();
+    ctx.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0)
+        .ok();
     ctx.line_to(x + w, y + h - r);
-    ctx.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2).ok();
+    ctx.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2)
+        .ok();
     ctx.line_to(x + r, y + h);
-    ctx.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI).ok();
+    ctx.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    )
+    .ok();
     ctx.line_to(x, y + r);
-    ctx.arc(x + r, y + r, r, std::f64::consts::PI, -std::f64::consts::FRAC_PI_2).ok();
+    ctx.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        -std::f64::consts::FRAC_PI_2,
+    )
+    .ok();
     ctx.close_path();
     ctx.fill();
     ctx.stroke();
@@ -2240,7 +2588,10 @@ fn round_rect(
 fn get_canvas(canvas_id: &str) -> Option<web_sys::HtmlCanvasElement> {
     let window = web_sys::window()?;
     let document = window.document()?;
-    document.get_element_by_id(canvas_id)?.dyn_into::<web_sys::HtmlCanvasElement>().ok()
+    document
+        .get_element_by_id(canvas_id)?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()
 }
 
 // ── 单元测试（宿主目标，非 wasm32）──
@@ -2469,7 +2820,10 @@ mod tests {
 
     #[test]
     fn bridge_event_canvas_pan_serde() {
-        let event = BridgeEvent::CanvasPan { dx: 50.0, dy: -30.0 };
+        let event = BridgeEvent::CanvasPan {
+            dx: 50.0,
+            dy: -30.0,
+        };
         let json = serde_json::to_string(&event).unwrap();
         let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
         match event2 {
@@ -2628,20 +2982,28 @@ mod tests {
     #[test]
     fn aabb_overlap_basic() {
         // 两个重叠矩形
-        let a_left = 0.0f32; let a_right = 100.0;
-        let a_top = 0.0f32; let a_bottom = 100.0;
-        let b_left = 50.0f32; let b_right = 150.0;
-        let b_top = 50.0f32; let b_bottom = 150.0;
+        let a_left = 0.0f32;
+        let a_right = 100.0;
+        let a_top = 0.0f32;
+        let a_bottom = 100.0;
+        let b_left = 50.0f32;
+        let b_right = 150.0;
+        let b_top = 50.0f32;
+        let b_bottom = 150.0;
         assert!(a_right > b_left && a_left < b_right && a_bottom > b_top && a_top < b_bottom);
     }
 
     #[test]
     fn aabb_no_overlap() {
         // 两个不重叠矩形
-        let a_left = 0.0f32; let a_right = 100.0;
-        let a_top = 0.0f32; let a_bottom = 100.0;
-        let b_left = 200.0f32; let b_right = 300.0;
-        let b_top = 200.0f32; let b_bottom = 300.0;
+        let a_left = 0.0f32;
+        let a_right = 100.0;
+        let a_top = 0.0f32;
+        let a_bottom = 100.0;
+        let b_left = 200.0f32;
+        let b_right = 300.0;
+        let b_top = 200.0f32;
+        let b_bottom = 300.0;
         assert!(!(a_right > b_left && a_left < b_right && a_bottom > b_top && a_top < b_bottom));
     }
 
@@ -2658,7 +3020,11 @@ mod tests {
             let x = (i % 10) as f32 * 200.0;
             let y = (i / 10) as f32 * 100.0;
             page.add(fd_canvas_core::PenNode::rect(
-                &format!("n{i}"), x, y, 180.0, 80.0,
+                &format!("n{i}"),
+                x,
+                y,
+                180.0,
+                80.0,
             ));
         }
         doc.add_page(page);

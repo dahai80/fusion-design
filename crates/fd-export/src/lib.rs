@@ -124,7 +124,11 @@ fn collect_elements(node: &fd_canvas_core::PenNode, out: &mut Vec<CanvasElement>
         opacity: node.style.opacity,
         font_size: node.style.font_size,
         font_family: node.style.font_family.clone(),
-        rotation: if node.rotation != 0.0 { Some(node.rotation) } else { None },
+        rotation: if node.rotation != 0.0 {
+            Some(node.rotation)
+        } else {
+            None
+        },
     });
     for child in &node.children {
         collect_elements(child, out);
@@ -190,10 +194,8 @@ impl Exporter {
         format: ExportFormat,
         out_dir: PathBuf,
     ) -> anyhow::Result<Vec<PathBuf>> {
-        tokio::task::spawn_blocking(move || {
-            Exporter::export_batch(&pages, format, &out_dir)
-        })
-        .await?
+        tokio::task::spawn_blocking(move || Exporter::export_batch(&pages, format, &out_dir))
+            .await?
     }
 
     /// 异步从 PenDocument 导出。
@@ -202,16 +204,19 @@ impl Exporter {
         format: ExportFormat,
         out_dir: PathBuf,
     ) -> anyhow::Result<Vec<PathBuf>> {
-        tokio::task::spawn_blocking(move || {
-            Self::from_pen_document(&doc, format, &out_dir)
-        })
-        .await?
+        tokio::task::spawn_blocking(move || Self::from_pen_document(&doc, format, &out_dir)).await?
     }
 }
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -240,12 +245,28 @@ fn render_svg(page: &CanvasPage) -> String {
 fn render_element_svg(el: &CanvasElement) -> String {
     let fill = xml_escape(el.fill.as_deref().unwrap_or("none"));
     let stroke = xml_escape(el.stroke.as_deref().unwrap_or("none"));
-    let sw = el.stroke_width.map(|w| format!("stroke-width=\"{w}\"")).unwrap_or_default();
-    let rx = el.radius.map(|r| format!("rx=\"{r}\" ry=\"{r}\"")).unwrap_or_default();
-    let opacity = el.opacity.map(|o| format!("opacity=\"{o}\"")).unwrap_or_default();
-    let transform = el.rotation.map(|r| {
-        format!("transform=\"rotate({r} {} {})\"", el.x + el.w / 2.0, el.y + el.h / 2.0)
-    }).unwrap_or_default();
+    let sw = el
+        .stroke_width
+        .map(|w| format!("stroke-width=\"{w}\""))
+        .unwrap_or_default();
+    let rx = el
+        .radius
+        .map(|r| format!("rx=\"{r}\" ry=\"{r}\""))
+        .unwrap_or_default();
+    let opacity = el
+        .opacity
+        .map(|o| format!("opacity=\"{o}\""))
+        .unwrap_or_default();
+    let transform = el
+        .rotation
+        .map(|r| {
+            format!(
+                "transform=\"rotate({r} {} {})\"",
+                el.x + el.w / 2.0,
+                el.y + el.h / 2.0
+            )
+        })
+        .unwrap_or_default();
 
     let attrs = format!("fill=\"{fill}\" stroke=\"{stroke}\" {sw} {rx} {opacity} {transform}");
 
@@ -261,8 +282,15 @@ fn render_element_svg(el: &CanvasElement) -> String {
             el.w.min(el.h) / 2.0,
         ),
         "text" => {
-            let fs = el.font_size.map(|s| format!("font-size=\"{s}px\"")).unwrap_or_default();
-            let ff = el.font_family.as_deref().map(|f| format!("font-family=\"{}\"", xml_escape(f))).unwrap_or_default();
+            let fs = el
+                .font_size
+                .map(|s| format!("font-size=\"{s}px\""))
+                .unwrap_or_default();
+            let ff = el
+                .font_family
+                .as_deref()
+                .map(|f| format!("font-family=\"{}\"", xml_escape(f)))
+                .unwrap_or_default();
             let text = xml_escape(el.text.as_deref().unwrap_or(""));
             format!(
                 "<text x=\"{}\" y=\"{}\" fill=\"{fill}\" {fs} {ff}>{text}</text>\n",
@@ -271,7 +299,10 @@ fn render_element_svg(el: &CanvasElement) -> String {
         }
         "image" => format!(
             "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" href=\"{}\" {attrs}/>\n",
-            el.x, el.y, el.w, el.h,
+            el.x,
+            el.y,
+            el.w,
+            el.h,
             xml_escape(el.text.as_deref().unwrap_or(""))
         ),
         "group" => "<!-- group -->\n".to_string(),
@@ -281,9 +312,9 @@ fn render_element_svg(el: &CanvasElement) -> String {
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
@@ -298,7 +329,11 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
     }
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("无法创建 pixmap ({}x{})", width, height))?;
-    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     let png_data = pixmap.encode_png()?;
     std::fs::write(file, &png_data)?;
     tracing::info!(?file, "PNG 已导出");
@@ -333,11 +368,8 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
         }
     }
 
-    let pdf_page = printpdf::ops::PdfPage::new(
-        printpdf::Mm(width_mm),
-        printpdf::Mm(height_mm),
-        ops,
-    );
+    let pdf_page =
+        printpdf::ops::PdfPage::new(printpdf::Mm(width_mm), printpdf::Mm(height_mm), ops);
 
     let mut doc = printpdf::PdfDocument::new(&page.name);
     doc.with_pages(vec![pdf_page]);
@@ -364,7 +396,10 @@ mod tests {
             elements: vec![
                 CanvasElement {
                     kind: "rect".into(),
-                    x: 0.0, y: 0.0, w: 50.0, h: 50.0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
                     text: None,
                     fill: Some("#FFF".into()),
                     stroke: Some("#000".into()),
@@ -377,7 +412,10 @@ mod tests {
                 },
                 CanvasElement {
                     kind: "text".into(),
-                    x: 10.0, y: 20.0, w: 0.0, h: 0.0,
+                    x: 10.0,
+                    y: 20.0,
+                    w: 0.0,
+                    h: 0.0,
                     text: Some("hello".into()),
                     fill: Some("#000".into()),
                     stroke: None,
@@ -430,7 +468,10 @@ mod tests {
         let page = sample_page();
         let file = Exporter::export_page(&page, ExportFormat::Png, tmp.path()).unwrap();
         let data = std::fs::read(&file).unwrap();
-        assert!(data.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "PNG magic bytes");
+        assert!(
+            data.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "PNG magic bytes"
+        );
     }
 
     #[test]
@@ -445,13 +486,16 @@ mod tests {
     #[test]
     fn export_batch_multiple_pages() {
         let tmp = tempdir().unwrap();
-        let pages = vec![sample_page(), CanvasPage {
-            id: "p2".into(),
-            name: "Second".into(),
-            width: 200.0,
-            height: 200.0,
-            elements: vec![],
-        }];
+        let pages = vec![
+            sample_page(),
+            CanvasPage {
+                id: "p2".into(),
+                name: "Second".into(),
+                width: 200.0,
+                height: 200.0,
+                elements: vec![],
+            },
+        ];
         let files = Exporter::export_batch(&pages, ExportFormat::Svg, tmp.path()).unwrap();
         assert_eq!(files.len(), 2);
     }
@@ -475,9 +519,10 @@ mod tests {
     async fn export_batch_async_works() {
         let tmp = tempdir().unwrap();
         let pages = vec![sample_page()];
-        let files = Exporter::export_batch_async(pages, ExportFormat::Json, tmp.path().to_path_buf())
-            .await
-            .unwrap();
+        let files =
+            Exporter::export_batch_async(pages, ExportFormat::Json, tmp.path().to_path_buf())
+                .await
+                .unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -485,10 +530,19 @@ mod tests {
     fn render_element_svg_unknown_kind_commented() {
         let el = CanvasElement {
             kind: "weird".into(),
-            x: 0.0, y: 0.0, w: 0.0, h: 0.0,
-            text: None, fill: None, stroke: None,
-            stroke_width: None, radius: None, opacity: None,
-            font_size: None, font_family: None, rotation: None,
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+            text: None,
+            fill: None,
+            stroke: None,
+            stroke_width: None,
+            radius: None,
+            opacity: None,
+            font_size: None,
+            font_family: None,
+            rotation: None,
         };
         let svg = render_element_svg(&el);
         assert!(svg.contains("未知元素"));
@@ -503,12 +557,19 @@ mod tests {
             height: 10.0,
             elements: vec![CanvasElement {
                 kind: "circle".into(),
-                x: 0.0, y: 0.0, w: 10.0, h: 10.0,
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
                 text: None,
                 fill: Some("#F00".into()),
                 stroke: None,
-                stroke_width: None, radius: None, opacity: None,
-                font_size: None, font_family: None, rotation: None,
+                stroke_width: None,
+                radius: None,
+                opacity: None,
+                font_size: None,
+                font_family: None,
+                rotation: None,
             }],
         };
         let svg = render_svg(&page);
@@ -567,27 +628,56 @@ mod tests {
     fn svg_attribute_injection_escaped() {
         let el = CanvasElement {
             kind: "rect".into(),
-            x: 0.0, y: 0.0, w: 10.0, h: 10.0,
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
             fill: Some("red\" onclick=\"alert(1)".into()),
             stroke: Some("blue\" onload=\"evil()".into()),
-            stroke_width: None, radius: None, opacity: None, rotation: None,
-            text: None, font_size: None, font_family: None,
+            stroke_width: None,
+            radius: None,
+            opacity: None,
+            rotation: None,
+            text: None,
+            font_size: None,
+            font_family: None,
         };
         let svg = render_element_svg(&el);
-        assert!(!svg.contains("\" onclick=\""), "fill should not create new attribute: {svg}");
-        assert!(!svg.contains("\" onload=\""), "stroke should not create new attribute: {svg}");
-        assert!(svg.contains("fill=\"red&quot;"), "fill quotes should be escaped: {svg}");
-        assert!(svg.contains("stroke=\"blue&quot;"), "stroke quotes should be escaped: {svg}");
+        assert!(
+            !svg.contains("\" onclick=\""),
+            "fill should not create new attribute: {svg}"
+        );
+        assert!(
+            !svg.contains("\" onload=\""),
+            "stroke should not create new attribute: {svg}"
+        );
+        assert!(
+            svg.contains("fill=\"red&quot;"),
+            "fill quotes should be escaped: {svg}"
+        );
+        assert!(
+            svg.contains("stroke=\"blue&quot;"),
+            "stroke quotes should be escaped: {svg}"
+        );
     }
 
     #[test]
     fn rotation_in_svg() {
         let el = CanvasElement {
             kind: "rect".into(),
-            x: 10.0, y: 20.0, w: 50.0, h: 30.0,
-            text: None, fill: Some("#000".into()), stroke: None,
-            stroke_width: None, radius: None, opacity: None,
-            font_size: None, font_family: None, rotation: Some(45.0),
+            x: 10.0,
+            y: 20.0,
+            w: 50.0,
+            h: 30.0,
+            text: None,
+            fill: Some("#000".into()),
+            stroke: None,
+            stroke_width: None,
+            radius: None,
+            opacity: None,
+            font_size: None,
+            font_family: None,
+            rotation: Some(45.0),
         };
         let svg = render_element_svg(&el);
         assert!(svg.contains("rotate(45"));
@@ -598,7 +688,9 @@ mod tests {
         let mut doc = fd_canvas_core::PenDocument::new();
         let mut page = fd_canvas_core::Page::new("p1", "Nested", 100.0, 100.0);
         let group = fd_canvas_core::PenNode::group(
-            "g1", 0.0, 0.0,
+            "g1",
+            0.0,
+            0.0,
             vec![fd_canvas_core::PenNode::rect("c1", 5.0, 5.0, 10.0, 10.0)],
         );
         page.add(group);

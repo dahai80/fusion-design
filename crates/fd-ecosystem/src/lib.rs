@@ -51,7 +51,9 @@ pub struct EcosystemLink {
 impl EcosystemLink {
     /// 用指定基目录构造（所有 IPC 文件落在 `<base>/<target>/`）。
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
-        Self { base_dir: base_dir.into() }
+        Self {
+            base_dir: base_dir.into(),
+        }
     }
 
     /// 发送一条联动消息（写入目标目录的 JSON 文件）。
@@ -93,10 +95,7 @@ impl EcosystemLink {
     /// 异步发送（供任务队列调用）。
     pub async fn send_async(&self, msg: LinkMessage) -> anyhow::Result<PathBuf> {
         let base = self.base_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            EcosystemLink::new(base).send(&msg)
-        })
-        .await?
+        tokio::task::spawn_blocking(move || EcosystemLink::new(base).send(&msg)).await?
     }
 
     /// 正向同步：PenDocument → fd-codegen 生成代码 → 写入 Fusion Code 工程目录。
@@ -218,7 +217,10 @@ fn parse_mutate_command(v: &serde_json::Value) -> Option<MutateNodeCommand> {
         fill: obj.get("fill").and_then(|v| v.as_str()).map(String::from),
         stroke: obj.get("stroke").and_then(|v| v.as_str()).map(String::from),
         radius: obj.get("radius").and_then(|v| v.as_f64()).map(|v| v as f32),
-        opacity: obj.get("opacity").and_then(|v| v.as_f64()).map(|v| v as f32),
+        opacity: obj
+            .get("opacity")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
     })
 }
 
@@ -246,7 +248,10 @@ fn default_timestamp() -> u64 {
 impl EcosystemLink {
     /// 保存设计模板到 Fusion-KB 目录。
     pub fn save_template(&self, tmpl: &DesignTemplate) -> anyhow::Result<PathBuf> {
-        let kb_dir = self.base_dir.join(EcosystemTarget::FusionKB.ipc_dir()).join("templates");
+        let kb_dir = self
+            .base_dir
+            .join(EcosystemTarget::FusionKB.ipc_dir())
+            .join("templates");
         std::fs::create_dir_all(&kb_dir)?;
         let file = kb_dir.join(format!("{}.json", tmpl.id));
         let json = serde_json::to_string_pretty(tmpl)?;
@@ -268,7 +273,10 @@ impl EcosystemLink {
 
     /// 检索模板：按关键词匹配 name/tags/category。
     pub fn search_templates(&self, query: &str) -> anyhow::Result<Vec<DesignTemplate>> {
-        let kb_dir = self.base_dir.join(EcosystemTarget::FusionKB.ipc_dir()).join("templates");
+        let kb_dir = self
+            .base_dir
+            .join(EcosystemTarget::FusionKB.ipc_dir())
+            .join("templates");
         if !kb_dir.exists() {
             return Ok(vec![]);
         }
@@ -298,7 +306,10 @@ impl EcosystemLink {
 
     /// 按 tag 精确匹配检索模板（多 tag 取交集）。
     pub fn search_templates_by_tags(&self, tags: &[String]) -> anyhow::Result<Vec<DesignTemplate>> {
-        let kb_dir = self.base_dir.join(EcosystemTarget::FusionKB.ipc_dir()).join("templates");
+        let kb_dir = self
+            .base_dir
+            .join(EcosystemTarget::FusionKB.ipc_dir())
+            .join("templates");
         if !kb_dir.exists() {
             return Ok(vec![]);
         }
@@ -312,10 +323,11 @@ impl EcosystemLink {
             }
             if let Ok(data) = std::fs::read_to_string(&path) {
                 if let Ok(tmpl) = serde_json::from_str::<DesignTemplate>(&data) {
-                    let tmpl_tags_lower: Vec<String> = tmpl.tags.iter().map(|t| t.to_lowercase()).collect();
-                    let all_match = lower_tags.iter().all(|t| {
-                        tmpl_tags_lower.iter().any(|tt| tt == t)
-                    });
+                    let tmpl_tags_lower: Vec<String> =
+                        tmpl.tags.iter().map(|t| t.to_lowercase()).collect();
+                    let all_match = lower_tags
+                        .iter()
+                        .all(|t| tmpl_tags_lower.iter().any(|tt| tt == t));
                     if all_match {
                         results.push(tmpl);
                     }
@@ -337,7 +349,10 @@ impl EcosystemLink {
         &self,
         target: EcosystemTarget,
         mut on_change: impl FnMut(WatchEvent) + Send + 'static,
-    ) -> anyhow::Result<(tokio::task::JoinHandle<()>, tokio::sync::oneshot::Sender<()>)> {
+    ) -> anyhow::Result<(
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Sender<()>,
+    )> {
         let watch_dir = self.base_dir.join(target.ipc_dir());
         std::fs::create_dir_all(&watch_dir)?;
 
@@ -446,7 +461,10 @@ mod tests {
     #[test]
     fn ipc_dir_names() {
         assert_eq!(EcosystemTarget::FusionCode.ipc_dir(), "fusion-code");
-        assert_eq!(EcosystemTarget::FusionSimulation.ipc_dir(), "fusion-simulation");
+        assert_eq!(
+            EcosystemTarget::FusionSimulation.ipc_dir(),
+            "fusion-simulation"
+        );
     }
 
     #[tokio::test]
@@ -608,12 +626,16 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // 双 tag 交集只匹配 tmpl1
-        let results = link.search_templates_by_tags(&["auth".into(), "form".into()]).unwrap();
+        let results = link
+            .search_templates_by_tags(&["auth".into(), "form".into()])
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "t1");
 
         // 不存在的 tag
-        let results = link.search_templates_by_tags(&["nonexistent".into()]).unwrap();
+        let results = link
+            .search_templates_by_tags(&["nonexistent".into()])
+            .unwrap();
         assert!(results.is_empty());
 
         // 空 tags 返回全部
@@ -726,7 +748,10 @@ pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
             created_at: default_timestamp(),
         },
     ];
-    tracing::info!(count = templates.len(), "builtin_scene_templates: 返回内置模板");
+    tracing::info!(
+        count = templates.len(),
+        "builtin_scene_templates: 返回内置模板"
+    );
     templates
 }
 
@@ -735,7 +760,10 @@ impl EcosystemLink {
     pub fn install_builtin_templates(&self) -> anyhow::Result<usize> {
         let mut installed = 0usize;
         for tmpl in builtin_scene_templates() {
-            let kb_dir = self.base_dir.join(EcosystemTarget::FusionKB.ipc_dir()).join("templates");
+            let kb_dir = self
+                .base_dir
+                .join(EcosystemTarget::FusionKB.ipc_dir())
+                .join("templates");
             std::fs::create_dir_all(&kb_dir)?;
             let file = kb_dir.join(format!("{}.json", tmpl.id));
             if file.exists() {
