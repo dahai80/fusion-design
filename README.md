@@ -15,6 +15,7 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 | Platform | macOS Apple Silicon (M-series, Metal/ANE hardware acceleration) |
 | Foundation | OpenPencil (Rust) secondary encapsulation + custom fusion-mlx adapter |
 | Core positioning | Bidirectional sync with Fusion Code, design-to-runnable-code in one click |
+| License | Apache-2.0 |
 
 ### Key Differentiators (vs. Claude Design)
 
@@ -35,24 +36,18 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 7. **Ecosystem integration** — Simulation / Desk / KB / CLI full integration, async file watching, template tag search
 8. **Undo/Redo + Diff** — snapshot stack (50 levels) + node-level Diff/Patch
 9. **Full-featured CLI** — generate / export / export-batch / lint --fix / undo / redo / health / diff / theme
-10. **Asset library management** — asset categorization/tagging/annotation/color extraction/design system Token binding, 19 tests
+10. **Asset library management** — asset categorization/tagging/annotation/color extraction/design system Token binding
 11. **Design spec document generation** — AI auto-generates interaction specs / component specs / page architecture docs (SpecDocSkill)
 12. **Page flow batch generation** — AI generates multi-page layouts from flow descriptions with unified style (PageFlowSkill)
-13. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison, 11 tests
+13. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison
 14. **Built-in scene templates** — 4 preset categories (mobile app / admin dashboard / marketing site / mini program), one-click install
 
-## 🗂️ Project Structure (V0.2 — 11 crates + vendored op-ai, 321 tests)
+## 🗂️ Project Structure
 
 ```
 fusion-design/
-├── PRD.md
-├── README.md
-├── README_CN.md
-├── docs/
-│   ├── OPENS_SOURCE_REFERENCES.md
-│   └── INTEGRATION_PLAN.md
 ├── crates/                     ← Fusion-Design custom Rust crates (workspace)
-│   ├── fd-canvas-core/         ← Custom canvas data model (PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument)
+│   ├── fd-canvas-core/         ← Canvas data model (PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument)
 │   ├── fd-ai-adapter/          ← op-ai → fusion-mlx adapter (SSE streaming / multimodal vision / 7 Skills)
 │   ├── fd-codegen/             ← HTML/React+Tailwind code export
 │   ├── fd-design-system/       ← Two built-in design specs + Token + Light/Dark themes
@@ -71,32 +66,35 @@ fusion-design/
 
 ## 🛠️ Tech Stack
 
-- **Foundation**: OpenPencil (Rust workspace) — `op-ai` (vendored)
-- **AI inference**: fusion-mlx (local multimodal, Metal/ANE accelerated)
-- **Host**: Fusion-Desk WKWebView (macOS native)
-- **Frontend**: WASM (wasm32-unknown-unknown) + DOM/Canvas rendering
-- **Communication**: Local private HTTP (127.0.0.1) + WKWebView Bridge
-- **Async**: tokio + notify (file watching) + futures (SSE streaming)
+| Layer | Technology |
+|-------|-----------|
+| Foundation | OpenPencil (Rust workspace) — `op-ai` (vendored) |
+| AI inference | fusion-mlx (local multimodal, Metal/ANE accelerated) |
+| Host | Fusion-Desk WKWebView (macOS native) |
+| Frontend | WASM (wasm32-unknown-unknown) + DOM/Canvas rendering |
+| Communication | Local private HTTP (127.0.0.1) + WKWebView Bridge |
+| Async | tokio + notify (file watching) + futures (SSE streaming) |
 
 ## 🧪 Verification
 
 ```bash
-cargo check --workspace                                        # ✅ Full workspace compiles
-cargo test --workspace                                         # ✅ 321 tests pass
-cargo build -p fd-host-web --target wasm32-unknown-unknown    # ✅ WASM build succeeds
-cargo run -p fd-cli -- --help                                  # ✅ CLI available
+cargo check --workspace                                        # Full workspace compiles
+cargo test --workspace                                         # 321 tests pass
+cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM build succeeds
+cargo run -p fd-cli -- --help                                  # CLI available
 ```
 
-Test coverage:
-- `fd-canvas-core`: 53+ tests (PenDocument CRUD + UndoRedo + Diff/Patch + JSON round-trip + layout + named version management)
-- `fd-ai-adapter`: 60+ tests (mock HTTP + SSE streaming + health check + multimodal vision + SpecDoc/PageFlow Skill)
-- `fd-design-lint`: 41 tests (13 lint rules + auto-fix + apply_tokens + FixResult serialization)
-- `fd-design-system`: 10+ tests (Token + Theme + Registry + CSS output)
-- `fd-ecosystem`: 16 tests (IPC + sync_to_code + template tag search + built-in scene templates)
-- `fd-asset`: 19 tests (asset CRUD + categorization/tagging/annotation + color extraction + Token binding)
-- `fd-codegen` / `fd-host-web` / `fd-export` / `fd-host-desk`: 4-10 tests each
-- `fd-cli`: 5+ tests (CLI argument parsing + subcommand dispatch)
+| Crate | Tests | Coverage |
+|-------|-------|----------|
+| fd-canvas-core | 53+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management |
+| fd-ai-adapter | 60+ | Mock HTTP, SSE streaming, health check, multimodal vision, SpecDoc/PageFlow |
+| fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
+| fd-design-system | 10+ | Token, Theme, Registry, CSS output |
+| fd-ecosystem | 16 | IPC, sync_to_code, template tag search, built-in scene templates |
+| fd-asset | 19 | Asset CRUD, categorization/tagging/annotation, color extraction, Token binding |
+| fd-codegen / fd-host-web / fd-export / fd-host-desk | 4-10 each | Core functionality |
+| fd-cli | 5+ | CLI argument parsing, subcommand dispatch |
 
 ## 📄 License
 
-MIT — part of the [Fusion-MLX](https://github.com/fusion-mlx) Apple Silicon local AI ecosystem.
+Licensed under the [Apache License 2.0](LICENSE).
