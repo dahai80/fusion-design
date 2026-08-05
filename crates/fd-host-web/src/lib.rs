@@ -27,6 +27,22 @@ fn node_selector(node_id: &str) -> String {
 
 static SHELL: LazyLock<Mutex<Option<WebShellInner>>> = LazyLock::new(|| Mutex::new(None));
 
+// 容器级监听器是否已安装（幂等保护）。
+// 修复 P0-1：render_dom 每次 DOM 渲染都重新 setup_* + forget，
+// 导致监听器单调累积、同事件被 N 次处理 -> 卡死。置位后跳过重复注册。
+static LISTENERS_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 原子置位并返回旧值；首次调用返回 false，后续返回 true。
+fn mark_listeners_installed() -> bool {
+    LISTENERS_INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 容错获取 SHELL 锁：即使中毒也取出数据，避免 panic 传播致整个渲染层永久卡死（P1-1）。
+fn shell_lock() -> std::sync::MutexGuard<'static, Option<WebShellInner>> {
+    SHELL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ── WebShell ──
 
 /// 宿主外壳（wasm_bindgen 公开类型）。
@@ -75,7 +91,7 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
     setup_message_listener(&window)?;
 
     let shell = WebShell { inner };
-    *SHELL.lock().unwrap() = Some(WebShellInner {
+    *shell_lock() = Some(WebShellInner {
         canvas_id: canvas_id.to_string(),
         ready: true,
         pending_messages: vec![],
@@ -480,7 +496,7 @@ fn render_dom(doc_json: &str) {
             if !is_node_in_viewport(node, &container) {
                 continue;
             }
-            if let Some(el) = render_node_to_dom(node, &document) {
+            if let Some(el) = render_node_to_dom(node, &document, 0) {
                 fragment.append_child(&el).ok();
                 node_count += 1;
             }
@@ -492,15 +508,16 @@ fn render_dom(doc_json: &str) {
         &format!("fd-host-web: DOM 渲染完成, {node_count} 节点（视口剔除后）").into(),
     );
 
-    // 事件委托：在容器级别注册单处理器，替代逐节点绑定
-    setup_delegated_click_listener("fusion-dom-root");
-    setup_delegated_mousedown_listener("fusion-dom-root");
-
-    // 注册缩放、平移、画布点击和框选事件
-    setup_canvas_click_listener("fusion-dom-root");
-    setup_canvas_zoom_listener("fusion-dom-root");
-    setup_canvas_pan_listener("fusion-dom-root");
-    setup_marquee_listener("fusion-dom-root");
+    // 事件委托：容器级监听器仅安装一次，避免重复 forget 累积泄漏（P0-1）。
+    if !mark_listeners_installed() {
+        setup_delegated_click_listener("fusion-dom-root");
+        setup_delegated_mousedown_listener("fusion-dom-root");
+        setup_canvas_click_listener("fusion-dom-root");
+        setup_canvas_zoom_listener("fusion-dom-root");
+        setup_canvas_pan_listener("fusion-dom-root");
+        setup_marquee_listener("fusion-dom-root");
+        web_sys::console::log_1(&"fd-host-web: 容器级监听器已安装（一次性）".into());
+    }
 }
 
 /// 判断节点是否在当前视口内（考虑 zoom/pan）。
@@ -651,7 +668,7 @@ fn add_nodes_by_ids(
 ) {
     for node in nodes {
         if ids_to_add.contains(&node.id) {
-            if let Some(el) = render_node_to_dom(node, document) {
+            if let Some(el) = render_node_to_dom(node, document, 0) {
                 fragment.append_child(&el).ok();
             }
         }
@@ -663,6 +680,7 @@ fn add_nodes_by_ids(
 fn render_node_to_dom(
     node: &fd_canvas_core::PenNode,
     document: &web_sys::Document,
+    depth: u32,
 ) -> Option<web_sys::Element> {
     let tag = match node.kind {
         fd_canvas_core::NodeKind::Text => "span",
@@ -791,11 +809,17 @@ fn render_node_to_dom(
     el.set_attribute("style", &style).ok()?;
     el.set_attribute("data-node-id", &node.id).ok()?;
 
-    // 渲染子节点（子节点同样使用事件委托模式）
-    for child in &node.children {
-        if let Some(child_el) = render_node_to_dom(child, document) {
-            el.append_child(&child_el).ok();
+    // 渲染子节点（子节点同样使用事件委托模式）。深度上限防栈溢出（P2-1）。
+    if depth < MAX_RENDER_DEPTH {
+        for child in &node.children {
+            if let Some(child_el) = render_node_to_dom(child, document, depth + 1) {
+                el.append_child(&child_el).ok();
+            }
         }
+    } else {
+        web_sys::console::warn_1(
+            &format!("render_node_to_dom: 嵌套深度超限 {MAX_RENDER_DEPTH}，跳过子树").into(),
+        );
     }
 
     Some(el)
@@ -945,25 +969,41 @@ fn hide_snap_lines() {
 static RAF_SCHEDULED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 通过 requestAnimationFrame 节流执行回调，确保每帧最多执行一次。
+/// 修复 P0-3：rAF 注册失败或回调 panic 时标志永久卡 true -> 渲染停摆。
+/// - window 不可用：立即复位标志，允许下次重试。
+/// - rAF 注册失败：立即复位。
+/// - 回调内先复位再执行，panic 也不阻塞后续调度。
 fn schedule_raf<F>(callback: F)
 where
     F: FnOnce() + 'static,
 {
-    let already_scheduled = RAF_SCHEDULED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let already_scheduled = RAF_SCHEDULED.swap(true, std::sync::atomic::Ordering::SeqCst);
     if already_scheduled {
         return;
     }
     let cb = Closure::once(Box::new(move || {
-        RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::Relaxed);
+        // 先复位标志，再执行回调；即使回调 panic 也不致永久阻塞。
+        RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
         callback();
     }) as Box<dyn FnOnce()>);
     let window = match web_sys::window() {
         Some(w) => w,
-        None => return,
+        None => {
+            RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
     };
-    window
+    if window
         .request_animation_frame(cb.as_ref().unchecked_ref())
-        .ok();
+        .is_err()
+    {
+        // 注册失败：复位标志，否则后续所有 schedule_raf 静默丢弃 -> 卡死。
+        RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
+        web_sys::console::warn_1(
+            &"schedule_raf: request_animation_frame 注册失败，已复位标志".into(),
+        );
+        return;
+    }
     cb.forget();
 }
 
@@ -1193,11 +1233,12 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             .as_ref()
             .unchecked_ref::<js_sys::Function>()
             .into();
-        let on_mouseup = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        let on_mouseup = Closure::once(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // self-remove：Closure::once 触发后由 wasm-bindgen 清理，无需 forget（P0-2）。
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (raw_dx, raw_dy) = match mm {
                 Some(m) => (m.client_x() as f32 - start_x, m.client_y() as f32 - start_y),
@@ -1247,7 +1288,7 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                 dy: final_dy,
             });
             hide_snap_lines();
-        }) as Box<dyn FnMut(web_sys::Event)>);
+        }) as Box<dyn FnOnce(web_sys::Event)>);
         window
             .add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref())
             .ok();
@@ -1437,18 +1478,19 @@ fn setup_canvas_pan_listener(container_id: &str) {
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
-        let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // Closure::once 触发后自清理，无需 forget（P0-2）。
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
                 Some(m) => (m.client_x() as f32 - start_x, m.client_y() as f32 - start_y),
                 None => (0.0, 0.0),
             };
             send_bridge_event(BridgeEvent::CanvasPan { dx, dy });
-        }) as Box<dyn FnMut(web_sys::Event)>);
+        }) as Box<dyn FnOnce(web_sys::Event)>);
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
         on_up.forget();
@@ -1552,11 +1594,12 @@ fn setup_marquee_listener(container_id: &str) {
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
-        let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // Closure::once 触发后自清理（P0-2）。
 
             // 移除选框 DOM
             if let Some(doc) = w.document() {
@@ -1587,7 +1630,7 @@ fn setup_marquee_listener(container_id: &str) {
             if !selected.is_empty() {
                 send_bridge_event(BridgeEvent::MarqueeSelect { node_ids: selected });
             }
-        }) as Box<dyn FnMut(web_sys::Event)>);
+        }) as Box<dyn FnOnce(web_sys::Event)>);
 
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
@@ -1992,11 +2035,12 @@ fn create_resize_handle(
         let rid = nid.clone();
         let rdir = dir_str.clone();
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
-        let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
             let w = web_sys::window().unwrap();
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // Closure::once 触发后自清理（P0-2）。
 
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
@@ -2017,7 +2061,7 @@ fn create_resize_handle(
 
             // refresh handles after resize
             select_node(&rid);
-        }) as Box<dyn FnMut(web_sys::Event)>);
+        }) as Box<dyn FnOnce(web_sys::Event)>);
         window
             .add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
@@ -2352,7 +2396,7 @@ fn clear_canvas() {
     };
 
     // 清空 Canvas
-    let guard = SHELL.lock().unwrap();
+    let guard = shell_lock();
     if let Some(inner) = guard.as_ref() {
         if let Some(canvas) = get_canvas(&inner.canvas_id) {
             if let Ok(Some(ctx)) = canvas.get_context("2d") {
@@ -2450,16 +2494,19 @@ fn render_page(doc_json: &str) {
         }
     };
 
-    let guard = SHELL.lock().unwrap();
-    let inner = match guard.as_ref() {
-        Some(i) => i,
-        None => {
-            web_sys::console::error_1(&"fd-host-web: WebShell 未初始化".into());
-            return;
+    // 仅持锁取 canvas_id 后立即释放，避免大文档重绘期间阻塞消息处理（P1-2）。
+    let canvas_id = {
+        let guard = shell_lock();
+        match guard.as_ref() {
+            Some(i) => i.canvas_id.clone(),
+            None => {
+                web_sys::console::error_1(&"fd-host-web: WebShell 未初始化".into());
+                return;
+            }
         }
     };
 
-    let canvas = match get_canvas(&inner.canvas_id) {
+    let canvas = match get_canvas(&canvas_id) {
         Some(c) => c,
         None => return,
     };
@@ -2485,15 +2532,22 @@ fn render_page(doc_json: &str) {
     }
 }
 
+/// 递归渲染深度上限，防止恶意/异常深层嵌套文档栈溢出（P2-1）。
+const MAX_RENDER_DEPTH: u32 = 64;
+
 /// 渲染单页到 Canvas 2D。
 fn render_page_to_canvas(page: &fd_canvas_core::Page, ctx: &web_sys::CanvasRenderingContext2d) {
     for node in &page.nodes {
-        render_node(node, ctx);
+        render_node(node, ctx, 0);
     }
 }
 
-/// 递归渲染节点。
-fn render_node(node: &fd_canvas_core::PenNode, ctx: &web_sys::CanvasRenderingContext2d) {
+/// 递归渲染节点。depth 限制嵌套深度，超过 MAX_RENDER_DEPTH 跳过子树防栈溢出（P2-1）。
+fn render_node(
+    node: &fd_canvas_core::PenNode,
+    ctx: &web_sys::CanvasRenderingContext2d,
+    depth: u32,
+) {
     // 设置填充色
     if let Some(fill) = &node.style.fill {
         ctx.set_fill_style_str(fill);
@@ -2543,8 +2597,14 @@ fn render_node(node: &fd_canvas_core::PenNode, ctx: &web_sys::CanvasRenderingCon
             ctx.fill_rect(x, y, w, h);
         }
         fd_canvas_core::NodeKind::Group => {
+            if depth >= MAX_RENDER_DEPTH {
+                web_sys::console::warn_1(
+                    &format!("render_node: 嵌套深度超限 {MAX_RENDER_DEPTH}，跳过子树").into(),
+                );
+                return;
+            }
             for child in &node.children {
-                render_node(child, ctx);
+                render_node(child, ctx, depth + 1);
             }
         }
     }
@@ -3058,5 +3118,22 @@ mod tests {
         }
         assert_eq!(messages.len(), MAX_PENDING_MESSAGES);
         assert_eq!(messages[0], "msg-300");
+    }
+
+    #[test]
+    fn listeners_installed_flag_is_idempotent() {
+        // P0-1：mark_listeners_installed 首次返回 false，后续均 true，
+        // 保证容器级监听器只注册一次，不随渲染次数累积泄漏。
+        LISTENERS_INSTALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!mark_listeners_installed(), "首次应返回 false");
+        assert!(mark_listeners_installed(), "第二次应返回 true");
+        assert!(mark_listeners_installed(), "第三次应返回 true");
+        LISTENERS_INSTALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn render_depth_limit_constant_bounded() {
+        // P2-1：递归深度上限存在且合理，防深层嵌套文档栈溢出。
+        assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
     }
 }
