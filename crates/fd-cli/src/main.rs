@@ -257,6 +257,22 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(run(cli))
 }
 
+// 构建设计规范注册表：加载内置规范，若文档声明了 active_design_system 则激活之。
+// 用于导出路径解析 token 颜色变量（#8），避免 var(--) 被 usvg 回退成黑色。
+fn build_registry(doc: &fd_canvas_core::PenDocument) -> fd_cli::design::DesignSystemRegistry {
+    let mut reg = fd_cli::design::DesignSystemRegistry::new();
+    reg.register_builtin();
+    if let Some(ref id) = doc.active_design_system {
+        match reg.activate(id) {
+            Ok(()) => tracing::info!(design_system = %id, "已激活文档声明的设计规范"),
+            Err(e) => {
+                tracing::warn!(design_system = %id, error = %e, "文档声明的设计规范不存在，使用默认")
+            }
+        }
+    }
+    reg
+}
+
 async fn run(cli: Cli) -> anyhow::Result<()> {
     use fd_cli::{design, export, host};
 
@@ -285,7 +301,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let json = std::fs::read_to_string(&input)?;
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
             let format_str = format!("{:?}", format);
-            let files = export::Exporter::from_pen_document(&doc, format.into(), &out)?;
+            let reg = build_registry(&doc);
+            let files =
+                export::Exporter::from_pen_document_with_tokens(&doc, format.into(), &out, &reg)?;
             println!("已导出 {} 个页面到 {out:?}", files.len());
             if let Some(base) = ipc_base {
                 let link = fd_ecosystem::EcosystemLink::new(&base);
@@ -310,6 +328,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let json = std::fs::read_to_string(&input)?;
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
+            let reg = build_registry(&doc);
             let fmt_list: Vec<fd_export::ExportFormat> = if let Some(ref fmts) = formats {
                 fmts.iter().map(|f| f.clone().into()).collect()
             } else {
@@ -317,7 +336,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             let mut total = 0;
             for fmt in fmt_list {
-                let files = export::Exporter::from_pen_document(&doc, fmt, &out)?;
+                let files = export::Exporter::from_pen_document_with_tokens(&doc, fmt, &out, &reg)?;
                 tracing::info!(format = ?fmt, count = files.len(), "批量导出完成");
                 total += files.len();
             }

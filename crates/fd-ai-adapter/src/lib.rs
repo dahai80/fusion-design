@@ -4,6 +4,10 @@
 //! 【禁云端硬约束】本 crate 是 fusion-design 唯一允许发起 HTTP 请求的模块，
 //! 但请求目标被 `FusionMlxClient` 限制为 `127.0.0.1` 本地 fusion-mlx 服务，
 //! 不存在任何公网调用路径。
+//!
+//! 【RouteGuard 鉴权】所有出站请求附加 `X-Fusion-Route: fusion-design` 头
+//! （fusion-mlx v0.7.0+ 默认强制，缺失则 403 missing_route），并在
+//! `FUSION_MLX_API_KEY` 设置时附加 `Authorization: Bearer <key>`。
 
 use std::sync::{Arc, LazyLock};
 
@@ -17,6 +21,11 @@ use serde::{Deserialize, Serialize};
 // 真实端口由 fusion-mlx 启动时分配，写入本地配置文件。
 
 const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11434";
+
+/// fusion-mlx RouteGuard 要求的来源标识头（存在即放行）。
+/// 方案A（api-key-dispatch.md）：fusion-design 直连 11434，不走 gateway，
+/// 故以自身名作 route 值，区别于 gateway 转发的 `gateway-decision`。
+const FUSION_ROUTE_HEADER: (&str, &str) = ("X-Fusion-Route", "fusion-design");
 
 /// fusion-mlx chat 请求体（OpenAI 兼容形状）。
 #[derive(Debug, Serialize)]
@@ -61,9 +70,15 @@ pub struct FusionMlxClient {
 }
 
 impl FusionMlxClient {
-    /// 用默认 endpoint `http://127.0.0.1:11434` 构造。
+    /// 用默认 endpoint 构造；优先读 `FUSION_MLX_BASE_URL` 环境变量
+    /// （支持指向 gateway :11432 等本地端点），缺省回退 `http://127.0.0.1:11434`。
+    /// 对应方案A「快速解封」：严禁默认值写 11432，直连 fusion-mlx。
     pub fn new() -> anyhow::Result<Self> {
-        Self::with_endpoint(DEFAULT_MLX_ENDPOINT)
+        let endpoint = match std::env::var("FUSION_MLX_BASE_URL") {
+            Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => DEFAULT_MLX_ENDPOINT.to_string(),
+        };
+        Self::with_endpoint(&endpoint)
     }
 
     /// 用指定 endpoint 构造；强校验 host 为 `127.0.0.1` 或 `localhost`。
@@ -104,7 +119,7 @@ impl FusionMlxClient {
             temperature: None,
         };
         let url = format!("{}/v1/chat/completions", self.endpoint);
-        let resp: MlxChatResponse = blocking_post(&self.http, &url, &payload)?;
+        let resp: MlxChatResponse = self.blocking_post(&url, &payload)?;
         Ok(resp
             .choices
             .into_iter()
@@ -118,6 +133,32 @@ impl FusionMlxClient {
 impl Default for FusionMlxClient {
     fn default() -> Self {
         Self::new().expect("默认 endpoint 必为 localhost，构造不会失败")
+    }
+}
+
+/// fusion-mlx RouteGuard 鉴权：所有出站请求附加 X-Fusion-Route + Bearer。
+impl FusionMlxClient {
+    /// 读取 `FUSION_MLX_API_KEY` 构造 Bearer token；未设置则 WARN（fail visibly）。
+    /// 不在构造时缓存：支持运行期 Key 轮换与测试隔离。
+    fn bearer_token(&self) -> Option<String> {
+        match std::env::var("FUSION_MLX_API_KEY") {
+            Ok(k) if !k.trim().is_empty() => Some(format!("Bearer {}", k.trim())),
+            _ => {
+                tracing::warn!(
+                    "FUSION_MLX_API_KEY 未设置或为空；若 fusion-mlx 启用 API Key 鉴权，请求将被拒绝"
+                );
+                None
+            }
+        }
+    }
+
+    /// 为请求附加 RouteGuard + Bearer 鉴权头（对应 issue #6：修复 403 missing_route）。
+    fn authed(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let builder = builder.header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1);
+        match self.bearer_token() {
+            Some(bearer) => builder.header("Authorization", bearer),
+            None => builder,
+        }
     }
 }
 
@@ -146,7 +187,10 @@ impl FusionMlxClient {
             temperature: None,
         };
         let url = format!("{}/v1/chat/completions", self.endpoint);
-        let resp = self.http.post(&url).json(&payload).send().await?;
+        let resp = self
+            .authed(self.http.post(&url).json(&payload))
+            .send()
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("fusion-mlx HTTP {}", resp.status());
         }
@@ -193,20 +237,33 @@ static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("blocking tokio runtime 创建失败")
 });
 
-fn blocking_post<T: Serialize + ?Sized>(
-    http: &reqwest::Client,
-    url: &str,
-    payload: &T,
-) -> anyhow::Result<MlxChatResponse> {
-    let http = http.clone();
-    let url = url.to_string();
-    BLOCKING_RT.block_on(async move {
-        let resp = http.post(&url).json(payload).send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("fusion-mlx HTTP {}", resp.status());
-        }
-        Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?)
-    })
+impl FusionMlxClient {
+    /// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
+    /// 附加 RouteGuard + Bearer 鉴权头后发往 fusion-mlx。
+    fn blocking_post<T: Serialize + ?Sized>(
+        &self,
+        url: &str,
+        payload: &T,
+    ) -> anyhow::Result<MlxChatResponse> {
+        let http = self.http.clone();
+        let url = url.to_string();
+        let bearer = self.bearer_token();
+        BLOCKING_RT.block_on(async move {
+            let req = http
+                .post(&url)
+                .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
+                .json(payload);
+            let req = match bearer {
+                Some(b) => req.header("Authorization", b),
+                None => req,
+            };
+            let resp = req.send().await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("fusion-mlx HTTP {}", resp.status());
+            }
+            Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?)
+        })
+    }
 }
 
 // ── SSE 流式推理 ──
@@ -239,9 +296,18 @@ pub async fn chat_stream(
         "stream": true,
     });
     let url = format!("{}/v1/chat/completions", client.endpoint);
+    let bearer = client.bearer_token();
     let http = client.http;
+    let req = http
+        .post(&url)
+        .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
+        .json(&payload);
+    let req = match bearer {
+        Some(b) => req.header("Authorization", b),
+        None => req,
+    };
 
-    let resp = match http.post(&url).json(&payload).send().await {
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "SSE 请求失败");
@@ -332,9 +398,11 @@ impl FusionMlxClient {
     pub async fn health_check(&self) -> anyhow::Result<HealthStatus> {
         let url = format!("{}/v1/models", self.endpoint);
         let resp = self
-            .http
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(3))
+            .authed(
+                self.http
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(3)),
+            )
             .send()
             .await;
         match resp {
@@ -418,7 +486,10 @@ pub async fn chat_with_image(
         "max_tokens": max_tokens,
     });
     let url = format!("{}/v1/chat/completions", client.endpoint);
-    let resp = client.http.post(&url).json(&payload).send().await?;
+    let resp = client
+        .authed(client.http.post(&url).json(&payload))
+        .send()
+        .await?;
     if !resp.status().is_success() {
         anyhow::bail!("fusion-mlx vision HTTP {}", resp.status());
     }
@@ -2467,6 +2538,64 @@ mod mlx_integration {
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
         assert!(validate_localhost(&url).is_ok());
+    }
+
+    /// 捕获原始 HTTP 请求文本的 mock server（用于断言鉴权头）。
+    async fn spawn_header_capture_server(body: String) -> (String, Arc<Mutex<Option<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(None::<String>));
+        let captured_clone = captured.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 8192];
+                let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
+                    .await
+                    .unwrap_or(0);
+                if n > 0 {
+                    *captured_clone.lock().unwrap() =
+                        Some(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), captured)
+    }
+
+    /// issue #6：验证 chat 出站请求附加 X-Fusion-Route 头（修复 403 missing_route）。
+    #[tokio::test]
+    async fn chat_async_sends_fusion_route_header() {
+        let body = String::from(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+        let (url, captured) = spawn_header_capture_server(body).await;
+        let client = mock_client(&url);
+        let _ = client.chat_async("m", "s", "u", 64).await.unwrap();
+        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        assert!(
+            raw.to_lowercase().contains("x-fusion-route: fusion-design"),
+            "缺少 X-Fusion-Route 头：{raw}"
+        );
+    }
+
+    /// issue #6：health_check 同样需带 RouteGuard 头（/v1/models 非豁免路径）。
+    #[tokio::test]
+    async fn health_check_sends_fusion_route_header() {
+        let body = String::from(r#"{"data":[]}"#);
+        let (url, captured) = spawn_header_capture_server(body).await;
+        let client = mock_client(&url);
+        let _ = client.health_check().await.unwrap();
+        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        assert!(
+            raw.to_lowercase().contains("x-fusion-route: fusion-design"),
+            "缺少 X-Fusion-Route 头：{raw}"
+        );
     }
 }
 

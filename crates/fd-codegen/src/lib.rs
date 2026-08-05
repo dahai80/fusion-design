@@ -194,7 +194,7 @@ fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
         mods.join("")
     };
 
-    match node.kind {
+    let rendered = match node.kind {
         NodeKind::Rect => {
             let w = if node.w > 0.0 {
                 format!("width: {}", node.w as i32)
@@ -260,6 +260,21 @@ fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
             out.push_str(&format!("{}}}{}\n", pad, mod_str));
             out
         }
+    };
+
+    // 非 Group 叶子节点带子节点：用 ZStack 承载叶子 + 子节点，避免丢嵌套（#7）
+    if !matches!(node.kind, NodeKind::Group) && !node.children.is_empty() {
+        let mut out = format!("{}ZStack {{\n", pad);
+        out.push_str(&rendered);
+        for c in &node.children {
+            out.push_str(&node_to_swiftui(c, indent + 1));
+        }
+        out.push_str(&pad);
+        out.push('}');
+        out.push('\n');
+        out
+    } else {
+        rendered
     }
 }
 
@@ -367,6 +382,9 @@ fn render_page_react(page: &Page) -> String {
 
 fn node_to_html(node: &PenNode) -> String {
     let style = format_style_inline(node);
+    // 子节点对任意 kind 均可能存在（parse-html 把带子节点的 <div> 映射为 Rect），
+    // 统一收集后在各分支注入，避免叶子节点静默丢弃嵌套结构（#7）。
+    let children: String = node.children.iter().map(node_to_html).collect();
     match node.kind {
         NodeKind::Rect | NodeKind::Circle => {
             let tag = "div";
@@ -375,26 +393,42 @@ fn node_to_html(node: &PenNode) -> String {
             } else {
                 ""
             };
-            format!(
-                "<{tag} data-id=\"{}\" style=\"{}{}\"></{tag}>\n",
-                node.id, style, extra
-            )
+            if children.is_empty() {
+                format!(
+                    "<{tag} data-id=\"{}\" style=\"{}{}\"></{tag}>\n",
+                    node.id, style, extra
+                )
+            } else {
+                format!(
+                    "<{tag} data-id=\"{}\" style=\"{}{}\">{}</{tag}>\n",
+                    node.id, style, extra, children
+                )
+            }
         }
         NodeKind::Text => format!(
-            "<div data-id=\"{}\" style=\"{}\">{}</div>\n",
+            "<div data-id=\"{}\" style=\"{}\">{}{}</div>\n",
             node.id,
             style,
-            node.text.as_deref().unwrap_or("")
+            node.text.as_deref().unwrap_or(""),
+            children
         ),
-        NodeKind::Image => format!(
-            "<img data-id=\"{}\" style=\"{}\" alt=\"\"/>\n",
-            node.id, style
-        ),
+        NodeKind::Image => {
+            if children.is_empty() {
+                format!(
+                    "<img data-id=\"{}\" style=\"{}\" alt=\"\"/>\n",
+                    node.id, style
+                )
+            } else {
+                // <img> 为 void 元素；有子节点时外裹 div 承载嵌套结构
+                format!(
+                    "<div data-id=\"{}\" style=\"{}\"><img style=\"{}\" alt=\"\"/>{}</div>\n",
+                    node.id, style, style, children
+                )
+            }
+        }
         NodeKind::Group => {
             let mut s = format!("<div data-id=\"{}\" style=\"{}\">\n", node.id, style);
-            for c in &node.children {
-                s.push_str(&node_to_html(c));
-            }
+            s.push_str(&children);
             s.push_str("</div>\n");
             s
         }
@@ -403,6 +437,8 @@ fn node_to_html(node: &PenNode) -> String {
 
 fn node_to_react(node: &PenNode) -> String {
     let cls = node_to_tailwind(node);
+    // 同 node_to_html：统一收集子节点并注入各分支，修复叶子节点丢嵌套（#7）。
+    let children: String = node.children.iter().map(node_to_react).collect();
     match node.kind {
         NodeKind::Rect | NodeKind::Circle => {
             let extra = if matches!(node.kind, NodeKind::Circle) {
@@ -410,29 +446,45 @@ fn node_to_react(node: &PenNode) -> String {
             } else {
                 ""
             };
-            format!(
-                "      <div className=\"{}{}\" data-id=\"{}\"/>\n",
-                cls, extra, node.id
-            )
+            if children.is_empty() {
+                format!(
+                    "      <div className=\"{}{}\" data-id=\"{}\"/>\n",
+                    cls, extra, node.id
+                )
+            } else {
+                format!(
+                    "      <div className=\"{}{}\" data-id=\"{}\">\n{}</div>\n",
+                    cls, extra, node.id, children
+                )
+            }
         }
         NodeKind::Text => format!(
-            "      <div className=\"{}\" data-id=\"{}\">{}</div>\n",
+            "      <div className=\"{}\" data-id=\"{}\">{}{}</div>\n",
             cls,
             node.id,
-            node.text.as_deref().unwrap_or("")
+            node.text.as_deref().unwrap_or(""),
+            children
         ),
-        NodeKind::Image => format!(
-            "      <img className=\"{}\" data-id=\"{}\" alt=\"\"/>\n",
-            cls, node.id
-        ),
+        NodeKind::Image => {
+            if children.is_empty() {
+                format!(
+                    "      <img className=\"{}\" data-id=\"{}\" alt=\"\"/>\n",
+                    cls, node.id
+                )
+            } else {
+                // <img> 自闭合；有子节点时外裹 div 承载
+                format!(
+                    "      <div className=\"{}\" data-id=\"{}\"><img alt=\"\"/>{}</div>\n",
+                    cls, node.id, children
+                )
+            }
+        }
         NodeKind::Group => {
             let mut s = format!(
                 "      <div className=\"{}\" data-id=\"{}\">\n",
                 cls, node.id
             );
-            for c in &node.children {
-                s.push_str(&node_to_react(c));
-            }
+            s.push_str(&children);
             s.push_str("      </div>\n");
             s
         }
@@ -608,6 +660,59 @@ mod tests {
     }
 
     #[test]
+    fn rect_with_children_renders_nested() {
+        // parse-html 把带子节点的 <div> 映射为 Rect（非 Group）；
+        // codegen 必须递归渲染其 children，否则往返丢失嵌套（#7）。
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut container = PenNode::rect("container", 0.0, 0.0, 80.0, 60.0);
+        container.style.fill = Some("#FFF".into());
+        container
+            .children
+            .push(PenNode::text("title", 5.0, 5.0, "标题"));
+        container
+            .children
+            .push(PenNode::rect("btn", 5.0, 30.0, 40.0, 20.0));
+        page.add(container);
+        doc.add_page(page);
+        let out = HtmlCodegen.generate(&doc);
+        assert!(out.contains("data-id=\"container\""));
+        assert!(out.contains("data-id=\"title\""));
+        assert!(out.contains("data-id=\"btn\""));
+        assert!(out.contains("标题"));
+        // 子节点须出现在父节点开标签之后（嵌套而非丢弃）
+        let c_pos = out.find("data-id=\"container\"").unwrap();
+        let t_pos = out.find("data-id=\"title\"").unwrap();
+        let b_pos = out.find("data-id=\"btn\"").unwrap();
+        assert!(t_pos > c_pos, "title 应嵌套在 container 内");
+        assert!(b_pos > c_pos, "btn 应嵌套在 container 内");
+    }
+
+    #[test]
+    fn rect_with_children_renders_nested_react() {
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut container = PenNode::rect("container", 0.0, 0.0, 80.0, 60.0);
+        container
+            .children
+            .push(PenNode::text("title", 5.0, 5.0, "标题"));
+        container
+            .children
+            .push(PenNode::rect("btn", 5.0, 30.0, 40.0, 20.0));
+        page.add(container);
+        doc.add_page(page);
+        let gen = ReactTailwindCodegen {
+            component_name: "C".into(),
+        };
+        let out = gen.generate(&doc);
+        let c_pos = out.find("data-id=\"container\"").unwrap();
+        let t_pos = out.find("data-id=\"title\"").unwrap();
+        let b_pos = out.find("data-id=\"btn\"").unwrap();
+        assert!(t_pos > c_pos, "title 应嵌套在 container 内");
+        assert!(b_pos > c_pos, "btn 应嵌套在 container 内");
+    }
+
+    #[test]
     fn codegen_target_labels() {
         assert_eq!(CodegenTarget::Html.label(), "html");
         assert_eq!(CodegenTarget::ReactTailwind.label(), "react-tailwind");
@@ -776,5 +881,25 @@ mod tests {
         };
         let out = gen.generate(&doc);
         assert!(out.contains("Image(systemName: \"photo\")"));
+    }
+
+    #[test]
+    fn swiftui_rect_with_children_wraps_zstack() {
+        // 非 Group 叶子节点带子节点：SwiftUI 用 ZStack 承载，子节点不得丢失（#7）
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut container = PenNode::rect("container", 0.0, 0.0, 80.0, 60.0);
+        container
+            .children
+            .push(PenNode::text("title", 5.0, 5.0, "标题"));
+        page.add(container);
+        doc.add_page(page);
+        let gen = SwiftUiCodegen {
+            view_name: "NestView".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(out.contains("ZStack {"), "非 Group 容器应外裹 ZStack");
+        assert!(out.contains("Color.clear"), "叶子 Rect 应渲染");
+        assert!(out.contains("Text(\"标题\")"), "子节点 Text 不得丢失");
     }
 }

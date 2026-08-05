@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use fd_design_system::DesignSystemRegistry;
 use serde::{Deserialize, Serialize};
 
 /// 导出格式。
@@ -135,6 +136,38 @@ fn collect_elements(node: &fd_canvas_core::PenNode, out: &mut Vec<CanvasElement>
     }
 }
 
+/// 解析单个颜色值中的 Token 引用为实际色值。
+/// 兼容 `var(--color.accent)`（dot）、`var(--color-accent)`（dash）与 `token:color.accent` 三种形式。
+/// 未配置设计规范或 token 未定义时保留原值并告警（usvg 会回退黑色，但不影响其他格式导出）。
+fn resolve_color_var(value: &Option<String>, reg: &DesignSystemRegistry) -> Option<String> {
+    let s = value.as_deref()?;
+    let trimmed = s.trim();
+    let token_name = trimmed
+        .strip_prefix("var(--")
+        .and_then(|r| r.strip_suffix(')'))
+        .map(|rest| rest.trim())
+        .or_else(|| trimmed.strip_prefix("token:").map(|rest| rest.trim()));
+    if let Some(name) = token_name {
+        // 先按原名（dot 命名）查；再把 dash 归一化为 dot 重查
+        let normalized = name.replace('-', ".");
+        for candidate in [name, normalized.as_str()] {
+            if let Some(fd_design_system::TokenValue::Color(c)) = reg.lookup(candidate) {
+                return Some(c.clone());
+            }
+        }
+        tracing::warn!(var = %name, "Token 颜色变量未能在当前设计规范中解析，保留原值");
+    }
+    Some(s.to_string())
+}
+
+/// 对整页元素的 fill/stroke 解析 Token 引用（就地替换）。
+fn resolve_page_token_vars(page: &mut CanvasPage, reg: &DesignSystemRegistry) {
+    for el in &mut page.elements {
+        el.fill = resolve_color_var(&el.fill, reg);
+        el.stroke = resolve_color_var(&el.stroke, reg);
+    }
+}
+
 /// 导出器。
 pub struct Exporter;
 
@@ -146,6 +179,21 @@ impl Exporter {
         out_dir: &Path,
     ) -> anyhow::Result<Vec<PathBuf>> {
         let pages: Vec<CanvasPage> = doc.pages.iter().map(CanvasPage::from_page).collect();
+        Self::export_batch(&pages, format, out_dir)
+    }
+
+    /// 从 PenDocument 导出，导出前用当前激活设计规范解析 `var(--token)` / `token:` 颜色引用。
+    /// usvg 不支持 CSS Custom Property，未解析会在光栅化阶段回退黑色（#8）。
+    pub fn from_pen_document_with_tokens(
+        doc: &fd_canvas_core::PenDocument,
+        format: ExportFormat,
+        out_dir: &Path,
+        reg: &DesignSystemRegistry,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        let mut pages: Vec<CanvasPage> = doc.pages.iter().map(CanvasPage::from_page).collect();
+        for page in &mut pages {
+            resolve_page_token_vars(page, reg);
+        }
         Self::export_batch(&pages, format, out_dir)
     }
 
@@ -708,5 +756,91 @@ mod tests {
         let page: CanvasPage = serde_json::from_str(old_json).unwrap();
         assert_eq!(page.elements[0].stroke_width, None);
         assert_eq!(page.elements[0].radius, None);
+    }
+
+    fn apple_hig_registry() -> DesignSystemRegistry {
+        let mut reg = DesignSystemRegistry::new();
+        reg.register_builtin();
+        reg.activate("apple-hig").unwrap();
+        reg
+    }
+
+    #[test]
+    fn resolve_color_var_dot_form() {
+        // to_css_value() 产出 dot 形式 var(--color.accent)
+        let reg = apple_hig_registry();
+        let v = resolve_color_var(&Some("var(--color.accent)".into()), &reg);
+        assert_eq!(v.as_deref(), Some("#007AFF"));
+    }
+
+    #[test]
+    fn resolve_color_var_dash_form() {
+        // parse-html 产出 dash 形式 var(--color-accent)
+        let reg = apple_hig_registry();
+        let v = resolve_color_var(&Some("var(--color-accent)".into()), &reg);
+        assert_eq!(v.as_deref(), Some("#007AFF"));
+    }
+
+    #[test]
+    fn resolve_color_var_token_prefix() {
+        let reg = apple_hig_registry();
+        let v = resolve_color_var(&Some("token:color.accent".into()), &reg);
+        assert_eq!(v.as_deref(), Some("#007AFF"));
+    }
+
+    #[test]
+    fn resolve_color_var_passthrough_plain() {
+        let reg = apple_hig_registry();
+        assert_eq!(
+            resolve_color_var(&Some("#FF8800".into()), &reg).as_deref(),
+            Some("#FF8800")
+        );
+        assert_eq!(resolve_color_var(&None, &reg), None);
+    }
+
+    #[test]
+    fn from_pen_document_with_tokens_resolves_svg() {
+        // usvg 无法解析 var(--)；导出前必须替换为实际色值（#8）
+        let mut doc = fd_canvas_core::PenDocument::new();
+        let mut page = fd_canvas_core::Page::new("p1", "Token", 100.0, 100.0);
+        let mut n = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 50.0, 50.0);
+        n.style.fill = Some("var(--color-accent)".into());
+        page.add(n);
+        doc.add_page(page);
+        let reg = apple_hig_registry();
+        let tmp = tempdir().unwrap();
+        let files =
+            Exporter::from_pen_document_with_tokens(&doc, ExportFormat::Svg, tmp.path(), &reg)
+                .unwrap();
+        let svg = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(
+            svg.contains("fill=\"#007AFF\""),
+            "SVG 应含解析后的实际色值: {svg}"
+        );
+        assert!(
+            !svg.contains("var(--"),
+            "SVG 不应残留未解析 CSS 变量: {svg}"
+        );
+    }
+
+    #[test]
+    fn from_pen_document_with_tokens_png_resolved() {
+        // Token 驱动的设计稿导出 PNG：颜色已解析，不再是回退黑色
+        let mut doc = fd_canvas_core::PenDocument::new();
+        let mut page = fd_canvas_core::Page::new("p1", "Png", 40.0, 40.0);
+        let mut n = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 40.0, 40.0);
+        n.style.fill = Some("var(--color-accent)".into());
+        page.add(n);
+        doc.add_page(page);
+        let reg = apple_hig_registry();
+        let tmp = tempdir().unwrap();
+        let files =
+            Exporter::from_pen_document_with_tokens(&doc, ExportFormat::Png, tmp.path(), &reg)
+                .unwrap();
+        let data = std::fs::read(&files[0]).unwrap();
+        assert!(
+            data.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "PNG magic bytes"
+        );
     }
 }

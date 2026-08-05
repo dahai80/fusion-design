@@ -23,6 +23,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 fd-canvas-core = { path = "../fd-canvas-core" }
+fd-design-system = { path = "../fd-design-system" }
 resvg = { version = "0.45", default-features = false, features = ["text"] }
 printpdf = "0.8"
 
