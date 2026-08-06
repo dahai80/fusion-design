@@ -1309,12 +1309,14 @@ mod tests {
 
     #[test]
     fn node_style_layout_field_serde() {
-        let mut style = NodeStyle::default();
-        style.layout = LayoutMode::Flex(FlexParams {
-            direction: FlexDirection::Row,
-            gap: 12.0,
+        let mut style = NodeStyle {
+            layout: LayoutMode::Flex(FlexParams {
+                direction: FlexDirection::Row,
+                gap: 12.0,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         style
             .design_token_refs
             .insert("fill".into(), "color.accent".into());
@@ -1547,9 +1549,11 @@ mod tests {
 
     #[test]
     fn node_style_locked_visible_serde_roundtrip() {
-        let mut style = NodeStyle::default();
-        style.locked = true;
-        style.visible = false;
+        let style = NodeStyle {
+            locked: true,
+            visible: false,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&style).unwrap();
         let de: NodeStyle = serde_json::from_str(&json).unwrap();
         assert!(de.locked);

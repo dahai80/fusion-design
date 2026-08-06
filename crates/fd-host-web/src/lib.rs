@@ -3013,7 +3013,7 @@ mod tests {
         // 模拟一个 100x50 的节点在 (50, 80)
         // 吸附候选线来自另一个节点：x=[0, 150, 75], y=[0, 100, 50]
         let snap_x_candidates = vec![0.0, 150.0, 75.0];
-        let _snap_y_candidates = vec![0.0, 100.0, 50.0];
+        let _snap_y_candidates = [0.0, 100.0, 50.0];
 
         // 节点左边缘 x=48 → 吸附到 50? 不，48 最近的是 50 → 偏移+2（在阈值内）
         // 这里测试节点左边缘在 x=2 → 吸附到 x=0
@@ -3080,7 +3080,7 @@ mod tests {
             let x = (i % 10) as f32 * 200.0;
             let y = (i / 10) as f32 * 100.0;
             page.add(fd_canvas_core::PenNode::rect(
-                &format!("n{i}"),
+                format!("n{i}"),
                 x,
                 y,
                 180.0,
@@ -3134,6 +3134,8 @@ mod tests {
     #[test]
     fn render_depth_limit_constant_bounded() {
         // P2-1：递归深度上限存在且合理，防深层嵌套文档栈溢出。
-        assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
+        // 编译期校验常量边界，运行期仅打印确认。
+        const _: () = assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
+        web_sys::console::log_1(&format!("MAX_RENDER_DEPTH={MAX_RENDER_DEPTH}").into());
     }
 }

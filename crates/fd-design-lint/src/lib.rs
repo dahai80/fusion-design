@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn hardcoded_spacing_flex_gap_detected() {
-        use fd_canvas_core::{FlexDirection, FlexParams, LayoutMode};
+        use fd_canvas_core::{FlexParams, LayoutMode};
         let style = NodeStyle {
             layout: LayoutMode::Flex(FlexParams {
                 gap: 16.0,
@@ -1455,7 +1455,7 @@ mod tests {
 
     #[test]
     fn token_ref_spacing_no_violation() {
-        use fd_canvas_core::{FlexDirection, FlexParams, LayoutMode};
+        use fd_canvas_core::{FlexParams, LayoutMode};
         let mut refs = HashMap::new();
         refs.insert("gap".to_string(), "spacing-md".to_string());
         let style = NodeStyle {
