@@ -55,7 +55,7 @@ pub enum Command {
         page: String,
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -76,7 +76,7 @@ pub enum Command {
         page: String,
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -92,7 +92,7 @@ pub enum Command {
         styles: Option<Vec<String>>,
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -105,7 +105,7 @@ pub enum Command {
         title: String,
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -118,7 +118,7 @@ pub enum Command {
         style_hint: String,
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -127,12 +127,12 @@ pub enum Command {
     CheckFrontend {
         #[arg(long)]
         dir: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         backend: String,
     },
     /// 校验 fusion-mlx endpoint 是否为 localhost
     CheckMlx {
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
     },
     /// HTML → PenDocument JSON 转换
@@ -185,7 +185,7 @@ pub enum Command {
     },
     /// 探测 fusion-mlx 健康状态
     Health {
-        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        #[arg(long, default_value = "")]
         endpoint: String,
     },
     /// 比较两个 PenDocument 的差异
@@ -421,7 +421,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ipc_base,
             stream,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
             if stream {
                 let model_owned = model.clone();
                 let sys = "你是 fusion-design UI 生成器。根据用户描述，\
@@ -487,7 +489,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let doc = skills
                 .image_to_ui_async(&sketch.to_string_lossy(), &hint, &page)
@@ -510,7 +514,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let default_styles = ["极简风", "卡片风", "深色风"];
             let picked: [String; 3] = match styles {
@@ -542,7 +548,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             out,
         } => {
             let doc_json = std::fs::read_to_string(&input)?;
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let spec = skills.spec_doc_async(&doc_json, &title).await?;
             let json = serde_json::to_string_pretty(&spec)?;
@@ -562,7 +570,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let docs = skills.page_flow_async(&flow, &style_hint).await?;
             let json = serde_json::to_string_pretty(&docs)?;
@@ -586,8 +596,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::CheckMlx { endpoint } => {
-            fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
-            println!("fusion-mlx endpoint 校验通过: {endpoint}");
+            let resolved = fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?;
+            fd_ai_adapter::FusionMlxClient::with_endpoint(&resolved)?;
+            println!("fusion-mlx endpoint 校验通过: {resolved}");
             Ok(())
         }
         Command::ParseHtml { input, page } => {
@@ -750,7 +761,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Health { endpoint } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
             let status = client.health_check().await;
             let output = match status {
                 Ok(s) => serde_json::to_string_pretty(&s)?,
@@ -831,7 +844,8 @@ mod tests {
                 assert_eq!(hint, "");
                 assert_eq!(page, "Home");
                 assert_eq!(model, "Qwen3.5-9B-4bit");
-                assert_eq!(endpoint, "http://127.0.0.1:11432");
+                // --endpoint 默认空串，运行时由 resolve_endpoint 解析（env/缺省回退）
+                assert_eq!(endpoint, "");
                 assert!(out.is_none());
             }
             _ => panic!("应为 ImageToUi"),
@@ -870,7 +884,7 @@ mod tests {
             } => {
                 assert_eq!(input, PathBuf::from("doc.json"));
                 assert_eq!(title, "设计规范文档");
-                assert_eq!(endpoint, "http://127.0.0.1:11432");
+                assert_eq!(endpoint, "");
             }
             _ => panic!("应为 SpecDoc"),
         }

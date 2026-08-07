@@ -95,6 +95,22 @@ impl FusionMlxClient {
         })
     }
 
+    /// 解析 CLI `--endpoint` 实参到最终 endpoint。
+    /// CLI 层把 `--endpoint` 默认值设为空串；空串时读 `FUSION_MLX_BASE_URL`，
+    /// 缺省回退 `http://127.0.0.1:11432`（方案B 经 gateway）。非空串直接透传
+    /// （用户显式传 `--endpoint` 优先级最高）。返回值供 `with_endpoint` 使用。
+    pub fn resolve_endpoint(cli_endpoint: &str) -> anyhow::Result<String> {
+        let resolved = match cli_endpoint.trim() {
+            "" => match std::env::var("FUSION_MLX_BASE_URL") {
+                Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => DEFAULT_MLX_ENDPOINT.to_string(),
+            },
+            other => other.to_string(),
+        };
+        validate_localhost(&resolved)?;
+        Ok(resolved)
+    }
+
     /// 同步发送 chat 请求（阻塞当前线程，供 `ChatProvider::send` 调用）。
     ///
     /// 对应 PRD「AI 推理沙箱隔离」——本方法只读写 fusion-mlx 本地服务，
@@ -2496,6 +2512,23 @@ mod skills_tests {
         let repaired = repair_model_json(broken);
         let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
         assert_eq!(v["page"]["nodes"][0]["id"], "n0");
+    }
+
+    #[test]
+    fn resolve_endpoint_empty_falls_back_to_default() {
+        // 清掉环境变量，空串应回退方案B gateway 11432
+        std::env::remove_var("FUSION_MLX_BASE_URL");
+        let ep = FusionMlxClient::resolve_endpoint("").unwrap();
+        assert_eq!(ep, "http://127.0.0.1:11432");
+    }
+
+    #[test]
+    fn resolve_endpoint_explicit_overrides_env() {
+        // 用户显式传 --endpoint 优先级最高，忽略 env
+        std::env::set_var("FUSION_MLX_BASE_URL", "http://127.0.0.1:11434");
+        let ep = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432").unwrap();
+        assert_eq!(ep, "http://127.0.0.1:11432");
+        std::env::remove_var("FUSION_MLX_BASE_URL");
     }
 
     #[test]
