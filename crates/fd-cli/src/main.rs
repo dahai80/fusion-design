@@ -55,7 +55,7 @@ pub enum Command {
         page: String,
         #[arg(long, default_value = "qwen3.5")]
         model: String,
-        #[arg(long, default_value = "http://127.0.0.1:11434")]
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
         endpoint: String,
         #[arg(long)]
         out: Option<PathBuf>,
@@ -70,12 +70,12 @@ pub enum Command {
     CheckFrontend {
         #[arg(long)]
         dir: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:11434")]
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
         backend: String,
     },
     /// 校验 fusion-mlx endpoint 是否为 localhost
     CheckMlx {
-        #[arg(long, default_value = "http://127.0.0.1:11434")]
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
         endpoint: String,
     },
     /// HTML → PenDocument JSON 转换
@@ -128,7 +128,7 @@ pub enum Command {
     },
     /// 探测 fusion-mlx 健康状态
     Health {
-        #[arg(long, default_value = "http://127.0.0.1:11434")]
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
         endpoint: String,
     },
     /// 比较两个 PenDocument 的差异

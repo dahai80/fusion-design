@@ -20,11 +20,13 @@ use serde::{Deserialize, Serialize};
 // 兼容 OpenAI API 形状（/v1/chat/completions），便于复用既有生态工具。
 // 真实端口由 fusion-mlx 启动时分配，写入本地配置文件。
 
-const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11434";
+const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11432";
 
 /// fusion-mlx RouteGuard 要求的来源标识头（存在即放行）。
-/// 方案A（api-key-dispatch.md）：fusion-design 直连 11434，不走 gateway，
-/// 故以自身名作 route 值，区别于 gateway 转发的 `gateway-decision`。
+/// 方案B（netlayer-compliance-plan.md，用户 2026-08-07 裁定）：fusion-design
+/// 统一经 fusion-gateway `:11432` 调用 fusion-mlx，不再直连 11434。
+/// gateway 自身完成鉴权后转发，route 头对 gateway 透传无害。
+/// 历史：方案A（直连 11434）已否决，见 issue #11。
 const FUSION_ROUTE_HEADER: (&str, &str) = ("X-Fusion-Route", "fusion-design");
 
 /// fusion-mlx chat 请求体（OpenAI 兼容形状）。
@@ -71,8 +73,9 @@ pub struct FusionMlxClient {
 
 impl FusionMlxClient {
     /// 用默认 endpoint 构造；优先读 `FUSION_MLX_BASE_URL` 环境变量
-    /// （支持指向 gateway :11432 等本地端点），缺省回退 `http://127.0.0.1:11434`。
-    /// 对应方案A「快速解封」：严禁默认值写 11432，直连 fusion-mlx。
+    /// （支持显式指回 fusion-mlx 直连 11434 等本地端点），缺省回退
+    /// `http://127.0.0.1:11432`（方案B：经 fusion-gateway 统一网关）。
+    /// 鉴权：gateway 需 `FUSION_MLX_API_KEY` 设为 gateway key（如 master_key）。
     pub fn new() -> anyhow::Result<Self> {
         let endpoint = match std::env::var("FUSION_MLX_BASE_URL") {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
