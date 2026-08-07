@@ -145,6 +145,18 @@ pub enum Command {
         #[arg(long, value_enum, default_value = "light")]
         mode: ThemeModeArg,
     },
+    /// 基于设计语料微调模型（子进程调用 fusion-trainer CLI）
+    Train {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long)]
+        model: String,
+        /// sft（默认）| grpo
+        #[arg(long, default_value = "sft")]
+        method: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 // Callers: DesignBridge (Swift Process call), CLI direct usage.
@@ -618,6 +630,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             })?;
             let css = system.to_css_custom_properties_for_theme(mode.into());
             println!("{css}");
+            Ok(())
+        }
+        Command::Train {
+            dataset,
+            model,
+            method,
+            config,
+        } => {
+            let trainer = fd_ecosystem::TrainerClient::new();
+            let status = match method.as_str() {
+                "grpo" => trainer.run_rlsl("grpo", &dataset, &model, config.as_deref())?,
+                "sft" => trainer.run_sft(&dataset, &model, config.as_deref())?,
+                other => anyhow::bail!("不支持的 --method: {other} (仅 sft|grpo)"),
+            };
+            if !status.success() {
+                anyhow::bail!("fusion-trainer 退出码 {}", status.code().unwrap_or(-1));
+            }
             Ok(())
         }
     }
