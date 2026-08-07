@@ -313,7 +313,7 @@ impl From<ThemeModeArg> for fd_design_system::Theme {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -322,8 +322,38 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run(cli))
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[fusion-design] 运行时初始化失败: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(run(cli)) {
+        report_error(&e);
+        std::process::exit(1);
+    }
+}
+
+/// 把 anyhow 错误分类为可操作的商用级提示，而非裸栈。
+fn report_error(e: &anyhow::Error) {
+    let msg = format!("{e}");
+    let (category, hint) = if msg.contains("HTTP 401") || msg.contains("Unauthorized") {
+        ("鉴权失败", "检查 FUSION_MLX_API_KEY 是否为 gateway master_key 或 fusion-mlx backend key")
+    } else if msg.contains("HTTP 404") || msg.contains("connection refused") {
+        ("服务不可达", "确认 fusion-mlx(11434)/gateway(11432) 已启动；FUSION_MLX_BASE_URL 指向正确端点")
+    } else if msg.contains("HTTP 5") || msg.contains("502") {
+        ("上游服务错误", "fusion-mlx/gateway 临时不可用，检查模型是否已加载后重试")
+    } else if msg.contains("超过安全上限") || msg.contains("MAX_NODE") {
+        ("文档超限", "输入 .fusiondesign 节点嵌套过深或过多，检查文件是否损坏")
+    } else if msg.contains("Empty choices") || msg.contains("空 choices") {
+        ("模型返回空", "模型未产出内容，检查模型名与 max_tokens 设置")
+    } else {
+        ("运行错误", "详见上方日志；可设 RUST_LOG=debug 获取更多细节")
+    };
+    eprintln!("[fusion-design] 失败：{category}");
+    eprintln!("  原因：{msg}");
+    eprintln!("  建议：{hint}");
 }
 
 // 构建设计规范注册表：加载内置规范，若文档声明了 active_design_system 则激活之。

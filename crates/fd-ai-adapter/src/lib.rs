@@ -3063,6 +3063,51 @@ mod mlx_integration {
             &raw[..raw.len().min(200)]
         );
     }
+
+    /// 生产 E2E：模型返回尾部多余闭括号 → balance 修复后产出真实文档（不兜底）。
+    #[tokio::test]
+    async fn image_to_ui_e2e_trailing_brace_repaired() {
+        let ui_json = "{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[{\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50}]}}}";
+        let body = format!("{{\"choices\":[{{\"message\":{{\"content\":{ui_json:?}}}}}]}}");
+        let (url, _count) = spawn_mock_server(200, body).await;
+        let client = mock_client(&url);
+        let skills = DesignSkills::new(client, "qwen3.5");
+        let doc = skills.image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home").await.unwrap();
+        assert_eq!(doc.pages.len(), 1);
+        assert_eq!(doc.pages[0].nodes[0].id, "n0");
+        // 未触发占位兜底
+        assert!(!doc.pages[0]
+            .nodes
+            .iter()
+            .any(|n| n.text.as_deref() == Some("AI 输出不可用，已生成占位布局")));
+    }
+
+    /// 生产 E2E：模型返回彻底损坏 JSON → 合成兜底文档（不硬失败）。
+    #[tokio::test]
+    async fn image_to_ui_e2e_garbled_falls_back_gracefully() {
+        let body = String::from(r#"{"choices":[{"message":{"content":"totally not json {{{"}}]}"#);
+        let (url, _count) = spawn_mock_server(200, body).await;
+        let client = mock_client(&url);
+        let skills = DesignSkills::new(client, "qwen3.5");
+        let doc = skills.image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home").await.unwrap();
+        assert_eq!(doc.pages.len(), 1);
+        // 占位兜底节点存在
+        assert!(doc.pages[0]
+            .nodes
+            .iter()
+            .any(|n| n.id == "n_bg" || n.id == "n_placeholder"));
+    }
+
+    /// 生产 E2E：HTTP 5xx → 向上传播错误（不静默吞）。
+    #[tokio::test]
+    async fn image_to_ui_e2e_http_error_propagates() {
+        let body = String::from(r#"{"error":"internal"}"#);
+        let (url, _count) = spawn_mock_server(500, body).await;
+        let client = mock_client(&url);
+        let skills = DesignSkills::new(client, "qwen3.5");
+        let result = skills.image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home").await;
+        assert!(result.is_err(), "HTTP 5xx 应向上传播而非静默成功");
+    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: V0.2 — 11 crates + vendored op-ai, 321 tests pass, WASM build verified.
+**Status**: V0.2 — 11 crates + vendored op-ai, 298 tests pass + perf baseline, WASM build verified, release packaging.
 
 ## 📋 Overview
 
@@ -79,21 +79,35 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # Full workspace compiles
-cargo test --workspace                                         # 321 tests pass
+cargo test --workspace                                         # 298 tests pass (+1 ignored perf baseline)
+cargo test --release -- --ignored perf_baseline                # 1000-node perf baseline (<500ms each)
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM build succeeds
 cargo run -p fd-cli -- --help                                  # CLI available
+./Scripts/build.sh                                             # Release tarball → dist/
 ```
+
+**Endpoint 覆盖**：CLI `--endpoint` 默认经 `FUSION_MLX_BASE_URL` 解析（优先级：显式 `--endpoint` > env > 默认 gateway 11432），可切回直连 fusion-mlx 11434。鉴权 key 经 `FUSION_MLX_API_KEY`。
+
+**安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| fd-canvas-core | 53+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management |
-| fd-ai-adapter | 60+ | Mock HTTP, SSE streaming, health check, multimodal vision, SpecDoc/PageFlow |
+| fd-canvas-core | 60+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management, **安全护栏**, perf baseline |
+| fd-ai-adapter | 74+ | Mock HTTP, SSE streaming, health check, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析 |
 | fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
 | fd-design-system | 10+ | Token, Theme, Registry, CSS output |
-| fd-ecosystem | 16 | IPC, sync_to_code, template tag search, built-in scene templates |
+| fd-ecosystem | 16 | IPC, sync_to_code, template tag search, built-in scene templates, **文件大小护栏** |
 | fd-asset | 19 | Asset CRUD, categorization/tagging/annotation, color extraction, Token binding |
 | fd-codegen / fd-host-web / fd-export / fd-host-desk | 4-10 each | Core functionality |
-| fd-cli | 5+ | CLI argument parsing, subcommand dispatch |
+| fd-cli | 7+ | CLI argument parsing, subcommand dispatch, **商用级错误报告** |
+
+## 📦 Release
+
+```bash
+./Scripts/build.sh    # 产出 dist/fusion-design-<version>-aarch64-apple-darwin.tar.gz
+```
+
+含 `fusion-design` CLI 二进制（release strip+thin LTO）+ `fd_host_web.wasm`（WKWebView 前端）+ INSTALL.md。100% 离线，仅 HTTP 至 `127.0.0.1`。
 
 ## 📄 License
 

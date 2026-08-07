@@ -178,8 +178,14 @@ impl EcosystemLink {
         Ok(files)
     }
 
-    /// 读取并删除一条消息（消费式）。
+    /// 读取并删除一条消息（消费式）。含大小护栏，防恶意大文件 OOM。
     pub fn consume(&self, file: &Path) -> anyhow::Result<LinkMessage> {
+        let meta = std::fs::metadata(file)?;
+        const MAX_IPC_FILE: u64 = 8 * 1024 * 1024;
+        if meta.len() > MAX_IPC_FILE {
+            tracing::warn!(size = meta.len(), "IPC 消息文件超过 8MB 上限，拒绝读取");
+            anyhow::bail!("IPC 消息文件 {} 超过 8MB 安全上限", file.display());
+        }
         let json = std::fs::read_to_string(file)?;
         let msg: LinkMessage = serde_json::from_str(&json)?;
         std::fs::remove_file(file)?;

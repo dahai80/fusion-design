@@ -18,6 +18,11 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+// 反序列化安全护栏：限制恶意/损坏 .fusiondesign 的嵌套深度与节点总数，
+// 防止深度嵌套导致栈溢出或海量节点导致 OOM。
+const MAX_NODE_DEPTH: usize = 64;
+const MAX_NODE_TOTAL: usize = 100_000;
+
 // ── 文档/页面/节点 ──
 
 /// 画布文档（顶层工程文件 `.fusiondesign` 的结构体）。
@@ -292,6 +297,25 @@ fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::V
     }
 }
 
+/// 递归统计节点最大嵌套深度与累计节点数。深度超限即 bail（短路，不继续遍历）。
+fn count_depth(node: &PenNode, depth: usize, total: &mut usize) -> anyhow::Result<usize> {
+    *total += 1;
+    if *total > MAX_NODE_TOTAL {
+        anyhow::bail!("节点总数超过安全上限 {MAX_NODE_TOTAL}");
+    }
+    if depth > MAX_NODE_DEPTH {
+        anyhow::bail!("节点嵌套深度超过安全上限 {MAX_NODE_DEPTH}");
+    }
+    let mut max_d = depth;
+    for child in &node.children {
+        let d = count_depth(child, depth + 1, total)?;
+        if d > max_d {
+            max_d = d;
+        }
+    }
+    Ok(max_d)
+}
+
 // ── 样式 ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -438,8 +462,31 @@ impl PenDocument {
     }
 
     /// 从 JSON 反序列化。
+    /// 含安全护栏：嵌套深度 ≤ `MAX_NODE_DEPTH`、节点总数 ≤ `MAX_NODE_TOTAL`，
+    /// 超限返回错误（防止恶意 .fusiondesign 栈溢出/OOM）。
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        Ok(serde_json::from_str(json)?)
+        let doc: PenDocument = serde_json::from_str(json)?;
+        doc.validate_limits()?;
+        Ok(doc)
+    }
+
+    /// 校验节点嵌套深度与总数在安全阈值内。
+    pub fn validate_limits(&self) -> anyhow::Result<()> {
+        let mut total: usize = 0;
+        for page in &self.pages {
+            for node in &page.nodes {
+                let depth = count_depth(node, 1, &mut total)?;
+                if depth > MAX_NODE_DEPTH {
+                    anyhow::bail!(
+                        "节点嵌套深度 {depth} 超过安全上限 {MAX_NODE_DEPTH}"
+                    );
+                }
+            }
+        }
+        if total > MAX_NODE_TOTAL {
+            anyhow::bail!("节点总数 {total} 超过安全上限 {MAX_NODE_TOTAL}");
+        }
+        Ok(())
     }
 
     /// 使用 Taffy 计算所有节点的布局坐标。
@@ -2049,7 +2096,9 @@ impl VersionedDocument {
     }
 
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        Ok(serde_json::from_str(json)?)
+        let vd: VersionedDocument = serde_json::from_str(json)?;
+        vd.active_document().validate_limits()?;
+        Ok(vd)
     }
 }
 
@@ -2236,5 +2285,74 @@ mod version_tests {
         vd.save_version("V3", sample_doc("v2"), None);
         let names: Vec<&str> = vd.list_versions().iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["初始版本", "V2", "V3"]);
+    }
+
+    #[test]
+    fn from_json_rejects_deeply_nested() {
+        // 恶意 .fusiondesign：深度嵌套 children 超过 MAX_NODE_DEPTH → 拒绝
+        let mut json = String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
+        let mut node = String::from(r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#);
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            node.push_str(r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#);
+        }
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            node.push_str("]}");
+        }
+        json.push_str(&node);
+        json.push_str("]}],\"variables\":null,\"active_design_system\":null}");
+        assert!(PenDocument::from_json(&json).is_err(), "深度超限应被拒绝");
+    }
+
+    #[test]
+    fn validate_limits_accepts_normal_doc() {
+        let doc = sample_doc("ok");
+        assert!(doc.validate_limits().is_ok(), "正常文档应通过校验");
+    }
+
+    /// 性能基线：1000 节点文档的序列化/反序列化/布局计算耗时。
+    /// `#[ignore]`：不进常规 CI，经 `cargo test --release -- --ignored perf_baseline` 运行。
+    /// 阈值：各操作 < 500ms（release，Apple Silicon），超阈打印但不断言失败（基线参考）。
+    #[test]
+    #[ignore]
+    fn perf_baseline_1000_nodes() {
+        let mut doc = sample_doc("perf");
+        let page = &mut doc.pages[0];
+        for i in 0..1000u32 {
+            page.add(PenNode {
+                id: format!("n{i}"),
+                kind: NodeKind::Rect,
+                name: format!("node{i}"),
+                x: i as f32,
+                y: 0.0,
+                w: 100.0,
+                h: 50.0,
+                style: NodeStyle::default(),
+                text: None,
+                children: vec![],
+                rotation: 0.0,
+                z_index: 0,
+            });
+        }
+        const THRESHOLD_MS: u128 = 500;
+
+        let t = std::time::Instant::now();
+        let json = doc.to_json().unwrap();
+        let ser_ms = t.elapsed().as_millis();
+        eprintln!("perf serialize(1000): {ser_ms}ms");
+
+        let t = std::time::Instant::now();
+        let doc2 = PenDocument::from_json(&json).unwrap();
+        let de_ms = t.elapsed().as_millis();
+        eprintln!("perf deserialize(1000): {de_ms}ms");
+        assert!(doc2.pages[0].nodes.len() >= 1000, "反序列化节点数应 ≥1000");
+
+        let t = std::time::Instant::now();
+        let _layouts = doc.compute_layout();
+        let layout_ms = t.elapsed().as_millis();
+        eprintln!("perf compute_layout(1000): {layout_ms}ms");
+
+        assert!(ser_ms < THRESHOLD_MS, "serialize {ser_ms}ms > {THRESHOLD_MS}ms");
+        assert!(de_ms < THRESHOLD_MS, "deserialize {de_ms}ms > {THRESHOLD_MS}ms");
+        assert!(layout_ms < THRESHOLD_MS, "compute_layout {layout_ms}ms > {THRESHOLD_MS}ms");
     }
 }

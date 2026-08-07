@@ -5,6 +5,7 @@
 vendor/openpencil/.git
 node_modules/
 frontend/dist/
+/dist/
 *.wasm
 
 # 本地文件，不纳入版本控制
