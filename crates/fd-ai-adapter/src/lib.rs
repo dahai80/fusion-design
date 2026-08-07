@@ -2788,6 +2788,23 @@ mod mlx_integration {
         FusionMlxClient::with_endpoint(endpoint).unwrap()
     }
 
+    /// 写一个真实可读的占位 PNG 到唯一临时路径，保证测试不依赖外部 /tmp/fd_sketch.png。
+    /// encode_image_base64 仅 base64 编码文件字节，不校验图像格式，故最小 PNG 字节即可。
+    fn write_fixture_png() -> String {
+        // 67 字节最小合法 PNG（1x1 灰度）。
+        const MIN_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00,
+            0x00, 0x3A, 0x7E, 0x9B, 0x55, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, 0x33,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("fd_test_sketch_{pid}.png"));
+        std::fs::write(&path, MIN_PNG).expect("写入测试 PNG 失败");
+        path.to_string_lossy().into_owned()
+    }
+
     #[tokio::test]
     async fn chat_async_end_to_end_openai_shape() {
         let body = String::from(r#"{"choices":[{"message":{"content":"hello world"}}]}"#);
@@ -3028,8 +3045,8 @@ mod mlx_integration {
         let body = format!("{{\"choices\":[{{\"message\":{{\"content\":{ui_json:?}}}}}]}}");
         let (url, captured) = spawn_body_capture_server(body).await;
         let client = mock_client(&url);
-        let b64 = encode_image_base64(std::path::Path::new("/tmp/fd_sketch.png"))
-            .unwrap_or_else(|_| "AAAA".into());
+        let sketch = write_fixture_png();
+        let b64 = encode_image_base64(std::path::Path::new(&sketch)).unwrap();
         let _ = chat_with_image(&client, "m", "sys", "usr", &b64, 128)
             .await
             .unwrap();
@@ -3050,8 +3067,9 @@ mod mlx_integration {
         let (url, captured) = spawn_body_capture_server(body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
+        let sketch = write_fixture_png();
         let doc = skills
-            .image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home")
+            .image_to_ui_async(&sketch, "测试", "Home")
             .await
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
@@ -3072,8 +3090,9 @@ mod mlx_integration {
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
+        let sketch = write_fixture_png();
         let doc = skills
-            .image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home")
+            .image_to_ui_async(&sketch, "测试", "Home")
             .await
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
@@ -3092,8 +3111,9 @@ mod mlx_integration {
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
+        let sketch = write_fixture_png();
         let doc = skills
-            .image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home")
+            .image_to_ui_async(&sketch, "测试", "Home")
             .await
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
@@ -3111,8 +3131,9 @@ mod mlx_integration {
         let (url, _count) = spawn_mock_server(500, body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
+        let sketch = write_fixture_png();
         let result = skills
-            .image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home")
+            .image_to_ui_async(&sketch, "测试", "Home")
             .await;
         assert!(result.is_err(), "HTTP 5xx 应向上传播而非静默成功");
     }
