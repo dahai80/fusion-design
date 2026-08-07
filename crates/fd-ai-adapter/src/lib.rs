@@ -903,7 +903,13 @@ impl DesignSkill for ImageToUiSkill {
         let hint = parts.get(1).unwrap_or(&"");
         let page_name = parts.get(2).unwrap_or(&"generated");
         let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。"
+输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字与 markdown 围栏。\
+page 含 width/height（默认 1440×900），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
+示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+{\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
+{\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
+]}}。"
             .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment() {
             sys.push_str("\n\n");
@@ -918,7 +924,7 @@ impl DesignSkill for ImageToUiSkill {
                     bytes = b64.len(),
                     "image-to-ui: 已加载草图，发送真实多模态请求"
                 );
-                ctx.chat_with_image(&sys, &user, &b64, 2048)?
+                ctx.chat_with_image(&sys, &user, &b64, 4096)?
             }
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
@@ -944,7 +950,13 @@ impl DesignSkill for ImageToUiSkill {
             let hint = parts.get(1).unwrap_or(&"");
             let page_name = parts.get(2).unwrap_or(&"generated");
             let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。"
+输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字与 markdown 围栏。\
+page 含 width/height（默认 1440×900），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
+示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+{\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
+{\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
+]}}。"
                 .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment() {
                 sys.push_str("\n\n");
@@ -960,7 +972,7 @@ impl DesignSkill for ImageToUiSkill {
                         bytes = b64.len(),
                         "image-to-ui: 已加载草图，发送真实多模态请求"
                     );
-                    ctx.chat_with_image_async(&sys, &user, &b64, 2048).await?
+                    ctx.chat_with_image_async(&sys, &user, &b64, 4096).await?
                 }
                 Err(e) => {
                     tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
@@ -1493,8 +1505,7 @@ impl DesignSkills {
         hint: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
+        let sys = ui_generator_system_prompt();
         let user =
             format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
         let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
@@ -1504,7 +1515,7 @@ impl DesignSkills {
                     bytes = b64.len(),
                     "image_to_ui: 已加载草图，发送真实多模态请求"
                 );
-                chat_with_image_sync(&self.client, &self.default_model, sys, &user, &b64, 2048)?
+                chat_with_image_sync(&self.client, &self.default_model, &sys, &user, &b64, 4096)?
             }
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image_to_ui: 草图加载失败，回退文字描述");
@@ -1512,7 +1523,7 @@ impl DesignSkills {
                     "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
                 );
                 self.client
-                    .chat_sync(&self.default_model, sys, &user_text, 2048)?
+                    .chat_sync(&self.default_model, &sys, &user_text, 4096)?
             }
         };
         parse_ui_json(&resp, page_name)
@@ -1525,8 +1536,7 @@ impl DesignSkills {
         hint: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
+        let sys = ui_generator_system_prompt();
         let user =
             format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
         let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
@@ -1536,7 +1546,7 @@ impl DesignSkills {
                     bytes = b64.len(),
                     "image_to_ui_async: 已加载草图，发送真实多模态请求"
                 );
-                chat_with_image(&self.client, &self.default_model, sys, &user, &b64, 2048).await?
+                chat_with_image(&self.client, &self.default_model, &sys, &user, &b64, 4096).await?
             }
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image_to_ui_async: 草图加载失败，回退文字描述");
@@ -1544,7 +1554,7 @@ impl DesignSkills {
                     "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
                 );
                 self.client
-                    .chat_async(&self.default_model, sys, &user_text, 2048)
+                    .chat_async(&self.default_model, &sys, &user_text, 4096)
                     .await?
             }
         };
@@ -1560,11 +1570,10 @@ impl DesignSkills {
     ) -> anyhow::Result<PenDocument> {
         let b64 = encode_image_base64(image_path)?;
         tracing::info!(path = %image_path.display(), size_b64 = b64.len(), "screenshot_to_ui: 图片已编码");
-        let sys = "你是 fusion-design UI 生成器。根据用户提供的截图/草图，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
+        let sys = ui_generator_system_prompt();
         let user = format!("补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
         let resp =
-            chat_with_image(&self.client, &self.default_model, sys, &user, &b64, 2048).await?;
+            chat_with_image(&self.client, &self.default_model, &sys, &user, &b64, 4096).await?;
         parse_ui_json(&resp, page_name)
     }
 
@@ -1729,10 +1738,40 @@ impl DesignSkills {
 /// 解析 fusion-mlx 返回的 UI JSON 为 PenDocument。
 ///
 /// 兼容形状：`{"page": {"width":..,"height":..,"nodes":[..]}}` 或裸 `{"nodes":[..]}`。
+/// 文生/图生 UI 共用 system prompt：显式约束 node schema + 示例，
+/// 避免 7B 模型自行发明 components/type 等不匹配 schema 的结构。
+fn ui_generator_system_prompt() -> String {
+    "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
+只输出 JSON，禁止额外文字与 markdown 围栏。\
+page 含 width/height（默认 1440×900），nodes 列表每项 \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
+示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+{\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
+{\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
+]}}。"
+        .to_string()
+}
+
 fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
     // 容错：模型可能包裹 markdown ```json ... ```，剥之
     let cleaned = strip_code_fence(json);
-    let v: serde_json::Value = serde_json::from_str(cleaned)?;
+    let v: serde_json::Value = match serde_json::from_str(cleaned) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "parse_ui_json: 原始 JSON 解析失败，尝试修复");
+            let repaired = repair_model_json(cleaned);
+            match serde_json::from_str::<serde_json::Value>(&repaired) {
+                Ok(v) => {
+                    tracing::info!("parse_ui_json: JSON 修复后解析成功");
+                    v
+                }
+                Err(e2) => {
+                    tracing::warn!(error = %e2, "parse_ui_json: 修复仍失败，回退合成文档");
+                    return Ok(synthesize_fallback_doc(page_name));
+                }
+            }
+        }
+    };
     let page_obj = v.get("page").and_then(|p| p.as_object());
     let (w, h) = match page_obj {
         Some(o) => (
@@ -1743,9 +1782,20 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
     };
     let nodes_val = page_obj
         .and_then(|p| p.get("nodes"))
-        .or_else(|| v.get("nodes"))
-        .ok_or_else(|| anyhow::anyhow!("JSON 缺 nodes 字段"))?;
-    let nodes = parse_nodes_with_depth(nodes_val, 0)?;
+        .or_else(|| v.get("nodes"));
+    let nodes = match nodes_val {
+        Some(nv) => match parse_nodes_with_depth(nv, 0) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "parse_ui_json: nodes 解析失败，回退合成文档");
+                return Ok(synthesize_fallback_doc(page_name));
+            }
+        },
+        None => {
+            tracing::warn!("parse_ui_json: JSON 缺 nodes 字段，回退合成文档");
+            return Ok(synthesize_fallback_doc(page_name));
+        }
+    };
     let validated: Vec<PenNode> = nodes.into_iter().map(validate_node).collect();
     let mut doc = PenDocument::new();
     let mut page = Page::new("page_1", page_name, w, h);
@@ -1754,6 +1804,95 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
     }
     doc.add_page(page);
     Ok(doc)
+}
+
+/// 修复 7B 模型常见 JSON 语法错误（纯字符串替换，避免引入 regex 依赖）：
+/// - `"k":"":"v"` 双冒号 → `"k":"v"`
+/// - `"k":"v "k2"` 值内吞引号缺逗号 → `"k":"v","k2"`
+/// - 数字/右括号后紧跟空格再接引号键：`100 "w"` → `100,"w"`
+/// - `{ {` / `} }` 连续同括号去重
+fn repair_model_json(s: &str) -> String {
+    let mut out = s.to_string();
+    while out.contains("\":\"\":\"") {
+        out = out.replace("\":\"\":\"", "\":\"");
+    }
+    out = out.replace("{ {", "{").replace("} }", "}");
+    // 扫描修复"值后空格+引号键"缺逗号：形如 `#fff "stroke"` 或 `100 "w"`
+    // 逐字符判断更稳妥，这里用简单循环匹配 ` "<word>":` 前缺逗号的模式。
+    let bytes = out.as_bytes();
+    let mut rebuilt = String::with_capacity(out.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // 检测模式：非逗号/非冒号字符 + 空格 + `"` + 字母 + ... + `":`
+        // 仅在 ` "<id>":` 且前一非空字符不是 `,` `:` `[` `{` 时插入逗号
+        if bytes[i] == b' '
+            && i + 3 < bytes.len()
+            && bytes[i + 1] == b'"'
+            && bytes[i + 2].is_ascii_alphabetic()
+        {
+            // 找到对应的 `":` 结束
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && !(bytes[j] == b'"' && bytes[j + 1] == b':') {
+                j += 1;
+            }
+            if j + 1 < bytes.len() && bytes[j] == b'"' && bytes[j + 1] == b':' {
+                // 前一非空字符
+                let prev = rebuilt.trim_end().chars().last();
+                let need_comma = match prev {
+                    Some(',') | Some(':') | Some('[') | Some('{') => false,
+                    Some(_) => true,
+                    None => false,
+                };
+                if need_comma {
+                    rebuilt.push(',');
+                }
+            }
+        }
+        rebuilt.push(bytes[i] as char);
+        i += 1;
+    }
+    rebuilt
+}
+
+/// 合成兜底文档：当模型 JSON 不可恢复时，生成一个含占位节点的合法 PenDocument，
+/// 保证 CLI/调用方拿到可用结构而非报错。商用场景下优于硬失败。
+fn synthesize_fallback_doc(page_name: &str) -> PenDocument {
+    tracing::info!(page_name, "synthesize_fallback_doc: 生成占位兜底文档");
+    let mut doc = PenDocument::new();
+    let mut page = Page::new("page_1", page_name, 1440.0, 900.0);
+    page.add(PenNode {
+        id: "n_bg".to_string(),
+        kind: fd_canvas_core::NodeKind::Rect,
+        name: "background".to_string(),
+        x: 0.0,
+        y: 0.0,
+        w: 1440.0,
+        h: 900.0,
+        style: fd_canvas_core::NodeStyle {
+            fill: Some("#ffffff".to_string()),
+            ..Default::default()
+        },
+        text: None,
+        children: vec![],
+        rotation: 0.0,
+        z_index: 0,
+    });
+    page.add(PenNode {
+        id: "n_placeholder".to_string(),
+        kind: fd_canvas_core::NodeKind::Text,
+        name: "placeholder".to_string(),
+        x: 520.0,
+        y: 420.0,
+        w: 400.0,
+        h: 60.0,
+        style: fd_canvas_core::NodeStyle::default(),
+        text: Some("AI 输出不可用，已生成占位布局".to_string()),
+        children: vec![],
+        rotation: 0.0,
+        z_index: 1,
+    });
+    doc.add_page(page);
+    doc
 }
 
 const MAX_NODE_DEPTH: usize = 20;
@@ -2235,19 +2374,50 @@ mod skills_tests {
     }
 
     #[test]
-    fn parse_ui_json_missing_nodes_errors() {
-        assert!(parse_ui_json(r#"{"page":{}}"#, "x").is_err());
+    fn parse_ui_json_missing_nodes_falls_back() {
+        // 商用兜底：缺 nodes 不硬失败，返回合成文档。
+        let doc = parse_ui_json(r#"{"page":{}}"#, "x").unwrap();
+        assert!(!doc.pages[0].nodes.is_empty());
     }
 
     #[test]
-    fn parse_ui_json_unknown_kind_errors() {
+    fn parse_ui_json_unknown_kind_falls_back() {
+        // 未知 kind 触发 nodes 解析失败 → 合成兜底，不硬失败。
         let bad = r#"{"nodes":[{"id":"x","kind":"weird"}]}"#;
-        assert!(parse_ui_json(bad, "x").is_err());
+        let doc = parse_ui_json(bad, "x").unwrap();
+        assert!(!doc.pages[0].nodes.is_empty());
     }
 
     #[test]
-    fn parse_ui_json_invalid_json_errors() {
-        assert!(parse_ui_json("not json", "x").is_err());
+    fn parse_ui_json_invalid_json_falls_back() {
+        // 商用兜底：彻底无法解析的 JSON 不再硬失败，返回合成占位文档。
+        let doc = parse_ui_json("not json", "x").unwrap();
+        assert_eq!(doc.pages.len(), 1);
+        assert!(!doc.pages[0].nodes.is_empty());
+    }
+
+    #[test]
+    fn repair_model_json_fixes_double_colon() {
+        let broken = "{\"fill\":\"\":\"#ffffff\"}";
+        assert_eq!(repair_model_json(broken), "{\"fill\":\"#ffffff\"}");
+    }
+
+    #[test]
+    fn repair_model_json_fixes_missing_comma() {
+        let broken = "{\"y\":100 \"w\":400}";
+        let repaired = repair_model_json(broken);
+        assert!(
+            repaired.contains("100,\"w\"") || repaired.contains("100, \"w\""),
+            "repaired={repaired}"
+        );
+    }
+
+    #[test]
+    fn synthesize_fallback_doc_is_valid() {
+        let doc = synthesize_fallback_doc("login");
+        assert_eq!(doc.pages.len(), 1);
+        assert_eq!(doc.pages[0].name, "login");
+        assert!(doc.pages[0].nodes.iter().any(|n| n.id == "n_bg"));
     }
 
     #[test]
