@@ -3134,8 +3134,7 @@ mod tests {
     #[test]
     fn render_depth_limit_constant_bounded() {
         // P2-1：递归深度上限存在且合理，防深层嵌套文档栈溢出。
-        // 编译期校验常量边界，运行期仅打印确认。
+        // 编译期校验常量边界（不触发 web_sys console，避免 native 目标 panic）。
         const _: () = assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
-        web_sys::console::log_1(&format!("MAX_RENDER_DEPTH={MAX_RENDER_DEPTH}").into());
     }
 }
