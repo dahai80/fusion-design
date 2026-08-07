@@ -1811,6 +1811,7 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
 /// - `"k":"v "k2"` 值内吞引号缺逗号 → `"k":"v","k2"`
 /// - 数字/右括号后紧跟空格再接引号键：`100 "w"` → `100,"w"`
 /// - `{ {` / `} }` 连续同括号去重
+/// - 括号失衡：尾部多余 `}` `]` 裁剪；EOF 处缺括号按栈补齐
 fn repair_model_json(s: &str) -> String {
     let mut out = s.to_string();
     while out.contains("\":\"\":\"") {
@@ -1851,7 +1852,66 @@ fn repair_model_json(s: &str) -> String {
         rebuilt.push(bytes[i] as char);
         i += 1;
     }
+    // 括号失衡修复：7B 模型常输出尾部多余 `}` 或中途截断。
+    balance_json_braces(&mut rebuilt);
     rebuilt
+}
+
+/// 按 JSON 语义平衡花括号/方括号（跳过字符串字面量与转义）。
+/// - 扫描中深度变负（多余 `}`/`]`）则截断后续内容；
+/// - 末尾深度仍 > 0 则按栈逆序补齐缺失闭括号。
+fn balance_json_braces(s: &mut String) {
+    let bytes = s.as_bytes();
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_str = false;
+    let mut escape = false;
+    let mut cut_len: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if cut_len.is_some() {
+            break;
+        }
+        if in_str {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else if b == b'"' {
+            in_str = true;
+        } else if b == b'{' || b == b'[' {
+            stack.push(b);
+        } else if b == b'}' {
+            if stack.last() == Some(&b'{') {
+                stack.pop();
+            } else {
+                cut_len = Some(i);
+            }
+        } else if b == b']' {
+            if stack.last() == Some(&b'[') {
+                stack.pop();
+            } else {
+                cut_len = Some(i);
+            }
+        }
+        i += 1;
+    }
+    if let Some(pos) = cut_len {
+        s.truncate(pos);
+        tracing::info!(pos, "balance_json_braces: 裁剪尾部多余闭括号");
+        return;
+    }
+    if !stack.is_empty() {
+        let mut tail = String::new();
+        while let Some(b) = stack.pop() {
+            tail.push(if b == b'{' { '}' } else { ']' });
+        }
+        tracing::info!(missing = tail.len(), "balance_json_braces: 补齐缺失闭括号");
+        s.push_str(&tail);
+    }
 }
 
 /// 合成兜底文档：当模型 JSON 不可恢复时，生成一个含占位节点的合法 PenDocument，
@@ -2418,6 +2478,24 @@ mod skills_tests {
         assert_eq!(doc.pages.len(), 1);
         assert_eq!(doc.pages[0].name, "login");
         assert!(doc.pages[0].nodes.iter().any(|n| n.id == "n_bg"));
+    }
+
+    #[test]
+    fn repair_model_json_trims_trailing_extra_brace() {
+        // 7B 模型实测：合法 JSON 末尾多一个 `}` → 裁剪后应可解析。
+        let broken = "{\"page\":{\"width\":10}}}";
+        let repaired = repair_model_json(broken);
+        let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+        assert_eq!(v["page"]["width"], 10);
+    }
+
+    #[test]
+    fn repair_model_json_completes_truncated_object() {
+        // 7B 模型实测：max_tokens 截断，缺少闭括号 → 按栈补齐后应可解析。
+        let broken = "{\"page\":{\"nodes\":[{\"id\":\"n0\",\"kind\":\"rect\"";
+        let repaired = repair_model_json(broken);
+        let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+        assert_eq!(v["page"]["nodes"][0]["id"], "n0");
     }
 
     #[test]
