@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: V0.2 — 11 crates + vendored op-ai, 298 tests pass + perf baseline, WASM build verified, release packaging.
+**Status**: v0.1.8 — 11 crates + vendored op-ai, 298 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging.
 
 ## 📋 Overview
 
@@ -89,6 +89,8 @@ cargo run -p fd-cli -- --help                                  # CLI available
 **Endpoint 覆盖**：CLI `--endpoint` 默认经 `FUSION_MLX_BASE_URL` 解析（优先级：显式 `--endpoint` > env > 默认 gateway 11432），可切回直连 fusion-mlx 11434。鉴权 key 经 `FUSION_MLX_API_KEY`。
 
 **安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
+
+**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|

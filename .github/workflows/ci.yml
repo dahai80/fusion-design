@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    name: fmt + clippy + test + wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.94 + wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Workspace compile check
+        run: cargo check --workspace
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: WASM build (fd-host-web)
+        run: cargo build -p fd-host-web --target wasm32-unknown-unknown
+
+  release-pack:
+    name: release tarball (apple silicon)
+    runs-on: macos-14
+    if: github.ref == 'refs/heads/main'
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.94 + wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release tarball
+        run: ./Scripts/build.sh
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-design-release
+          path: dist/*.tar.gz

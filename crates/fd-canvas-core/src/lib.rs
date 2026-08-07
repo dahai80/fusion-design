@@ -477,9 +477,7 @@ impl PenDocument {
             for node in &page.nodes {
                 let depth = count_depth(node, 1, &mut total)?;
                 if depth > MAX_NODE_DEPTH {
-                    anyhow::bail!(
-                        "节点嵌套深度 {depth} 超过安全上限 {MAX_NODE_DEPTH}"
-                    );
+                    anyhow::bail!("节点嵌套深度 {depth} 超过安全上限 {MAX_NODE_DEPTH}");
                 }
             }
         }
@@ -2290,10 +2288,15 @@ mod version_tests {
     #[test]
     fn from_json_rejects_deeply_nested() {
         // 恶意 .fusiondesign：深度嵌套 children 超过 MAX_NODE_DEPTH → 拒绝
-        let mut json = String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
-        let mut node = String::from(r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#);
+        let mut json =
+            String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
+        let mut node = String::from(
+            r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#,
+        );
         for _ in 0..(MAX_NODE_DEPTH + 5) {
-            node.push_str(r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#);
+            node.push_str(
+                r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#,
+            );
         }
         for _ in 0..(MAX_NODE_DEPTH + 5) {
             node.push_str("]}");
@@ -2351,8 +2354,17 @@ mod version_tests {
         let layout_ms = t.elapsed().as_millis();
         eprintln!("perf compute_layout(1000): {layout_ms}ms");
 
-        assert!(ser_ms < THRESHOLD_MS, "serialize {ser_ms}ms > {THRESHOLD_MS}ms");
-        assert!(de_ms < THRESHOLD_MS, "deserialize {de_ms}ms > {THRESHOLD_MS}ms");
-        assert!(layout_ms < THRESHOLD_MS, "compute_layout {layout_ms}ms > {THRESHOLD_MS}ms");
+        assert!(
+            ser_ms < THRESHOLD_MS,
+            "serialize {ser_ms}ms > {THRESHOLD_MS}ms"
+        );
+        assert!(
+            de_ms < THRESHOLD_MS,
+            "deserialize {de_ms}ms > {THRESHOLD_MS}ms"
+        );
+        assert!(
+            layout_ms < THRESHOLD_MS,
+            "compute_layout {layout_ms}ms > {THRESHOLD_MS}ms"
+        );
     }
 }

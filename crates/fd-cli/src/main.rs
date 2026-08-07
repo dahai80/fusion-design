@@ -339,13 +339,25 @@ fn main() {
 fn report_error(e: &anyhow::Error) {
     let msg = format!("{e}");
     let (category, hint) = if msg.contains("HTTP 401") || msg.contains("Unauthorized") {
-        ("鉴权失败", "检查 FUSION_MLX_API_KEY 是否为 gateway master_key 或 fusion-mlx backend key")
+        (
+            "鉴权失败",
+            "检查 FUSION_MLX_API_KEY 是否为 gateway master_key 或 fusion-mlx backend key",
+        )
     } else if msg.contains("HTTP 404") || msg.contains("connection refused") {
-        ("服务不可达", "确认 fusion-mlx(11434)/gateway(11432) 已启动；FUSION_MLX_BASE_URL 指向正确端点")
+        (
+            "服务不可达",
+            "确认 fusion-mlx(11434)/gateway(11432) 已启动；FUSION_MLX_BASE_URL 指向正确端点",
+        )
     } else if msg.contains("HTTP 5") || msg.contains("502") {
-        ("上游服务错误", "fusion-mlx/gateway 临时不可用，检查模型是否已加载后重试")
+        (
+            "上游服务错误",
+            "fusion-mlx/gateway 临时不可用，检查模型是否已加载后重试",
+        )
     } else if msg.contains("超过安全上限") || msg.contains("MAX_NODE") {
-        ("文档超限", "输入 .fusiondesign 节点嵌套过深或过多，检查文件是否损坏")
+        (
+            "文档超限",
+            "输入 .fusiondesign 节点嵌套过深或过多，检查文件是否损坏",
+        )
     } else if msg.contains("Empty choices") || msg.contains("空 choices") {
         ("模型返回空", "模型未产出内容，检查模型名与 max_tokens 设置")
     } else {
