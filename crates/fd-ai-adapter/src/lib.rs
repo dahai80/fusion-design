@@ -3132,9 +3132,7 @@ mod mlx_integration {
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
-        let result = skills
-            .image_to_ui_async(&sketch, "测试", "Home")
-            .await;
+        let result = skills.image_to_ui_async(&sketch, "测试", "Home").await;
         assert!(result.is_err(), "HTTP 5xx 应向上传播而非静默成功");
     }
 }
