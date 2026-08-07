@@ -515,6 +515,33 @@ pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
     ))
 }
 
+/// 多模态 chat 同步版（阻塞当前线程，专用 BLOCKING_RT 避免嵌套 runtime panic）。
+pub fn chat_with_image_sync(
+    client: &FusionMlxClient,
+    model: &str,
+    system_prompt: &str,
+    user_text: &str,
+    image_base64: &str,
+    max_tokens: u32,
+) -> anyhow::Result<String> {
+    let client = client.clone();
+    let model = model.to_string();
+    let system_prompt = system_prompt.to_string();
+    let user_text = user_text.to_string();
+    let image_base64 = image_base64.to_string();
+    BLOCKING_RT.block_on(async move {
+        chat_with_image(
+            &client,
+            &model,
+            &system_prompt,
+            &user_text,
+            &image_base64,
+            max_tokens,
+        )
+        .await
+    })
+}
+
 // ── OpenPencil ChatProvider 适配 ──
 
 use op_ai::chat_provider::{ChatDelta, ChatProvider, ChatRequest, StopReason};
@@ -643,6 +670,28 @@ impl<'a> SkillContext<'a> {
         self.client
             .chat_async(self.model, sys, user, max_tokens)
             .await
+    }
+
+    /// 多模态 chat（快捷方法）：发送图片 + 文字到 fusion-mlx。
+    pub async fn chat_with_image_async(
+        &self,
+        sys: &str,
+        user: &str,
+        image_base64: &str,
+        max_tokens: u32,
+    ) -> anyhow::Result<String> {
+        chat_with_image(self.client, self.model, sys, user, image_base64, max_tokens).await
+    }
+
+    /// 多模态 chat 同步版（快捷方法）。
+    pub fn chat_with_image(
+        &self,
+        sys: &str,
+        user: &str,
+        image_base64: &str,
+        max_tokens: u32,
+    ) -> anyhow::Result<String> {
+        chat_with_image_sync(self.client, self.model, sys, user, image_base64, max_tokens)
     }
 
     /// 生成设计 Token 的 CSS Custom Properties 片段，注入到 system prompt。
@@ -849,22 +898,36 @@ impl DesignSkill for ImageToUiSkill {
     }
 
     fn execute(&self, ctx: &SkillContext, input: &str) -> anyhow::Result<SkillOutput> {
-        // input 格式: "sketch_path|hint|page_name" 或直接 "sketch_path"
         let parts: Vec<&str> = input.splitn(3, '|').collect();
         let sketch_path = parts[0];
         let hint = parts.get(1).unwrap_or(&"");
         let page_name = parts.get(2).unwrap_or(&"generated");
-        let mut sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
+        let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。"
             .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment() {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user = format!(
-            "草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
-        );
-        let resp = ctx.chat(&sys, &user, 2048)?;
+        let user =
+            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
+            Ok(b64) => {
+                tracing::info!(
+                    sketch_path,
+                    bytes = b64.len(),
+                    "image-to-ui: 已加载草图，发送真实多模态请求"
+                );
+                ctx.chat_with_image(&sys, &user, &b64, 2048)?
+            }
+            Err(e) => {
+                tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
+                let user_text = format!(
+                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                );
+                ctx.chat(&sys, &user_text, 2048)?
+            }
+        };
         let doc = parse_ui_json(&resp, page_name)?;
         Ok(SkillOutput::Document(doc))
     }
@@ -880,15 +943,33 @@ impl DesignSkill for ImageToUiSkill {
             let sketch_path = parts[0];
             let hint = parts.get(1).unwrap_or(&"");
             let page_name = parts.get(2).unwrap_or(&"generated");
-            let mut sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
+            let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。"
                 .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment() {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            let user = format!("草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
-            let resp = ctx.chat_async(&sys, &user, 2048).await?;
+            let user = format!(
+                "补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。"
+            );
+            let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
+                Ok(b64) => {
+                    tracing::info!(
+                        sketch_path,
+                        bytes = b64.len(),
+                        "image-to-ui: 已加载草图，发送真实多模态请求"
+                    );
+                    ctx.chat_with_image_async(&sys, &user, &b64, 2048).await?
+                }
+                Err(e) => {
+                    tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
+                    let user_text = format!(
+                        "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                    );
+                    ctx.chat_async(&sys, &user_text, 2048).await?
+                }
+            };
             let doc = parse_ui_json(&resp, page_name)?;
             Ok(SkillOutput::Document(doc))
         })
@@ -1405,21 +1486,35 @@ impl DesignSkills {
     /// 图生 UI：参考图/手绘草图 → PenDocument 页面。
     ///
     /// 对应 PRD 模块 2「上传参考图 / 手绘草图逆向生成界面」。
-    /// MVP 阶段：草图以路径形式传入，提示词中描述，由 fusion-mlx 视觉模型解析。
+    /// 读取草图文件 base64 编码后发送真实多模态视觉请求；读取失败回退文字描述。
     pub fn image_to_ui(
         &self,
         sketch_path: &str,
         hint: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
+        let sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
-        let user = format!(
-            "草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
-        );
-        let resp = self
-            .client
-            .chat_sync(&self.default_model, sys, &user, 2048)?;
+        let user =
+            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
+            Ok(b64) => {
+                tracing::info!(
+                    sketch_path,
+                    bytes = b64.len(),
+                    "image_to_ui: 已加载草图，发送真实多模态请求"
+                );
+                chat_with_image_sync(&self.client, &self.default_model, sys, &user, &b64, 2048)?
+            }
+            Err(e) => {
+                tracing::warn!(sketch_path, error = %e, "image_to_ui: 草图加载失败，回退文字描述");
+                let user_text = format!(
+                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                );
+                self.client
+                    .chat_sync(&self.default_model, sys, &user_text, 2048)?
+            }
+        };
         parse_ui_json(&resp, page_name)
     }
 
@@ -1430,15 +1525,29 @@ impl DesignSkills {
         hint: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design UI 生成器。根据用户描述的草图布局，\
+        let sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
-        let user = format!(
-            "草图路径：{sketch_path}\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
-        );
-        let resp = self
-            .client
-            .chat_async(&self.default_model, sys, &user, 2048)
-            .await?;
+        let user =
+            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
+            Ok(b64) => {
+                tracing::info!(
+                    sketch_path,
+                    bytes = b64.len(),
+                    "image_to_ui_async: 已加载草图，发送真实多模态请求"
+                );
+                chat_with_image(&self.client, &self.default_model, sys, &user, &b64, 2048).await?
+            }
+            Err(e) => {
+                tracing::warn!(sketch_path, error = %e, "image_to_ui_async: 草图加载失败，回退文字描述");
+                let user_text = format!(
+                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                );
+                self.client
+                    .chat_async(&self.default_model, sys, &user_text, 2048)
+                    .await?
+            }
+        };
         parse_ui_json(&resp, page_name)
     }
 
@@ -2598,6 +2707,79 @@ mod mlx_integration {
         assert!(
             raw.to_lowercase().contains("x-fusion-route: fusion-design"),
             "缺少 X-Fusion-Route 头：{raw}"
+        );
+    }
+
+    /// 捕获完整请求体（大缓冲，用于多模态 base64 负载）。
+    async fn spawn_body_capture_server(body: String) -> (String, Arc<Mutex<Option<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(None::<String>));
+        let captured_clone = captured.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf = vec![0u8; 2 * 1024 * 1024];
+                let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
+                    .await
+                    .unwrap_or(0);
+                if n > 0 {
+                    *captured_clone.lock().unwrap() =
+                        Some(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), captured)
+    }
+
+    /// P1-1：验证 chat_with_image 真实发送 data:image/png;base64 多模态负载。
+    #[tokio::test]
+    async fn chat_with_image_sends_data_url() {
+        let ui_json = "{\"page\":{\"width\":800,\"height\":600,\"nodes\":[{\"id\":\"b\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50}]}}";
+        let body = format!("{{\"choices\":[{{\"message\":{{\"content\":{ui_json:?}}}}}]}}");
+        let (url, captured) = spawn_body_capture_server(body).await;
+        let client = mock_client(&url);
+        let b64 = encode_image_base64(std::path::Path::new("/tmp/fd_sketch.png"))
+            .unwrap_or_else(|_| "AAAA".into());
+        let _ = chat_with_image(&client, "m", "sys", "usr", &b64, 128)
+            .await
+            .unwrap();
+        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        assert!(
+            raw.contains("data:image/png;base64,"),
+            "多模态负载缺少 data:image/png;base64 前缀：{}",
+            &raw[..raw.len().min(200)]
+        );
+        assert!(raw.contains("image_url"), "缺少 image_url 字段");
+    }
+
+    /// P1-1：验证 image_to_ui_async 真实路径加载草图并发多模态请求（非仅文字描述）。
+    #[tokio::test]
+    async fn image_to_ui_async_sends_real_image() {
+        let ui_json = "{\"page\":{\"width\":800,\"height\":600,\"nodes\":[{\"id\":\"c\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50}]}}";
+        let body = format!("{{\"choices\":[{{\"message\":{{\"content\":{ui_json:?}}}}}]}}");
+        let (url, captured) = spawn_body_capture_server(body).await;
+        let client = mock_client(&url);
+        let skills = DesignSkills::new(client, "qwen3.5");
+        let doc = skills
+            .image_to_ui_async("/tmp/fd_sketch.png", "测试", "Home")
+            .await
+            .unwrap();
+        assert_eq!(doc.pages.len(), 1);
+        assert_eq!(doc.pages[0].nodes[0].id, "c");
+        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        assert!(
+            raw.contains("data:image/png;base64,"),
+            "image_to_ui_async 未发送真实图片负载（仍是文字描述）：{}",
+            &raw[..raw.len().min(200)]
         );
     }
 }

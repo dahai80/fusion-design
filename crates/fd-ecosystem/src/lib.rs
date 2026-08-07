@@ -939,7 +939,11 @@ mod builtin_template_tests {
         let client = TrainerClient::with_bin("/nonexistent/fusion-trainer");
         // bin 不存在时应失败可见（fail-visible），不真正 spawn 子进程
         let err = client
-            .run_sft(std::path::Path::new("/tmp/ds.jsonl"), "qwen2.5-7b-4bit", None)
+            .run_sft(
+                std::path::Path::new("/tmp/ds.jsonl"),
+                "qwen2.5-7b-4bit",
+                None,
+            )
             .unwrap_err();
         assert!(format!("{}", err).contains("fusion-trainer CLI 未找到"));
     }
@@ -948,7 +952,12 @@ mod builtin_template_tests {
     fn trainer_rlsl_missing_bin_bails() {
         let client = TrainerClient::with_bin("/nonexistent/fusion-trainer");
         let err = client
-            .run_rlsl("grpo", std::path::Path::new("/tmp/ds.jsonl"), "qwen2.5-7b-4bit", None)
+            .run_rlsl(
+                "grpo",
+                std::path::Path::new("/tmp/ds.jsonl"),
+                "qwen2.5-7b-4bit",
+                None,
+            )
             .unwrap_err();
         assert!(format!("{}", err).contains("fusion-trainer CLI 未找到"));
     }

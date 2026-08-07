@@ -53,7 +53,7 @@ pub enum Command {
         prompt: String,
         #[arg(long, default_value = "Home")]
         page: String,
-        #[arg(long, default_value = "qwen3.5")]
+        #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
         #[arg(long, default_value = "http://127.0.0.1:11432")]
         endpoint: String,
@@ -65,6 +65,63 @@ pub enum Command {
         /// 流式输出 SSE token（供 GUI 管道读取）
         #[arg(long)]
         stream: bool,
+    },
+    /// 图生 UI：草图/参考图 → PenDocument JSON
+    ImageToUi {
+        #[arg(long)]
+        sketch: PathBuf,
+        #[arg(long, default_value = "")]
+        hint: String,
+        #[arg(long, default_value = "Home")]
+        page: String,
+        #[arg(long, default_value = "Qwen3.5-9B-4bit")]
+        model: String,
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        endpoint: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// 多方案对比：一次生成 3 套不同风格设计稿
+    MultiVariants {
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, default_value = "Home")]
+        page: String,
+        /// 三套风格，逗号分隔（缺省用默认三风格）
+        #[arg(long, value_delimiter = ',')]
+        styles: Option<Vec<String>>,
+        #[arg(long, default_value = "Qwen3.5-9B-4bit")]
+        model: String,
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        endpoint: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// SpecDoc：AI 自动生成设计规范文档
+    SpecDoc {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value = "设计规范文档")]
+        title: String,
+        #[arg(long, default_value = "Qwen3.5-9B-4bit")]
+        model: String,
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        endpoint: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// PageFlow：按流程描述批量生成多页面
+    PageFlow {
+        #[arg(long)]
+        flow: String,
+        #[arg(long, default_value = "")]
+        style_hint: String,
+        #[arg(long, default_value = "Qwen3.5-9B-4bit")]
+        model: String,
+        #[arg(long, default_value = "http://127.0.0.1:11432")]
+        endpoint: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// 校验前端静态资源目录
     CheckFrontend {
@@ -422,6 +479,102 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::ImageToUi {
+            sketch,
+            hint,
+            page,
+            model,
+            endpoint,
+            out,
+        } => {
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let skills = fd_ai_adapter::DesignSkills::new(client, model);
+            let doc = skills
+                .image_to_ui_async(&sketch.to_string_lossy(), &hint, &page)
+                .await?;
+            let json = serde_json::to_string_pretty(&doc)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &json)?;
+                    println!("已生成图生 UI PenDocument JSON 到 {p:?}");
+                }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
+        Command::MultiVariants {
+            prompt,
+            page,
+            styles,
+            model,
+            endpoint,
+            out,
+        } => {
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let skills = fd_ai_adapter::DesignSkills::new(client, model);
+            let default_styles = ["极简风", "卡片风", "深色风"];
+            let picked: [String; 3] = match styles {
+                Some(s) if s.len() >= 3 => [s[0].clone(), s[1].clone(), s[2].clone()],
+                _ => default_styles.map(|s| s.to_string()),
+            };
+            let docs = skills
+                .multi_variants_async(
+                    &prompt,
+                    &page,
+                    [picked[0].as_str(), picked[1].as_str(), picked[2].as_str()],
+                )
+                .await?;
+            let json = serde_json::to_string_pretty(&docs)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &json)?;
+                    println!("已生成 3 套多方案 PenDocument JSON 到 {p:?}");
+                }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
+        Command::SpecDoc {
+            input,
+            title,
+            model,
+            endpoint,
+            out,
+        } => {
+            let doc_json = std::fs::read_to_string(&input)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let skills = fd_ai_adapter::DesignSkills::new(client, model);
+            let spec = skills.spec_doc_async(&doc_json, &title).await?;
+            let json = serde_json::to_string_pretty(&spec)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &json)?;
+                    println!("已生成设计规范文档到 {p:?}");
+                }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
+        Command::PageFlow {
+            flow,
+            style_hint,
+            model,
+            endpoint,
+            out,
+        } => {
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&endpoint)?;
+            let skills = fd_ai_adapter::DesignSkills::new(client, model);
+            let docs = skills.page_flow_async(&flow, &style_hint).await?;
+            let json = serde_json::to_string_pretty(&docs)?;
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, &json)?;
+                    println!("已生成 PageFlow 多页面文档到 {p:?}");
+                }
+                None => println!("{json}"),
+            }
+            Ok(())
+        }
         Command::CheckFrontend { dir, backend } => {
             host::HostBridgeConfig {
                 frontend_dir: dir,
@@ -648,6 +801,104 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 anyhow::bail!("fusion-trainer 退出码 {}", status.code().unwrap_or(-1));
             }
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parse_image_to_ui_defaults() {
+        let cli = Cli::parse_from([
+            "fusion-design",
+            "image-to-ui",
+            "--sketch",
+            "/tmp/sketch.png",
+        ]);
+        match cli.command {
+            Command::ImageToUi {
+                sketch,
+                hint,
+                page,
+                model,
+                endpoint,
+                out,
+            } => {
+                assert_eq!(sketch, PathBuf::from("/tmp/sketch.png"));
+                assert_eq!(hint, "");
+                assert_eq!(page, "Home");
+                assert_eq!(model, "Qwen3.5-9B-4bit");
+                assert_eq!(endpoint, "http://127.0.0.1:11432");
+                assert!(out.is_none());
+            }
+            _ => panic!("应为 ImageToUi"),
+        }
+    }
+
+    #[test]
+    fn parse_multi_variants_custom_styles() {
+        let cli = Cli::parse_from([
+            "fusion-design",
+            "multi-variants",
+            "--prompt",
+            "login page",
+            "--styles",
+            "neon,glass,flat",
+        ]);
+        match cli.command {
+            Command::MultiVariants { prompt, styles, .. } => {
+                assert_eq!(prompt, "login page");
+                let styles = styles.expect("应提供 styles");
+                assert_eq!(styles, vec!["neon", "glass", "flat"]);
+            }
+            _ => panic!("应为 MultiVariants"),
+        }
+    }
+
+    #[test]
+    fn parse_spec_doc_defaults() {
+        let cli = Cli::parse_from(["fusion-design", "spec-doc", "--input", "doc.json"]);
+        match cli.command {
+            Command::SpecDoc {
+                input,
+                title,
+                endpoint,
+                ..
+            } => {
+                assert_eq!(input, PathBuf::from("doc.json"));
+                assert_eq!(title, "设计规范文档");
+                assert_eq!(endpoint, "http://127.0.0.1:11432");
+            }
+            _ => panic!("应为 SpecDoc"),
+        }
+    }
+
+    #[test]
+    fn parse_page_flow_defaults() {
+        let cli = Cli::parse_from(["fusion-design", "page-flow", "--flow", "登录→首页→设置"]);
+        match cli.command {
+            Command::PageFlow {
+                flow, style_hint, ..
+            } => {
+                assert_eq!(flow, "登录→首页→设置");
+                assert_eq!(style_hint, "");
+            }
+            _ => panic!("应为 PageFlow"),
+        }
+    }
+
+    #[test]
+    fn parse_generate_unchanged() {
+        let cli = Cli::parse_from(["fusion-design", "generate", "--prompt", "dashboard"]);
+        match cli.command {
+            Command::Generate { prompt, page, .. } => {
+                assert_eq!(prompt, "dashboard");
+                assert_eq!(page, "Home");
+            }
+            _ => panic!("应为 Generate"),
         }
     }
 }

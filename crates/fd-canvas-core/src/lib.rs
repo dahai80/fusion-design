@@ -926,6 +926,10 @@ pub struct DiffEntry {
     pub old_value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<serde_json::Value>,
+    /// 新增节点所属页面 ID（仅 Added 有意义）；apply_patch 据此插入正确页，
+    /// 避免恒定落入 pages.first() 导致多页文档节点错位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -945,11 +949,13 @@ impl PenDocument {
         let mut entries = Vec::new();
         let self_nodes = self.all_nodes();
         let other_nodes = other.all_nodes();
+        let other_by_page = other.all_nodes_by_page();
         let self_ids: Vec<&str> = self_nodes.keys().map(|s| s.as_str()).collect();
         let other_ids: Vec<&str> = other_nodes.keys().map(|s| s.as_str()).collect();
 
         for id in &other_ids {
             if !self_ids.contains(id) {
+                let page_id = other_by_page.get(*id).cloned();
                 entries.push(DiffEntry {
                     node_id: id.to_string(),
                     change_type: DiffChangeType::Added,
@@ -960,6 +966,7 @@ impl PenDocument {
                             .ok()
                             .unwrap_or_default(),
                     ),
+                    page_id,
                 });
             }
         }
@@ -975,6 +982,7 @@ impl PenDocument {
                             .unwrap_or_default(),
                     ),
                     new_value: None,
+                    page_id: None,
                 });
             }
         }
@@ -1009,14 +1017,32 @@ impl PenDocument {
         map
     }
 
-    /// 应用补丁（简易版：按 diff 条目增删节点）。
+    /// 收集文档中所有节点，返回 id → 所在页面 ID 的映射。
+    fn all_nodes_by_page(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for page in &self.pages {
+            collect_node_pages(&page.nodes, &page.id, &mut map);
+        }
+        map
+    }
+
+    /// 应用补丁（按 diff 条目增删改节点，保持节点所属页面）。
     pub fn apply_patch(&mut self, patch: &PenDocumentDiff) {
         for entry in &patch.entries {
             match entry.change_type {
                 DiffChangeType::Added => {
                     if let Some(val) = &entry.new_value {
                         if let Ok(node) = serde_json::from_value::<PenNode>(val.clone()) {
-                            if let Some(page) = self.pages.first_mut() {
+                            let target_page_id = entry.page_id.clone().unwrap_or_else(|| {
+                                self.pages.first().map(|p| p.id.clone()).unwrap_or_default()
+                            });
+                            if let Some(page) = self.page_mut(&target_page_id) {
+                                page.nodes.push(node);
+                            } else if let Some(page) = self.pages.first_mut() {
+                                tracing::warn!(
+                                    entry.page_id = ?entry.page_id,
+                                    "apply_patch: 目标页面不存在，回退到首页"
+                                );
                                 page.nodes.push(node);
                             }
                         }
@@ -1028,6 +1054,12 @@ impl PenDocument {
                 DiffChangeType::Modified => {
                     if let Some(node) = self.find_node_mut(&entry.node_id) {
                         apply_field_change(node, &entry.field, &entry.new_value);
+                    } else {
+                        tracing::warn!(
+                            node_id = %entry.node_id,
+                            field = %entry.field,
+                            "apply_patch: 修改目标节点未找到，跳过"
+                        );
                     }
                 }
             }
@@ -1040,6 +1072,13 @@ fn collect_nodes<'a>(nodes: &'a [PenNode], map: &mut HashMap<String, &'a PenNode
     for n in nodes {
         map.insert(n.id.clone(), n);
         collect_nodes(&n.children, map);
+    }
+}
+
+fn collect_node_pages(nodes: &[PenNode], page_id: &str, map: &mut HashMap<String, String>) {
+    for n in nodes {
+        map.insert(n.id.clone(), page_id.to_string());
+        collect_node_pages(&n.children, page_id, map);
     }
 }
 
@@ -1060,6 +1099,7 @@ fn diff_json_objects(
                     field: key.clone(),
                     old_value: old_val.cloned(),
                     new_value: new_val.cloned(),
+                    page_id: None,
                 });
             }
         }
@@ -1071,6 +1111,7 @@ fn diff_json_objects(
                     field: key.clone(),
                     old_value: old_map.get(key).cloned(),
                     new_value: None,
+                    page_id: None,
                 });
             }
         }
@@ -1116,6 +1157,21 @@ fn apply_field_change(node: &mut PenNode, field: &str, new_value: &Option<serde_
             "z_index" => {
                 if let Some(v) = val.as_i64() {
                     node.z_index = v as i32;
+                }
+            }
+            "kind" => {
+                if let Ok(k) = serde_json::from_value::<NodeKind>(val.clone()) {
+                    node.kind = k;
+                }
+            }
+            "style" => {
+                if let Ok(s) = serde_json::from_value::<NodeStyle>(val.clone()) {
+                    node.style = s;
+                }
+            }
+            "children" => {
+                if let Ok(c) = serde_json::from_value::<Vec<PenNode>>(val.clone()) {
+                    node.children = c;
                 }
             }
             _ => {
@@ -1719,6 +1775,77 @@ mod tests {
         doc_v1.apply_patch(&patch);
         assert_eq!(doc_v1.pages[0].nodes[0].w, 200.0);
     }
+
+    #[test]
+    fn apply_patch_added_node_keeps_page() {
+        let mut doc_v1 = PenDocument::new();
+        doc_v1.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        doc_v1.add_page(Page {
+            id: "p2".into(),
+            name: "Page 2".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![],
+        });
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2
+            .page_mut("p2")
+            .unwrap()
+            .nodes
+            .push(PenNode::rect("n2", 5.0, 5.0, 40.0, 40.0));
+        let patch = doc_v1.diff(&doc_v2);
+        let added = patch
+            .entries
+            .iter()
+            .find(|e| e.node_id == "n2" && e.change_type == DiffChangeType::Added)
+            .expect("应有 n2 Added 条目");
+        assert_eq!(added.page_id.as_deref(), Some("p2"));
+        doc_v1.apply_patch(&patch);
+        assert!(doc_v1
+            .page("p1")
+            .unwrap()
+            .nodes
+            .iter()
+            .all(|n| n.id != "n2"));
+        assert!(doc_v1
+            .page("p2")
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.id == "n2"));
+    }
+
+    #[test]
+    fn apply_patch_style_kind_children() {
+        let mut doc_v1 = PenDocument::new();
+        doc_v1.add_page(Page {
+            id: "p1".into(),
+            name: "Page 1".into(),
+            width: 800.0,
+            height: 600.0,
+            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
+        });
+        let mut doc_v2 = doc_v1.clone();
+        {
+            let n = &mut doc_v2.pages[0].nodes[0];
+            n.kind = NodeKind::Circle;
+            n.style.fill = Some("#ff0000".into());
+            n.children.push(PenNode::text("c1", 0.0, 0.0, "child"));
+        }
+        let patch = doc_v1.diff(&doc_v2);
+        doc_v1.apply_patch(&patch);
+        let n = &doc_v1.pages[0].nodes[0];
+        assert_eq!(n.kind, NodeKind::Circle);
+        assert_eq!(n.style.fill.as_deref(), Some("#ff0000"));
+        assert_eq!(n.children.len(), 1);
+        assert_eq!(n.children[0].id, "c1");
+    }
 }
 
 // ── 命名版本管理 ──
@@ -1740,6 +1867,10 @@ pub struct VersionedDocument {
     pub document_id: String,
     versions: Vec<NamedVersion>,
     active_version_id: String,
+    /// 细粒度撤销/重做栈，与命名版本互补：save_version 落地命名版本，
+    /// 同时 push 快照入栈，供频繁编辑的 undo/redo（50 层上限）。
+    #[serde(default)]
+    undo_redo: UndoRedoStack,
 }
 
 impl VersionedDocument {
@@ -1748,14 +1879,17 @@ impl VersionedDocument {
         let version = NamedVersion {
             id: id.clone(),
             name: "初始版本".to_string(),
-            snapshot: initial,
+            snapshot: initial.clone(),
             created_at: now_iso(),
             description: None,
         };
+        let mut undo_redo = UndoRedoStack::new();
+        undo_redo.push(initial);
         Self {
             document_id: document_id.into(),
             versions: vec![version],
             active_version_id: id,
+            undo_redo,
         }
     }
 
@@ -1780,14 +1914,46 @@ impl VersionedDocument {
         let version = NamedVersion {
             id: id.clone(),
             name: name.into(),
-            snapshot: doc,
+            snapshot: doc.clone(),
             created_at: now_iso(),
             description,
         };
         self.versions.push(version);
         self.active_version_id = id.clone();
+        self.undo_redo.push(doc);
         tracing::info!(version_id = %id, total = self.versions.len(), "save_version: 新版本已保存");
         self.versions.last().unwrap()
+    }
+
+    /// 记录一次编辑快照（不入命名版本，仅进 undo 栈），用于高频编辑。
+    pub fn checkpoint(&mut self, doc: PenDocument) {
+        self.undo_redo.push(doc);
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.undo_redo.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.undo_redo.can_redo()
+    }
+
+    /// 撤销：返回上一快照文档，None 表示无可撤销。
+    pub fn undo(&mut self) -> Option<PenDocument> {
+        let prev = self.undo_redo.undo();
+        if prev.is_some() {
+            tracing::info!("undo: 已回退一步");
+        }
+        prev
+    }
+
+    /// 重做：返回下一快照文档，None 表示无可重做。
+    pub fn redo(&mut self) -> Option<PenDocument> {
+        let next = self.undo_redo.redo();
+        if next.is_some() {
+            tracing::info!("redo: 已前进一步");
+        }
+        next
     }
 
     pub fn switch_to(&mut self, version_id: &str) -> anyhow::Result<&PenDocument> {
@@ -1935,6 +2101,33 @@ mod version_tests {
         let vd = VersionedDocument::new("doc1", doc);
         assert_eq!(vd.version_count(), 1);
         assert_eq!(vd.active_version().name, "初始版本");
+    }
+
+    #[test]
+    fn versioned_undo_redo_integration() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0.clone());
+        let mut doc_v1 = sample_doc("v1");
+        doc_v1.pages[0].nodes[0].w = 300.0;
+        vd.save_version("V2", doc_v1.clone(), None);
+        assert!(vd.can_undo());
+        let undone = vd.undo().expect("应可撤销");
+        assert_eq!(undone.pages[0].nodes[0].w, 100.0);
+        assert!(vd.can_redo());
+        let redone = vd.redo().expect("应可重做");
+        assert_eq!(redone.pages[0].nodes[0].w, 300.0);
+    }
+
+    #[test]
+    fn versioned_checkpoint_undo() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let mut edit = vd.active_document().clone();
+        edit.pages[0].nodes[0].h = 999.0;
+        vd.checkpoint(edit);
+        assert!(vd.can_undo());
+        let undone = vd.undo().expect("应可撤销到初始");
+        assert_eq!(undone.pages[0].nodes[0].h, 50.0);
     }
 
     #[test]
