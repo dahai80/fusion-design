@@ -42,6 +42,100 @@ pub struct LinkMessage {
     pub payload: serde_json::Value,
 }
 
+/// fusion-trainer CLI 子进程封装（离线硬约束：仅调用本地 .venv 的 fusion-trainer）。
+#[derive(Debug, Clone)]
+pub struct TrainerClient {
+    bin: PathBuf,
+}
+
+impl TrainerClient {
+    /// 解析 fusion-trainer 可执行路径：优先 FUSION_TRAINER_BIN，否则共享 .venv 默认值。
+    pub fn resolve_bin() -> PathBuf {
+        if let Ok(b) = std::env::var("FUSION_TRAINER_BIN") {
+            return PathBuf::from(b);
+        }
+        PathBuf::from("/Users/dahai/fusion/.venv/bin/fusion-trainer")
+    }
+
+    pub fn new() -> Self {
+        Self {
+            bin: Self::resolve_bin(),
+        }
+    }
+
+    pub fn with_bin(bin: impl Into<PathBuf>) -> Self {
+        Self { bin: bin.into() }
+    }
+
+    fn spawn(&self, args: Vec<String>) -> anyhow::Result<std::process::ExitStatus> {
+        if !self.bin.exists() {
+            anyhow::bail!(
+                "fusion-trainer CLI 未找到: {} (请安装 fusion-trainer 或设置 FUSION_TRAINER_BIN)",
+                self.bin.display()
+            );
+        }
+        tracing::info!(bin = %self.bin.display(), args = ?args, "spawn fusion-trainer");
+        let status = std::process::Command::new(&self.bin)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()?;
+        Ok(status)
+    }
+
+    /// 调用 fusion-trainer sft --dataset <jsonl> --model <id>
+    pub fn run_sft(
+        &self,
+        dataset: &Path,
+        model: &str,
+        config: Option<&Path>,
+    ) -> anyhow::Result<std::process::ExitStatus> {
+        let mut args = vec![
+            "sft".into(),
+            "--dataset".into(),
+            dataset.display().to_string(),
+            "--model".into(),
+            model.into(),
+        ];
+        if let Some(c) = config {
+            args.push("--config".into());
+            args.push(c.display().to_string());
+        }
+        self.spawn(args)
+    }
+
+    /// 调用 fusion-trainer rlsl --method <m> --dataset <jsonl> --model <id>
+    pub fn run_rlsl(
+        &self,
+        method: &str,
+        dataset: &Path,
+        model: &str,
+        config: Option<&Path>,
+    ) -> anyhow::Result<std::process::ExitStatus> {
+        let mut args = vec![
+            "rlsl".into(),
+            "--method".into(),
+            method.into(),
+            "--dataset".into(),
+            dataset.display().to_string(),
+            "--model".into(),
+            model.into(),
+        ];
+        if let Some(c) = config {
+            args.push("--config".into());
+            args.push(c.display().to_string());
+        }
+        self.spawn(args)
+    }
+}
+
+impl Default for TrainerClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 生态联动客户端（基于本地文件 IPC）。
 #[derive(Debug, Clone)]
 pub struct EcosystemLink {
@@ -825,5 +919,37 @@ mod builtin_template_tests {
         link.install_builtin_templates().unwrap();
         let mobile = link.search_templates("mobile").unwrap();
         assert!(!mobile.is_empty());
+    }
+
+    #[test]
+    fn trainer_resolve_bin_honors_env() {
+        // 环境变量优先于默认 .venv 路径
+        let prev = std::env::var("FUSION_TRAINER_BIN").ok();
+        std::env::set_var("FUSION_TRAINER_BIN", "/tmp/ft-test-bin");
+        let bin = TrainerClient::resolve_bin();
+        assert_eq!(bin, std::path::PathBuf::from("/tmp/ft-test-bin"));
+        match prev {
+            Some(v) => std::env::set_var("FUSION_TRAINER_BIN", v),
+            None => std::env::remove_var("FUSION_TRAINER_BIN"),
+        }
+    }
+
+    #[test]
+    fn trainer_with_bin_stores_path() {
+        let client = TrainerClient::with_bin("/nonexistent/fusion-trainer");
+        // bin 不存在时应失败可见（fail-visible），不真正 spawn 子进程
+        let err = client
+            .run_sft(std::path::Path::new("/tmp/ds.jsonl"), "qwen2.5-7b-4bit", None)
+            .unwrap_err();
+        assert!(format!("{}", err).contains("fusion-trainer CLI 未找到"));
+    }
+
+    #[test]
+    fn trainer_rlsl_missing_bin_bails() {
+        let client = TrainerClient::with_bin("/nonexistent/fusion-trainer");
+        let err = client
+            .run_rlsl("grpo", std::path::Path::new("/tmp/ds.jsonl"), "qwen2.5-7b-4bit", None)
+            .unwrap_err();
+        assert!(format!("{}", err).contains("fusion-trainer CLI 未找到"));
     }
 }
