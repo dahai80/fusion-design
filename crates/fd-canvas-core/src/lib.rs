@@ -631,14 +631,32 @@ fn compute_flex_layout(
             },
             ..Default::default()
         };
-        let id = taffy_tree.new_leaf(child_style).unwrap();
+        let id = match taffy_tree.new_leaf(child_style) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(error = %e, "Taffy new_leaf 失败，回退自由布局");
+                let mut results = Vec::new();
+                for child in &parent.children {
+                    compute_node_layout(child, abs_x, abs_y, &mut results);
+                }
+                return results;
+            }
+        };
         child_ids.push(id);
         node_map.push((id, child.id.clone()));
     }
 
-    let root_id = taffy_tree
-        .new_with_children(parent_style, &child_ids)
-        .unwrap();
+    let root_id = match taffy_tree.new_with_children(parent_style, &child_ids) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "Taffy new_with_children 失败，回退自由布局");
+            let mut results = Vec::new();
+            for child in &parent.children {
+                compute_node_layout(child, abs_x, abs_y, &mut results);
+            }
+            return results;
+        }
+    };
 
     let available = taffy::Size {
         width: taffy::AvailableSpace::Definite(parent.w),
@@ -655,14 +673,18 @@ fn compute_flex_layout(
 
     let mut results = Vec::new();
     for (taffy_id, node_id) in &node_map {
-        let layout = taffy_tree.layout(*taffy_id).unwrap();
-        results.push(ComputedLayout {
-            node_id: node_id.clone(),
-            x: abs_x + layout.location.x,
-            y: abs_y + layout.location.y,
-            w: layout.size.width,
-            h: layout.size.height,
-        });
+        match taffy_tree.layout(*taffy_id) {
+            Ok(layout) => results.push(ComputedLayout {
+                node_id: node_id.clone(),
+                x: abs_x + layout.location.x,
+                y: abs_y + layout.location.y,
+                w: layout.size.width,
+                h: layout.size.height,
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, node_id = %node_id, "Taffy layout 读取失败，跳过该节点");
+            }
+        }
     }
     results
 }
@@ -742,14 +764,32 @@ fn compute_grid_layout(
             };
         }
 
-        let id = taffy_tree.new_leaf(child_style).unwrap();
+        let id = match taffy_tree.new_leaf(child_style) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(error = %e, "Taffy new_leaf 失败，回退自由布局");
+                let mut results = Vec::new();
+                for child in &parent.children {
+                    compute_node_layout(child, abs_x, abs_y, &mut results);
+                }
+                return results;
+            }
+        };
         child_ids.push(id);
         node_map.push((id, child.id.clone()));
     }
 
-    let root_id = taffy_tree
-        .new_with_children(parent_style, &child_ids)
-        .unwrap();
+    let root_id = match taffy_tree.new_with_children(parent_style, &child_ids) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "Taffy new_with_children 失败，回退自由布局");
+            let mut results = Vec::new();
+            for child in &parent.children {
+                compute_node_layout(child, abs_x, abs_y, &mut results);
+            }
+            return results;
+        }
+    };
 
     let available = taffy::Size {
         width: taffy::AvailableSpace::Definite(parent.w),
@@ -766,14 +806,18 @@ fn compute_grid_layout(
 
     let mut results = Vec::new();
     for (taffy_id, node_id) in &node_map {
-        let layout = taffy_tree.layout(*taffy_id).unwrap();
-        results.push(ComputedLayout {
-            node_id: node_id.clone(),
-            x: abs_x + layout.location.x,
-            y: abs_y + layout.location.y,
-            w: layout.size.width,
-            h: layout.size.height,
-        });
+        match taffy_tree.layout(*taffy_id) {
+            Ok(layout) => results.push(ComputedLayout {
+                node_id: node_id.clone(),
+                x: abs_x + layout.location.x,
+                y: abs_y + layout.location.y,
+                w: layout.size.width,
+                h: layout.size.height,
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, node_id = %node_id, "Taffy layout 读取失败，跳过该节点");
+            }
+        }
     }
     results
 }

@@ -25,7 +25,10 @@ tokio = { workspace = true }
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }
 resvg = { version = "0.45", default-features = false, features = ["text"] }
-printpdf = "0.8"
+# printpdf 0.12: lopdf 0.44 修复 RUSTSEC-2026-0187（深层嵌套 PDF 栈溢出）。
+# 关闭默认 html feature（避免拉入 azul-layout/svg2pdf 等重依赖），
+# 我们仅用 ops::Op 内置字体 API，无需 HTML/CSS 排版。
+printpdf = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
