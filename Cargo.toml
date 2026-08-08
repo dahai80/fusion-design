@@ -21,7 +21,7 @@ members = [
 exclude = ["vendor/openpencil"]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 rust-version = "1.87"
 license = "Apache-2.0"
@@ -43,10 +43,11 @@ image = "0.25"
 
 # OpenPencil crate（path dep，vendored 子集）
 op-ai = { path = "vendor/openpencil/crates/op-ai" }
-# op-editor-core = { path = "vendor/openpencil/crates/op-editor-core" }
-# op-codegen = { path = "vendor/openpencil/crates/op-codegen" }
-# op-design-lint = { path = "vendor/openpencil/crates/op-design-lint" }
-# op-mcp = { path = "vendor/openpencil/crates/op-mcp" }
+# 以下 op-* 因依赖私有 jian-ops-schema 无法引入，已自建替身：
+#   op-editor-core → fd-canvas-core（PenDocument/PenNode 数据模型）
+#   op-codegen     → fd-codegen（HTML/React+Tailwind 生成）
+#   op-mcp         → fd-ecosystem 自建 MCP 协议层（McpServer/McpTool）
+# op-design-lint 暂未落地，后续按需自建。
 
 [profile.release]
 strip = true

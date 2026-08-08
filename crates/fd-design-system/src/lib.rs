@@ -208,11 +208,12 @@ impl DesignSystemRegistry {
         self.systems.get(id)
     }
 
-    /// 注册两套内置规范（Apple HIG / 极简后台）。
+    /// 注册三套内置规范（Apple HIG / 极简后台 / 机器人仿真控制台）。
     pub fn register_builtin(&mut self) {
         self.systems.extend([
             ("apple-hig".to_string(), builtin_apple_hig()),
             ("minimal-dashboard".to_string(), builtin_minimal_dashboard()),
+            ("robot-sim".to_string(), builtin_robot_sim()),
         ]);
     }
 
@@ -349,6 +350,129 @@ fn builtin_minimal_dashboard() -> DesignSystem {
     }
 }
 
+/// 机器人仿真控制台预设（PRD 模块 3 第三套内置规范）。
+/// 面向 Fusion-Simulation 联动：深色工程界面、状态/告警/遥测语义色、等宽数据字体。
+pub fn builtin_robot_sim() -> DesignSystem {
+    DesignSystem {
+        id: "robot-sim".into(),
+        name: "机器人仿真控制台".into(),
+        tokens: vec![
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#0F1115".into()),
+                description: "控制台深色背景".into(),
+            },
+            Token {
+                name: "color.surface".into(),
+                value: TokenValue::Color("#1A1F26".into()),
+                description: "面板/卡片表面".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#E6EDF3".into()),
+                description: "主前景（高对比浅色）".into(),
+            },
+            Token {
+                name: "color.muted".into(),
+                value: TokenValue::Color("#7D8590".into()),
+                description: "次要文本/标注".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#2F81F7".into()),
+                description: "主交互强调（蓝）".into(),
+            },
+            Token {
+                name: "color.success".into(),
+                value: TokenValue::Color("#3FB950".into()),
+                description: "运行正常/在线".into(),
+            },
+            Token {
+                name: "color.warning".into(),
+                value: TokenValue::Color("#D29922".into()),
+                description: "告警/阈值临近".into(),
+            },
+            Token {
+                name: "color.danger".into(),
+                value: TokenValue::Color("#F85149".into()),
+                description: "故障/急停/离线".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(13.0),
+                description: "正文字号（紧凑工程界面）".into(),
+            },
+            Token {
+                name: "font.size.mono".into(),
+                value: TokenValue::Number(12.0),
+                description: "遥测/日志等宽数据字号".into(),
+            },
+            Token {
+                name: "font.mono".into(),
+                value: TokenValue::String("SF Mono, Menlo, monospace".into()),
+                description: "等宽字体族（遥测/坐标/日志）".into(),
+            },
+            Token {
+                name: "radius.panel".into(),
+                value: TokenValue::Number(4.0),
+                description: "面板圆角（锐利工程风）".into(),
+            },
+            Token {
+                name: "spacing.gauge".into(),
+                value: TokenValue::Number(8.0),
+                description: "仪表/控件间距基准".into(),
+            },
+            Token {
+                name: "shadow.panel".into(),
+                value: TokenValue::Shadow("0 1px 0 rgba(0,0,0,0.4)".into()),
+                description: "面板内阴影（深色浮起）".into(),
+            },
+        ],
+        dark_tokens: Some(vec![
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#010409".into()),
+                description: "夜间极深背景".into(),
+            },
+            Token {
+                name: "color.surface".into(),
+                value: TokenValue::Color("#0D1117".into()),
+                description: "夜间面板表面".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#F0F6FC".into()),
+                description: "夜间高对比前景".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#1F6FEB".into()),
+                description: "夜间强调".into(),
+            },
+            Token {
+                name: "color.success".into(),
+                value: TokenValue::Color("#238636".into()),
+                description: "夜间运行正常".into(),
+            },
+            Token {
+                name: "color.danger".into(),
+                value: TokenValue::Color("#DA3633".into()),
+                description: "夜间故障".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(13.0),
+                description: "正文字号".into(),
+            },
+            Token {
+                name: "radius.panel".into(),
+                value: TokenValue::Number(4.0),
+                description: "面板圆角".into(),
+            },
+        ]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,12 +500,31 @@ mod tests {
     }
 
     #[test]
-    fn register_builtin_loads_two() {
+    fn register_builtin_loads_three() {
         let mut reg = DesignSystemRegistry::new();
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 2);
+        assert_eq!(reg.list().len(), 3);
         reg.activate("apple-hig").unwrap();
         assert!(reg.lookup("color.bg").is_some());
+    }
+
+    #[test]
+    fn robot_sim_preset_registered_and_lookup() {
+        let mut reg = DesignSystemRegistry::new();
+        reg.register_builtin();
+        reg.activate("robot-sim").unwrap();
+        match reg.lookup("color.bg").unwrap() {
+            TokenValue::Color(c) => assert_eq!(c, "#0F1115"),
+            _ => panic!("期望 Color"),
+        }
+        match reg.lookup("color.danger").unwrap() {
+            TokenValue::Color(c) => assert_eq!(c, "#F85149"),
+            _ => panic!("期望 Color"),
+        }
+        match reg.lookup("font.mono").unwrap() {
+            TokenValue::String(s) => assert!(s.contains("SF Mono")),
+            _ => panic!("期望 String"),
+        }
     }
 
     #[test]

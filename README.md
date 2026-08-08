@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.8 — 11 crates + vendored op-ai, 298 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging.
+**Status**: v0.1.9 — 12 crates + vendored op-ai, 369 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem.
 
 ## 📋 Overview
 
@@ -50,9 +50,9 @@ fusion-design/
 │   ├── fd-canvas-core/         ← Canvas data model (PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument)
 │   ├── fd-ai-adapter/          ← op-ai → fusion-mlx adapter (SSE streaming / multimodal vision / 7 Skills)
 │   ├── fd-codegen/             ← HTML/React+Tailwind code export
-│   ├── fd-design-system/       ← Two built-in design specs + Token + Light/Dark themes
+│   ├── fd-design-system/       ← Three built-in design specs (Apple HIG / minimal dashboard / robot-sim) + Token + Light/Dark themes
 │   ├── fd-design-lint/         ← 13 lint rules + auto-fix (Token references / null cleanup / auto-naming)
-│   ├── fd-ecosystem/           ← Ecosystem integration (IPC + async file watching + template tag search + 4 built-in scene templates)
+│   ├── fd-ecosystem/           ← Ecosystem integration (IPC + async file watching + template tag search + 4 built-in scene templates + self-built MCP JSON-RPC server)
 │   ├── fd-asset/               ← Asset library management (categorization / tagging / annotation / color extraction / Token binding)
 │   ├── fd-host-desk/           ← Fusion-Desk WKWebView host bridge
 │   ├── fd-host-web/            ← WASM frontend rendering (WebShell + BridgeCommand)
@@ -97,8 +97,8 @@ cargo run -p fd-cli -- --help                                  # CLI available
 | fd-canvas-core | 60+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management, **安全护栏**, perf baseline |
 | fd-ai-adapter | 74+ | Mock HTTP, SSE streaming, health check, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析 |
 | fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
-| fd-design-system | 10+ | Token, Theme, Registry, CSS output |
-| fd-ecosystem | 16 | IPC, sync_to_code, template tag search, built-in scene templates, **文件大小护栏** |
+| fd-design-system | 25 | Token, Theme, Registry, CSS output, 3 built-in presets (incl. robot-sim) |
+| fd-ecosystem | 27 | IPC, sync_to_code, template tag search, built-in scene templates, self-built MCP server, **文件大小护栏** |
 | fd-asset | 19 | Asset CRUD, categorization/tagging/annotation, color extraction, Token binding |
 | fd-codegen / fd-host-web / fd-export / fd-host-desk | 4-10 each | Core functionality |
 | fd-cli | 7+ | CLI argument parsing, subcommand dispatch, **商用级错误报告** |

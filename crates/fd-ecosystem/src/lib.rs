@@ -1,7 +1,7 @@
 //! Fusion-Design 生态联动 — 对接 Fusion Code/Simulation/KB/CLI。
 //!
 //! 对应 PRD 模块 6「生态联动能力」。通过本地文件 IPC（约定目录下的
-//! JSON 消息文件）+ 未来 MCP 协议（op-mcp）打通全系生态。
+//! JSON 消息文件）+ 自建 MCP 协议层（JSON-RPC over stdio）打通全系生态。
 //!
 //! 【离线硬约束】所有联动走本地文件系统或 127.0.0.1，无公网调用。
 
@@ -528,6 +528,341 @@ pub enum WatchEventKind {
     Removed,
 }
 
+// ── 自建 MCP 协议层（替代缺失的 op-mcp）──
+//
+// PRD 模块 6：以 JSON-RPC 2.0 over stdio 暴露生态能力为 MCP 工具，
+// 供 Fusion Code / Agent / CLI 等本地调用方接入。100% 本地，无公网。
+//
+// 与现有文件 IPC（EcosystemLink）互补：文件 IPC 用于解耦的消息投递，
+// MCP 用于同步的工具调用（按 JSON-RPC 请求/响应）。
+
+/// JSON-RPC 2.0 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpRequest {
+    pub jsonrpc: String,
+    #[serde(default)]
+    pub id: serde_json::Value,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+/// JSON-RPC 2.0 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResponse {
+    pub jsonrpc: String,
+    pub id: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<McpError>,
+}
+
+/// JSON-RPC 错误对象。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpError {
+    pub code: i32,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+impl McpError {
+    pub fn parse_error() -> Self {
+        Self {
+            code: -32700,
+            message: "Parse error".into(),
+            data: None,
+        }
+    }
+
+    pub fn method_not_found(id: serde_json::Value) -> McpResponse {
+        McpResponse {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(Self {
+                code: -32601,
+                message: "Method not found".into(),
+                data: None,
+            }),
+        }
+    }
+
+    pub fn invalid_params(id: serde_json::Value, detail: String) -> McpResponse {
+        McpResponse {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(Self {
+                code: -32602,
+                message: "Invalid params".into(),
+                data: Some(serde_json::Value::String(detail)),
+            }),
+        }
+    }
+
+    pub fn internal(id: serde_json::Value, detail: String) -> McpResponse {
+        McpResponse {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(Self {
+                code: -32603,
+                message: "Internal error".into(),
+                data: Some(serde_json::Value::String(detail)),
+            }),
+        }
+    }
+}
+
+/// MCP 工具描述（用于 tools/list 响应）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// MCP 工具 trait：自建替身，每个工具一个实现。
+pub trait McpTool: Send + Sync {
+    fn info(&self) -> McpToolInfo;
+    fn invoke(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value>;
+}
+
+/// MCP 服务端：注册工具并按 JSON-RPC 行分派。
+pub struct McpServer {
+    server_name: String,
+    server_version: String,
+    tools: Vec<Box<dyn McpTool>>,
+}
+
+impl McpServer {
+    pub fn new(server_name: impl Into<String>, server_version: impl Into<String>) -> Self {
+        Self {
+            server_name: server_name.into(),
+            server_version: server_version.into(),
+            tools: vec![],
+        }
+    }
+
+    /// 注册一个工具。
+    pub fn register_tool(&mut self, tool: Box<dyn McpTool>) {
+        tracing::info!(tool = tool.info().name, "MCP 注册工具");
+        self.tools.push(tool);
+    }
+
+    /// 处理一行 JSON-RPC 文本，返回响应（解析失败返回 parse error）。
+    pub fn handle_line(&self, line: &str) -> Option<McpResponse> {
+        let req: McpRequest = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, line = %line, "MCP 请求解析失败");
+                return Some(McpResponse {
+                    jsonrpc: "2.0".into(),
+                    id: serde_json::Value::Null,
+                    result: None,
+                    error: Some(McpError::parse_error()),
+                });
+            }
+        };
+        Some(self.handle_request(&req))
+    }
+
+    /// 处理一个 JSON-RPC 请求对象。
+    pub fn handle_request(&self, req: &McpRequest) -> McpResponse {
+        let id = req.id.clone();
+        match req.method.as_str() {
+            "initialize" => Some(McpResponse {
+                jsonrpc: "2.0".into(),
+                id: id.clone(),
+                result: Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {
+                        "name": self.server_name,
+                        "version": self.server_version,
+                    },
+                    "capabilities": {
+                        "tools": {}
+                    }
+                })),
+                error: None,
+            }),
+            "tools/list" => Some(McpResponse {
+                jsonrpc: "2.0".into(),
+                id: id.clone(),
+                result: Some(serde_json::json!({
+                    "tools": self.tools.iter().map(|t| t.info()).collect::<Vec<_>>()
+                })),
+                error: None,
+            }),
+            "tools/call" => Some(self.handle_tools_call(id.clone(), req.params.as_ref())),
+            other => {
+                tracing::warn!(method = other, "MCP 未知方法");
+                Some(McpError::method_not_found(id.clone()))
+            }
+        }
+        .unwrap_or_else(|| McpError::internal(id, "无响应".into()))
+    }
+
+    fn handle_tools_call(
+        &self,
+        id: serde_json::Value,
+        params: Option<&serde_json::Value>,
+    ) -> McpResponse {
+        let params = match params {
+            Some(v) => v,
+            None => return McpError::invalid_params(id, "缺少 params".into()),
+        };
+        let name = match params.get("name").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => return McpError::invalid_params(id, "缺少 tool name".into()),
+        };
+        let args = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let tool = self.tools.iter().find(|t| t.info().name == name);
+        match tool {
+            None => McpError::invalid_params(id, format!("未知工具: {name}")),
+            Some(t) => match t.invoke(&args) {
+                Ok(value) => McpResponse {
+                    jsonrpc: "2.0".into(),
+                    id,
+                    result: Some(serde_json::json!({
+                        "content": [{ "type": "text", "text": value.to_string() }]
+                    })),
+                    error: None,
+                },
+                Err(e) => {
+                    tracing::warn!(tool = %name, error = %e, "MCP 工具调用失败");
+                    McpError::internal(id, e.to_string())
+                }
+            },
+        }
+    }
+}
+
+// ── 内置 MCP 工具（桥接 EcosystemLink 已有能力）──
+
+/// 工具：列出生态联动目标。
+pub struct ListTargetsTool;
+
+impl McpTool for ListTargetsTool {
+    fn info(&self) -> McpToolInfo {
+        McpToolInfo {
+            name: "list_targets".into(),
+            description: "列出可用的生态联动目标目录名".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+    fn invoke(&self, _params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "targets": ["fusion-code", "fusion-kb", "fusion-cli"]
+        }))
+    }
+}
+
+/// 工具：检索设计模板。
+pub struct SearchTemplatesTool {
+    link: EcosystemLink,
+}
+
+impl SearchTemplatesTool {
+    pub fn new(link: EcosystemLink) -> Self {
+        Self { link }
+    }
+}
+
+impl McpTool for SearchTemplatesTool {
+    fn info(&self) -> McpToolInfo {
+        McpToolInfo {
+            name: "search_templates".into(),
+            description: "按关键词检索 Fusion-KB 设计模板（匹配 name/tags/category）".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "检索关键词，空串返回全部" }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+    fn invoke(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        let results = self.link.search_templates(query)?;
+        Ok(serde_json::to_value(&results)?)
+    }
+}
+
+/// 工具：发送一条联动 IPC 消息。
+pub struct SendMessageTool {
+    link: EcosystemLink,
+}
+
+impl SendMessageTool {
+    pub fn new(link: EcosystemLink) -> Self {
+        Self { link }
+    }
+}
+
+impl McpTool for SendMessageTool {
+    fn info(&self) -> McpToolInfo {
+        McpToolInfo {
+            name: "send_message".into(),
+            description: "向指定生态目标发送一条联动 IPC 消息".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "enum": ["fusion-code", "fusion-kb", "fusion-cli"] },
+                    "action": { "type": "string" },
+                    "payload": {}
+                },
+                "required": ["target", "action"]
+            }),
+        }
+    }
+    fn invoke(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let target = params
+            .get("target")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("缺少 target"))?;
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("缺少 action"))?;
+        let payload = params
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let target_enum = match target {
+            "fusion-code" => EcosystemTarget::FusionCode,
+            "fusion-kb" => EcosystemTarget::FusionKB,
+            "fusion-cli" => EcosystemTarget::FusionCLI,
+            other => EcosystemTarget::Custom(other.into()),
+        };
+        let msg = LinkMessage {
+            target: target_enum,
+            action: action.into(),
+            payload,
+        };
+        let file = self.link.send(&msg)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "file": file.to_string_lossy()
+        }))
+    }
+}
+
+impl McpServer {
+    /// 注册全部内置工具（桥接给定 EcosystemLink）。
+    pub fn register_builtin_tools(&mut self, link: EcosystemLink) {
+        self.register_tool(Box::new(ListTargetsTool));
+        self.register_tool(Box::new(SearchTemplatesTool::new(link.clone())));
+        self.register_tool(Box::new(SendMessageTool::new(link)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +1077,121 @@ mod tests {
         // 空 tags 返回全部
         let results = link.search_templates_by_tags(&[]).unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    // ── MCP 协议层测试 ──
+
+    fn make_server(tmp: &tempfile::TempDir) -> McpServer {
+        let mut server = McpServer::new("fusion-design", "0.1.9");
+        server.register_builtin_tools(EcosystemLink::new(tmp.path()));
+        server
+    }
+
+    #[test]
+    fn mcp_initialize_returns_server_info() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let resp = server.handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#);
+        let resp = resp.unwrap();
+        assert_eq!(resp.id, serde_json::json!(1));
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["serverInfo"]["name"], "fusion-design");
+        assert_eq!(result["capabilities"]["tools"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn mcp_tools_list_contains_builtin_tools() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let resp = server.handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+        let resp = resp.unwrap();
+        let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"list_targets"));
+        assert!(names.contains(&"search_templates"));
+        assert!(names.contains(&"send_message"));
+    }
+
+    #[test]
+    fn mcp_call_unknown_method_returns_error() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let resp = server.handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#);
+        let resp = resp.unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32601);
+    }
+
+    #[test]
+    fn mcp_parse_error_on_bad_json() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let resp = server.handle_line("not json").unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32700);
+    }
+
+    #[test]
+    fn mcp_call_list_targets_returns_targets() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let req = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_targets","arguments":{}}}"#;
+        let resp = server.handle_line(req).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("fusion-code"));
+    }
+
+    #[test]
+    fn mcp_call_search_templates_returns_results() {
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let tmpl = DesignTemplate {
+            id: "login".into(),
+            name: "登录".into(),
+            tags: vec!["auth".into()],
+            category: "表单".into(),
+            document_json: "{}".into(),
+            created_at: 1000,
+        };
+        link.save_template(&tmpl).unwrap();
+        let mut server = McpServer::new("fd", "0.1.9");
+        server.register_builtin_tools(link);
+        let req = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_templates","arguments":{"query":"登录"}}}"#;
+        let resp = server.handle_line(req).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("login"));
+    }
+
+    #[test]
+    fn mcp_call_send_message_writes_ipc_file() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let req = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"send_message","arguments":{"target":"fusion-cli","action":"batch","payload":{"x":1}}}}"#;
+        let resp = server.handle_line(req).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("ok"));
+        // 验证 IPC 文件确实写入
+        let files = EcosystemLink::new(tmp.path())
+            .list(EcosystemTarget::FusionCLI)
+            .unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn mcp_call_unknown_tool_returns_invalid_params() {
+        let tmp = tempdir().unwrap();
+        let server = make_server(&tmp);
+        let req = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ghost","arguments":{}}}"#;
+        let resp = server.handle_line(req).unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
     }
 }
 
