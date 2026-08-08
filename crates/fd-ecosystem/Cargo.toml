@@ -25,7 +25,7 @@ tokio = { workspace = true }
 notify = { version = "7", features = ["macos_kqueue"] }
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-codegen = { path = "../fd-codegen" }
-# op-mcp = { workspace = true }  # subtree 激活后启用
+# op-mcp 未引入私有依赖；自建 MCP 协议层已在 lib.rs 实现（McpServer/McpTool）替代
 
 [dev-dependencies]
 tempfile = "3"
