@@ -77,10 +77,12 @@ jobs:
           # 检测 src/ 文件中行首的 panic!/unimplemented!/todo!/unreachable! 语句。
           # 测试模块内（mod tests）的 panic! 在 match 臂断言中形如 "=> panic!("，
           # 故排除含 "=>" 的行与 tests 路径，聚焦生产顶层语句。
+          # 注意：grep 无匹配返回非零，pipefail 下会触发 set -e 提前退出，
+          # 故用 || true 兜底，确保"零匹配"场景能正常走到 echo 与判断。
           strict=$(grep -rnE "^\s*(panic!|unimplemented!|todo!|unreachable!)\(" \
             crates/*/src/*.rs 2>/dev/null \
             | grep -vE "tests|=>" \
-            | wc -l | tr -d ' ')
+            | wc -l | tr -d ' ' || true)
           echo "生产代码顶层 panic 语句数: $strict"
           if [ "$strict" -ne 0 ]; then
             echo "::error::生产代码含顶层 panic/unimplemented/todo/unreachable 语句，违反商用零 panic 约束"
