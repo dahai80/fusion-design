@@ -398,9 +398,9 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
             let text = el.text.as_deref().unwrap_or("");
             let fs = el.font_size.unwrap_or(12.0);
             ops.push(printpdf::ops::Op::StartTextSection);
-            ops.push(printpdf::ops::Op::SetFontSizeBuiltinFont {
+            ops.push(printpdf::ops::Op::SetFont {
+                font: printpdf::ops::PdfFontHandle::Builtin(printpdf::BuiltinFont::Helvetica),
                 size: printpdf::Pt(fs),
-                font: printpdf::BuiltinFont::Helvetica,
             });
             ops.push(printpdf::ops::Op::SetTextCursor {
                 pos: printpdf::graphics::Point::new(
@@ -408,9 +408,8 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
                     printpdf::Mm(height_mm - el.y * 0.264583 - fs * 0.264583),
                 ),
             });
-            ops.push(printpdf::ops::Op::WriteTextBuiltinFont {
+            ops.push(printpdf::ops::Op::ShowText {
                 items: vec![printpdf::text::TextItem::Text(text.to_string())],
-                font: printpdf::BuiltinFont::Helvetica,
             });
             ops.push(printpdf::ops::Op::EndTextSection);
         }
