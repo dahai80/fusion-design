@@ -134,6 +134,11 @@ pub enum Command {
     CheckMlx {
         #[arg(long, default_value = "")]
         endpoint: String,
+        /// 指定推理探针所用模型 id；空则按 FUSION_MLX_MODEL 环境变量，
+        /// 再缺省回退到 /v1/models 列表首个（gateway 混列云端/本地模型，
+        /// 首个可能未加载，建议显式传本地 mlx 模型 id 以获真可用性判定）。
+        #[arg(long, default_value = "")]
+        model: String,
     },
     /// HTML → PenDocument JSON 转换
     ParseHtml {
@@ -637,11 +642,45 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("前端目录校验通过");
             Ok(())
         }
-        Command::CheckMlx { endpoint } => {
+        Command::CheckMlx { endpoint, model } => {
             let resolved = fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?;
-            fd_ai_adapter::FusionMlxClient::with_endpoint(&resolved)?;
-            println!("fusion-mlx endpoint 校验通过: {resolved}");
-            Ok(())
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&resolved)?;
+            println!("endpoint: {resolved}");
+            let status = client.health_check().await?;
+            let json = serde_json::to_string_pretty(&status)?;
+            println!("{json}");
+            // 鉴权或不可达直接失败——无须再探真推理。
+            if !matches!(status.auth_ok, Some(true)) || !status.available {
+                match status.status.as_deref() {
+                    Some(s) => anyhow::bail!("❌ fusion-mlx 不可用：{s}"),
+                    None => anyhow::bail!("❌ fusion-mlx 不可用"),
+                }
+            }
+            // 通过 /v1/models 列表后，仍可能「假绿」：gateway 列了模型名但 MLX 未加载。
+            // 用真推理探针（1 token）做最终判定。模型解析：--model > FUSION_MLX_MODEL > 列表首个。
+            let model = match model.trim() {
+                "" => match std::env::var("FUSION_MLX_MODEL") {
+                    Ok(m) if !m.trim().is_empty() => m.trim().to_string(),
+                    _ => status
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string()),
+                },
+                other => other.to_string(),
+            };
+            println!("\n[推理探针] model = {model}");
+            let probe = client.check_generate(&model).await?;
+            let pjson = serde_json::to_string_pretty(&probe)?;
+            println!("{pjson}");
+            if probe.available {
+                println!("✅ fusion-mlx 服务可用（推理探针通过）");
+                Ok(())
+            } else {
+                match probe.status.as_deref() {
+                    Some(s) => anyhow::bail!("❌ fusion-mlx 不可用：{s}"),
+                    None => anyhow::bail!("❌ fusion-mlx 推理探针失败"),
+                }
+            }
         }
         Command::ParseHtml { input, page } => {
             let html = match input {

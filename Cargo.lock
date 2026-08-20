@@ -729,7 +729,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -772,7 +772,7 @@ checksum = "caf1079563223d5d59d83c85886a56e586cfd5c1a26292e971a0fa266531ac5a"
 
 [[package]]
 name = "fd-ai-adapter"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "fd-asset"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "fd-canvas-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "serde",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "fd-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "fd-codegen"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "fd-design-lint"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "fd-design-system"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "fd-ecosystem"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "fd-export"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "fd-host-desk"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "fd-host-web"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64",
  "fd-canvas-core",
@@ -1208,9 +1208,9 @@ checksum = "36119f3a540b086b4e436bb2b588cf98a68863470e0e880f4d0842f112a3183a"
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "9f877e75f39e9827ec50a572dd592684ac28c029578726c85f1b2aa6ab807449"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2714,7 +2714,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3185,7 +3185,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3822,7 +3822,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

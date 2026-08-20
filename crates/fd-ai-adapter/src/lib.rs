@@ -409,11 +409,25 @@ pub async fn chat_stream(
 pub struct HealthStatus {
     pub available: bool,
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<String>,
+    /// 鉴权是否通过。None=未鉴权或无法判定；Some(true)=已通过；
+    /// Some(false)=401/403 被拒（FUSION_MLX_API_KEY 缺失或错误）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_ok: Option<bool>,
+    /// /v1/models 返回的模型 id 列表。空列表 = gateway 挂了模型名但 MLX 未加载，
+    /// generate 仍会 502——这是「假绿」的根因。
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub models: Vec<String>,
+    /// 人读状态摘要：可达/鉴权失败/无模型可用/可用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 impl FusionMlxClient {
     /// 探测 fusion-mlx 健康状态（超时 3s）。
+    /// 区分三种失败：不可达 / 鉴权拒绝(401/403) / 可达但无模型——
+    /// 后两者过去都塌缩成 available:false，掩盖了「设了 key 却无效」「gateway 假绿」。
     pub async fn health_check(&self) -> anyhow::Result<HealthStatus> {
         let url = format!("{}/v1/models", self.endpoint);
         let resp = self
@@ -425,23 +439,68 @@ impl FusionMlxClient {
             .send()
             .await;
         match resp {
-            Ok(r) if r.status().is_success() => {
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                let model = body["data"][0]["id"].as_str().map(String::from);
-                tracing::info!(available = true, model = ?model, "health_check: MLX 可用");
-                Ok(HealthStatus {
-                    available: true,
-                    model,
-                    gpu: None,
-                })
-            }
             Ok(r) => {
-                tracing::warn!(status = %r.status(), "health_check: MLX 返回非 200");
-                Ok(HealthStatus {
-                    available: false,
-                    model: None,
-                    gpu: None,
-                })
+                let status_code = r.status();
+                if status_code.is_success() {
+                    let body: serde_json::Value = r.json().await.unwrap_or_default();
+                    let models: Vec<String> = body["data"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| m["id"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let model = models.first().cloned();
+                    let auth_ok = Some(true);
+                    let available = !models.is_empty();
+                    let status = if available {
+                        format!(
+                            "可用（{} 个模型，首个 {}）",
+                            models.len(),
+                            model.as_deref().unwrap_or("?")
+                        )
+                    } else {
+                        String::from("可达但无模型——gateway 列表为空或 MLX 未加载，generate 将 502")
+                    };
+                    if available {
+                        tracing::info!(available = true, model = ?model, n = models.len(), "health_check: MLX 可用");
+                    } else {
+                        tracing::warn!(
+                            "health_check: /v1/models 返回 200 但 data 为空，疑似 gateway 假绿"
+                        );
+                    }
+                    Ok(HealthStatus {
+                        available,
+                        model,
+                        gpu: None,
+                        auth_ok,
+                        models,
+                        status: Some(status),
+                    })
+                } else if status_code.as_u16() == 401 || status_code.as_u16() == 403 {
+                    tracing::warn!(status = %status_code, "health_check: 鉴权被拒，检查 FUSION_MLX_API_KEY");
+                    Ok(HealthStatus {
+                        available: false,
+                        model: None,
+                        gpu: None,
+                        auth_ok: Some(false),
+                        models: vec![],
+                        status: Some(format!(
+                            "鉴权失败（{status_code}）：FUSION_MLX_API_KEY 缺失或无效"
+                        )),
+                    })
+                } else {
+                    tracing::warn!(status = %status_code, "health_check: MLX 返回非 2xx");
+                    Ok(HealthStatus {
+                        available: false,
+                        model: None,
+                        gpu: None,
+                        auth_ok: None,
+                        models: vec![],
+                        status: Some(format!("MLX 返回 {status_code}")),
+                    })
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "health_check: MLX 不可达");
@@ -449,6 +508,9 @@ impl FusionMlxClient {
                     available: false,
                     model: None,
                     gpu: None,
+                    auth_ok: None,
+                    models: vec![],
+                    status: Some(format!("不可达：{e}")),
                 })
             }
         }
@@ -459,6 +521,89 @@ impl FusionMlxClient {
         let this = self.clone();
         BLOCKING_RT.block_on(async move { this.health_check().await })
     }
+
+    /// 真推理探针：发 1-token chat 请求，判定 generate 路径是否真能出活。
+    /// gateway /v1/models 与 /health、/readyz 均会「假绿」（列了模型名但 MLX 未加载），
+    /// 唯一权威可用性信号是真实 chat 调用——502/503 = 模型未加载，200 = 真可用。
+    pub async fn check_generate(&self, model: &str) -> anyhow::Result<GenerateProbeStatus> {
+        let payload = MlxChatPayload {
+            model,
+            messages: vec![MlxMessage {
+                role: "user",
+                content: "ping",
+            }],
+            max_tokens: 1,
+            temperature: None,
+        };
+        let url = format!("{}/v1/chat/completions", self.endpoint);
+        let resp = self
+            .authed(self.http.post(&url).json(&payload))
+            .send()
+            .await;
+        match resp {
+            Ok(r) => {
+                let code = r.status().as_u16();
+                if r.status().is_success() {
+                    tracing::info!(model, "check_generate: 推理探针通过");
+                    Ok(GenerateProbeStatus {
+                        model_loaded: true,
+                        available: true,
+                        status: Some(format!("推理探针通过（模型 {model} 已加载）")),
+                        http_code: Some(code),
+                    })
+                } else if code == 502 || code == 503 {
+                    let body: serde_json::Value = r.json().await.unwrap_or_default();
+                    let msg = body["error"]["message"]
+                        .as_str()
+                        .unwrap_or("无错误体")
+                        .to_string();
+                    tracing::warn!(code, msg, "check_generate: 模型未加载（502/503）");
+                    Ok(GenerateProbeStatus {
+                        model_loaded: false,
+                        available: false,
+                        status: Some(format!(
+                            "模型未加载（{code} {msg}）：gateway 列了模型名但 MLX 未加载，generate 失败"
+                        )),
+                        http_code: Some(code),
+                    })
+                } else if code == 401 || code == 403 {
+                    Ok(GenerateProbeStatus {
+                        model_loaded: false,
+                        available: false,
+                        status: Some(format!("鉴权失败（{code}）：FUSION_MLX_API_KEY 无效")),
+                        http_code: Some(code),
+                    })
+                } else {
+                    Ok(GenerateProbeStatus {
+                        model_loaded: false,
+                        available: false,
+                        status: Some(format!("generate 返回 {code}")),
+                        http_code: Some(code),
+                    })
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "check_generate: 请求失败");
+                Ok(GenerateProbeStatus {
+                    model_loaded: false,
+                    available: false,
+                    status: Some(format!("generate 请求失败：{e}")),
+                    http_code: None,
+                })
+            }
+        }
+    }
+}
+
+/// 真推理探针结果。available = generate 路径真能出活。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateProbeStatus {
+    pub model_loaded: bool,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_code: Option<u16>,
 }
 
 // ── 多模态请求（截图/草图 → UI）──
@@ -3005,6 +3150,155 @@ mod mlx_integration {
         assert!(
             raw.to_lowercase().contains("x-fusion-route: fusion-design"),
             "缺少 X-Fusion-Route 头：{raw}"
+        );
+    }
+
+    /// 精确 status 的 mock server（spawn_mock_server 把非 200 硬编码成 500，
+    /// 这里按真实 status 行返回，用于 401/403 鉴权路径测试）。
+    async fn spawn_status_server(status: u16, body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reason = match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            502 => "Bad Gateway",
+            _ => "ERR",
+        };
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// 401 时 available=false 且 auth_ok=Some(false)——修复「假绿」核心场景。
+    #[tokio::test]
+    async fn health_check_401_marks_auth_failure() {
+        let url = spawn_status_server(401, r#"{"error":"unauthorized"}"#.to_string()).await;
+        let client = mock_client(&url);
+        let s = client.health_check().await.unwrap();
+        assert!(!s.available, "401 不应 available");
+        assert_eq!(s.auth_ok, Some(false), "401 必须标 auth_ok=false");
+        assert!(s.models.is_empty(), "401 不应列模型");
+        assert!(
+            s.status.as_deref().unwrap().contains("鉴权"),
+            "status 文案须点出鉴权失败：{:?}",
+            s.status
+        );
+    }
+
+    /// 200 但 data 为空——gateway 假绿：available=false，auth_ok=Some(true)。
+    #[tokio::test]
+    async fn health_check_empty_models_not_available() {
+        let url = spawn_status_server(200, r#"{"data":[]}"#.to_string()).await;
+        let client = mock_client(&url);
+        let s = client.health_check().await.unwrap();
+        assert!(!s.available, "空 data 不应 available");
+        assert_eq!(s.auth_ok, Some(true), "200 即鉴权通过");
+        assert!(s.model.is_none(), "无首个模型");
+        assert!(
+            s.status.as_deref().unwrap().contains("无模型"),
+            "status 须点出无模型：{:?}",
+            s.status
+        );
+    }
+
+    /// 200 且有模型——正常路径：available=true，auth_ok=Some(true)，model 有值。
+    #[tokio::test]
+    async fn health_check_with_models_available() {
+        let body = r#"{"data":[{"id":"qwen3-coder"},{"id":"qwen2.5-vl"}]}"#.to_string();
+        let url = spawn_status_server(200, body).await;
+        let client = mock_client(&url);
+        let s = client.health_check().await.unwrap();
+        assert!(s.available, "有模型应 available");
+        assert_eq!(s.auth_ok, Some(true));
+        assert_eq!(s.model.as_deref(), Some("qwen3-coder"));
+        assert_eq!(s.models.len(), 2, "应列全部模型 id");
+        assert!(
+            s.status.as_deref().unwrap().contains("可用"),
+            "status 须标可用：{:?}",
+            s.status
+        );
+    }
+
+    /// check_generate 502——gateway 假绿终局：列了模型但 MLX 未加载，available=false。
+    #[tokio::test]
+    async fn check_generate_502_marks_model_not_loaded() {
+        let url = spawn_status_server(
+            502,
+            r#"{"error":{"message":"Chat failed","type":"server_error"}}"#.to_string(),
+        )
+        .await;
+        let client = mock_client(&url);
+        let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
+        assert!(!p.available, "502 不应 available");
+        assert!(!p.model_loaded, "502 不应 model_loaded");
+        assert_eq!(p.http_code, Some(502));
+        assert!(
+            p.status.as_deref().unwrap().contains("未加载"),
+            "须点出未加载：{:?}",
+            p.status
+        );
+    }
+
+    /// check_generate 503——MLX 显式「model loading」，available=false。
+    #[tokio::test]
+    async fn check_generate_503_marks_model_loading() {
+        let url = spawn_status_server(
+            503,
+            r#"{"error":{"message":"model loading","type":"api_error"}}"#.to_string(),
+        )
+        .await;
+        let client = mock_client(&url);
+        let p = client.check_generate("m").await.unwrap();
+        assert!(!p.available);
+        assert!(!p.model_loaded);
+        assert_eq!(p.http_code, Some(503));
+    }
+
+    /// check_generate 200——真推理通过：available=true，model_loaded=true。
+    #[tokio::test]
+    async fn check_generate_200_marks_available() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
+        let url = spawn_status_server(200, body).await;
+        let client = mock_client(&url);
+        let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
+        assert!(p.available, "200 应 available");
+        assert!(p.model_loaded, "200 应 model_loaded");
+        assert_eq!(p.http_code, Some(200));
+        assert!(
+            p.status.as_deref().unwrap().contains("通过"),
+            "须标通过：{:?}",
+            p.status
+        );
+    }
+
+    /// check_generate 401——鉴权失败路径。
+    #[tokio::test]
+    async fn check_generate_401_marks_auth_failure() {
+        let url =
+            spawn_status_server(401, r#"{"error":{"message":"unauthorized"}}"#.to_string()).await;
+        let client = mock_client(&url);
+        let p = client.check_generate("m").await.unwrap();
+        assert!(!p.available);
+        assert_eq!(p.http_code, Some(401));
+        assert!(
+            p.status.as_deref().unwrap().contains("鉴权"),
+            "须点鉴权：{:?}",
+            p.status
         );
     }
 
