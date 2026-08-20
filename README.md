@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.9 — 12 crates + vendored op-ai, 369 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem.
+**Status**: v0.1.9 — 12 crates + vendored op-ai, 376 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem.
 
 ## 📋 Overview
 
@@ -79,7 +79,7 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # Full workspace compiles
-cargo test --workspace                                         # 298 tests pass (+1 ignored perf baseline)
+cargo test --workspace                                         # 376 tests pass (+1 ignored perf baseline)
 cargo test --release -- --ignored perf_baseline                # 1000-node perf baseline (<500ms each)
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM build succeeds
 cargo run -p fd-cli -- --help                                  # CLI available
@@ -88,6 +88,8 @@ cargo run -p fd-cli -- --help                                  # CLI available
 
 **Endpoint 覆盖**：CLI `--endpoint` 默认经 `FUSION_MLX_BASE_URL` 解析（优先级：显式 `--endpoint` > env > 默认 gateway 11432），可切回直连 fusion-mlx 11434。鉴权 key 经 `FUSION_MLX_API_KEY`。
 
+**服务可用性校验**：`fusion-design check-mlx` 做三段真探测——endpoint 解析 → `/v1/models` 鉴权 + 模型列表 → 1-token 真推理探针。gateway 的 `/v1/models` 会「假绿」（列了云端/本地模型名但 MLX 未加载，generate 实返 502），故最终判定用真 chat 调用。探针模型解析：`--model` > `FUSION_MLX_MODEL` > 列表首个（建议显式传本地 mlx 模型 id）。不可用时以非零退出码 + 诊断文案 fail visibly。
+
 **安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
 
 **CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
@@ -95,7 +97,7 @@ cargo run -p fd-cli -- --help                                  # CLI available
 | Crate | Tests | Coverage |
 |-------|-------|----------|
 | fd-canvas-core | 60+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management, **安全护栏**, perf baseline |
-| fd-ai-adapter | 74+ | Mock HTTP, SSE streaming, health check, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析 |
+| fd-ai-adapter | 81 | Mock HTTP, SSE streaming, health check, **深度可用性探针（鉴权/模型/真推理）**, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析 |
 | fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
 | fd-design-system | 25 | Token, Theme, Registry, CSS output, 3 built-in presets (incl. robot-sim) |
 | fd-ecosystem | 27 | IPC, sync_to_code, template tag search, built-in scene templates, self-built MCP server, **文件大小护栏** |
@@ -109,7 +111,9 @@ cargo run -p fd-cli -- --help                                  # CLI available
 ./Scripts/build.sh    # 产出 dist/fusion-design-<version>-aarch64-apple-darwin.tar.gz
 ```
 
-含 `fusion-design` CLI 二进制（release strip+thin LTO）+ `fd_host_web.wasm`（WKWebView 前端）+ INSTALL.md。100% 离线，仅 HTTP 至 `127.0.0.1`。
+含 `fusion-design` CLI 二进制（release strip+thin LTO）+ `fd_host_web_bg.wasm` + `fd_host_web.js`（WKWebView 前端，wasm-bindgen `--target web` 产物）+ INSTALL.md。100% 离线，仅 HTTP 至 `127.0.0.1`。
+
+> **集成说明**：fusion-studio 的 `Scripts/build.sh` 从本仓 `target/wasm32-unknown-unknown/{release,debug}/` 拉取 `fd_host_web_bg.wasm` + `fd_host_web.js`。`build.sh` 已补 wasm-bindgen 后处理步骤，确保 bindgen 产物落地该目录——缺此步则 studio 同步脚本找不到 `_bg.wasm`，回退陈旧内置件。
 
 ## 📄 License
 
