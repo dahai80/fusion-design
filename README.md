@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.9 — 12 crates + vendored op-ai, 376 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem.
+**Status**: v0.1.10 — 12 crates + vendored op-ai, 376 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem.
 
 ## 📋 Overview
 
