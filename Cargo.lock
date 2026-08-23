@@ -772,7 +772,7 @@ checksum = "caf1079563223d5d59d83c85886a56e586cfd5c1a26292e971a0fa266531ac5a"
 
 [[package]]
 name = "fd-ai-adapter"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "fd-asset"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "fd-canvas-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "serde",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "fd-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "fd-codegen"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "fd-design-lint"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "fd-design-system"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "fd-ecosystem"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "fd-export"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "fd-host-desk"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "fd-host-web"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64",
  "fd-canvas-core",

@@ -66,6 +66,33 @@ pub enum Command {
         #[arg(long)]
         stream: bool,
     },
+    /// 机器可读流式 chat：供 fusion-studio subprocess 调用，取代直连 MLX。
+    /// 鉴权 / X-Fusion-Route header / endpoint 解析复用 fd-ai-adapter，调用方不重实现。
+    Chat {
+        #[arg(long, default_value = "Qwen3.5-9B-4bit")]
+        model: String,
+        #[arg(long, default_value = "")]
+        endpoint: String,
+        /// 内联 system prompt（与 --system-prompt-file 互斥，后者优先）
+        #[arg(long, default_value = "")]
+        system_prompt: String,
+        #[arg(long)]
+        system_prompt_file: Option<PathBuf>,
+        /// JSON 多轮历史：[{"role":"user|assistant|system","content":".."}]
+        #[arg(long)]
+        messages_file: Option<PathBuf>,
+        /// RAG 上下文，注入到 system prompt 尾部
+        #[arg(long)]
+        rag_context_file: Option<PathBuf>,
+        #[arg(long, default_value = "4096")]
+        max_tokens: u32,
+        /// 流式 NDJSON 输出（每行一帧 delta/done/error），默认开启
+        #[arg(long, default_value = "true")]
+        stream: bool,
+        /// 输出 NDJSON 成帧（当前唯一格式，保留参数供未来纯文本模式）
+        #[arg(long, default_value = "true")]
+        json: bool,
+    },
     /// 图生 UI：草图/参考图 → PenDocument JSON
     ImageToUi {
         #[arg(long)]
@@ -525,6 +552,102 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                     None => println!("{json}"),
                 }
+            }
+            Ok(())
+        }
+        Command::Chat {
+            model,
+            endpoint,
+            system_prompt,
+            system_prompt_file,
+            messages_file,
+            rag_context_file,
+            max_tokens,
+            stream,
+            json,
+        } => {
+            use fd_ai_adapter::{MlxChatMessage, MlxStreamDelta};
+            use futures::StreamExt;
+
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
+                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            )?;
+
+            // system prompt：--system-prompt-file 优先于内联 --system-prompt
+            let sys = match system_prompt_file {
+                Some(p) => std::fs::read_to_string(&p)?,
+                None => system_prompt,
+            };
+            // RAG 上下文注入 system prompt 尾部
+            let sys = match rag_context_file {
+                Some(p) => {
+                    let rag = std::fs::read_to_string(&p)?;
+                    if sys.is_empty() {
+                        rag
+                    } else {
+                        format!("{sys}\n\n--- 以下为参考上下文 ---\n{rag}")
+                    }
+                }
+                None => sys,
+            };
+
+            // messages：--messages-file 多轮历史（JSON 数组），缺省则空
+            let mut messages: Vec<MlxChatMessage> = match messages_file {
+                Some(p) => {
+                    let raw = std::fs::read_to_string(&p)?;
+                    if raw.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        serde_json::from_str::<Vec<MlxChatMessage>>(&raw)?
+                    }
+                }
+                None => Vec::new(),
+            };
+            // 前置 system 消息（若给定）
+            if !sys.is_empty() {
+                messages.insert(
+                    0,
+                    MlxChatMessage {
+                        role: "system".into(),
+                        content: sys,
+                    },
+                );
+            }
+            if messages.is_empty() {
+                anyhow::bail!("chat: 无 messages（--messages-file 缺失或空）且无 system prompt");
+            }
+            tracing::info!(model = %model, count = messages.len(), "chat: 流式推理开始");
+
+            // NDJSON 成帧输出：delta / done / error
+            if stream && json {
+                let s =
+                    fd_ai_adapter::chat_stream_messages(client, model, messages, max_tokens).await;
+                futures::pin_mut!(s);
+                while let Some(item) = s.next().await {
+                    match item {
+                        Ok(MlxStreamDelta { token, finished }) => {
+                            if finished {
+                                println!(
+                                    "{}",
+                                    serde_json::json!({"type":"done","finish_reason":"stop"})
+                                );
+                                break;
+                            } else if !token.is_empty() {
+                                println!("{}", serde_json::json!({"type":"delta","token":token}));
+                            }
+                        }
+                        Err(e) => {
+                            println!(
+                                "{}",
+                                serde_json::json!({"type":"error","message":e.to_string()})
+                            );
+                            tracing::error!(error = %e, "chat: 流式错误");
+                            break;
+                        }
+                    }
+                }
+            } else {
+                anyhow::bail!("chat: 当前仅支持 --stream --json NDJSON 输出");
             }
             Ok(())
         }
@@ -994,6 +1117,35 @@ mod tests {
                 assert_eq!(page, "Home");
             }
             _ => panic!("应为 Generate"),
+        }
+    }
+
+    #[test]
+    fn parse_chat_defaults() {
+        let cli = Cli::parse_from([
+            "fusion-design",
+            "chat",
+            "--model",
+            "mlx-community--Qwen3.5-4B-4bit",
+            "--messages-file",
+            "/tmp/m.json",
+        ]);
+        match cli.command {
+            Command::Chat {
+                model,
+                messages_file,
+                max_tokens,
+                stream,
+                json,
+                ..
+            } => {
+                assert_eq!(model, "mlx-community--Qwen3.5-4B-4bit");
+                assert_eq!(messages_file, Some(PathBuf::from("/tmp/m.json")));
+                assert_eq!(max_tokens, 4096);
+                assert!(stream, "stream 默认 true");
+                assert!(json, "json 默认 true");
+            }
+            _ => panic!("应为 Chat"),
         }
     }
 }

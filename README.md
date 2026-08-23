@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.10 — 12 crates + vendored op-ai, 376 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem.
+**Status**: v0.1.11 — 12 crates + vendored op-ai, 378 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem. 新增 `chat` 子命令（机器可读流式 NDJSON，供 fusion-studio subprocess 取代直连 MLX，issue #17）+ 修复 chat_stream_messages EOF 尾帧丢失（issue #18）。
 
 ## 📋 Overview
 
@@ -35,7 +35,7 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 6. **Prototype interaction & handoff** — PNG/SVG/PDF/HTML export, batch export
 7. **Ecosystem integration** — Simulation / Desk / KB / CLI full integration, async file watching, template tag search
 8. **Undo/Redo + Diff** — snapshot stack (50 levels) + node-level Diff/Patch
-9. **Full-featured CLI** — generate / export / export-batch / lint --fix / undo / redo / health / diff / theme
+9. **Full-featured CLI** — generate / export / export-batch / lint --fix / undo / redo / health / diff / theme / chat（机器可读流式 NDJSON，供 fusion-studio subprocess 取代直连 MLX，issue #17）
 10. **Asset library management** — asset categorization/tagging/annotation/color extraction/design system Token binding
 11. **Design spec document generation** — AI auto-generates interaction specs / component specs / page architecture docs (SpecDocSkill)
 12. **Page flow batch generation** — AI generates multi-page layouts from flow descriptions with unified style (PageFlowSkill)
