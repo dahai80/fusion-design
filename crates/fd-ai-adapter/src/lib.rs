@@ -45,6 +45,14 @@ struct MlxMessage<'a> {
     content: &'a str,
 }
 
+/// 公开对话消息：role + content，供调用方注入多轮历史。
+/// role 透传到 OpenAI 兼容 API（system/user/assistant）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MlxChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
 /// fusion-mlx chat 响应体（OpenAI 兼容形状，裁剪）。
 #[derive(Debug, Deserialize)]
 struct MlxChatResponse {
@@ -296,8 +304,7 @@ pub struct MlxStreamDelta {
 
 /// 流式 chat：返回 SSE token 流。
 ///
-/// 请求体附加 `stream: true`，解析 `data: {...}` SSE 行，
-/// 每行提取 `choices[0].delta.content` 推送给调用方。
+/// 单轮便捷封装：system + 单条 user，多轮历史请用 chat_stream_messages。
 pub async fn chat_stream(
     client: FusionMlxClient,
     model: String,
@@ -305,12 +312,31 @@ pub async fn chat_stream(
     user_message: String,
     max_tokens: u32,
 ) -> impl futures::Stream<Item = anyhow::Result<MlxStreamDelta>> {
+    let messages = vec![
+        MlxChatMessage {
+            role: "system".into(),
+            content: system_prompt,
+        },
+        MlxChatMessage {
+            role: "user".into(),
+            content: user_message,
+        },
+    ];
+    chat_stream_messages(client, model, messages, max_tokens).await
+}
+
+/// 多轮流式 chat：messages 由调用方构造（system + 多轮 user/assistant 历史）。
+/// 鉴权 / X-Fusion-Route header / endpoint 解析与 chat_stream 一致，
+/// 让 CLI / 上游（如 fusion-studio subprocess）复用同一 MLX 入口，不重实现。
+pub async fn chat_stream_messages(
+    client: FusionMlxClient,
+    model: String,
+    messages: Vec<MlxChatMessage>,
+    max_tokens: u32,
+) -> impl futures::Stream<Item = anyhow::Result<MlxStreamDelta>> {
     let payload = serde_json::json!({
         "model": model,
-        "messages": [
-            { "role": "system", "content": system_prompt },
-            { "role": "user", "content": user_message },
-        ],
+        "messages": messages,
         "max_tokens": max_tokens,
         "stream": true,
     });
@@ -351,7 +377,7 @@ pub async fn chat_stream(
                 match stream.next().await {
                     Some(Ok(bytes)) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        while let Some(line_end) = buffer.find('\n') {
+                        while let Some(line_end) = buffer.find("\n") {
                             let line = buffer[..line_end].trim().to_string();
                             buffer = buffer[line_end + 1..].to_string();
                             if let Some(data) = line.strip_prefix("data: ") {
@@ -387,13 +413,74 @@ pub async fn chat_stream(
                         return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer)));
                     }
                     None => {
-                        return Some((
-                            Ok(MlxStreamDelta {
-                                token: String::new(),
-                                finished: true,
-                            }),
-                            (stream, buffer),
-                        ));
+                        // EOF：先排空 buffer 里残留的成行数据，再终止流。
+                        // 上游可能没在最后一帧后补换行，或最后一个 chunk
+                        // 还停在 buffer 里没被 while 循环处理 — 直接 return None
+                        // 会丢尾部 delta（#18）。
+                        while let Some(line_end) = buffer.find("\n") {
+                            let line = buffer[..line_end].trim().to_string();
+                            buffer = buffer[line_end + 1..].to_string();
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return Some((
+                                        Ok(MlxStreamDelta {
+                                            token: String::new(),
+                                            finished: true,
+                                        }),
+                                        (stream, buffer),
+                                    ));
+                                }
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                                {
+                                    let content = parsed["choices"][0]["delta"]["content"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !content.is_empty() {
+                                        return Some((
+                                            Ok(MlxStreamDelta {
+                                                token: content,
+                                                finished: false,
+                                            }),
+                                            (stream, buffer),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        // 无换行的尾部残行（上游没补换行就关连接）：尝试按整行解析。
+                        let tail = buffer.trim().to_string();
+                        if !tail.is_empty() {
+                            buffer = String::new();
+                            if let Some(data) = tail.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return Some((
+                                        Ok(MlxStreamDelta {
+                                            token: String::new(),
+                                            finished: true,
+                                        }),
+                                        (stream, buffer),
+                                    ));
+                                }
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                                {
+                                    let content = parsed["choices"][0]["delta"]["content"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !content.is_empty() {
+                                        return Some((
+                                            Ok(MlxStreamDelta {
+                                                token: content,
+                                                finished: false,
+                                            }),
+                                            (stream, buffer),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        return None;
                     }
                 }
             }
@@ -2932,9 +3019,78 @@ mod mlx_integration {
     fn mock_client(endpoint: &str) -> FusionMlxClient {
         FusionMlxClient::with_endpoint(endpoint).unwrap()
     }
+    /// SSE mock server: emit each frame as a "data: <frame>" line, then a final "data: [DONE]".
+    async fn spawn_sse_server(frames: Vec<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let mut resp = String::new();
+                resp.push_str("HTTP/1.1 200 OK");
+                resp.push_str("\r\n");
+                resp.push_str("Content-Type: text/event-stream");
+                resp.push_str("Connection: close");
+                resp.push_str("\r\n");
+                resp.push_str("\r\n");
+                for frame in &frames {
+                    resp.push_str("data: ");
+                    resp.push_str(frame);
+                    resp.push_str("\r\n");
+                    resp.push_str("\r\n");
+                }
+                resp.push_str("data: [DONE]");
+                resp.push_str("\r\n");
+                resp.push_str("\r\n");
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
 
     /// 写一个真实可读的占位 PNG 到唯一临时路径，保证测试不依赖外部 /tmp/fd_sketch.png。
     /// encode_image_base64 仅 base64 编码文件字节，不校验图像格式，故最小 PNG 字节即可。
+    /// SSE mock server (early EOF): emit frames then close the connection
+    /// WITHOUT sending "data: [DONE]". Simulates upstream dropping mid-stream
+    /// so the EOF branch must drain buffered deltas and terminate, not spin.
+    async fn spawn_sse_server_early_eof(frames: Vec<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 200 OK");
+            resp.push_str("\r\n");
+            resp.push_str("Content-Type: text/event-stream");
+            resp.push_str("Connection: close");
+            resp.push_str("\r\n");
+            resp.push_str("\r\n");
+            for frame in &frames {
+                resp.push_str("data: ");
+                resp.push_str(frame);
+                resp.push_str("\r\n");
+                resp.push_str("\r\n");
+            }
+            // no [DONE], just close
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        format!("http://{}", addr)
+    }
+
     fn write_fixture_png() -> String {
         // 67 字节最小合法 PNG（1x1 灰度）。
         const MIN_PNG: &[u8] = &[
@@ -3428,6 +3584,68 @@ mod mlx_integration {
         let sketch = write_fixture_png();
         let result = skills.image_to_ui_async(&sketch, "测试", "Home").await;
         assert!(result.is_err(), "HTTP 5xx 应向上传播而非静默成功");
+    }
+    #[tokio::test]
+    async fn chat_stream_messages_emits_deltas_and_finishes() {
+        let d1 = String::from(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#);
+        let d2 = String::from(r#"{"choices":[{"delta":{"content":"lo"}}]}"#);
+        let url = spawn_sse_server(vec![d1, d2]).await;
+        let client = mock_client(&url);
+        let messages = vec![MlxChatMessage {
+            role: String::from("user"),
+            content: String::from("hi"),
+        }];
+        let mut stream = chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
+        use futures::StreamExt;
+        let mut tokens = String::new();
+        let mut saw_done = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(delta) => {
+                    if delta.finished {
+                        saw_done = true;
+                    }
+                    tokens.push_str(&delta.token);
+                }
+                Err(e) => panic!("stream error: {e}"),
+            }
+        }
+        assert_eq!(tokens, "Hello", "two deltas should join to Hello");
+        assert!(saw_done, "stream should emit finished marker");
+    }
+
+    /// 回归 #18：上游提前 EOF（连接关在 [DONE] 之前）。
+    /// 旧 None 分支返回不推进状态的 Some(finished) → 死循环；
+    /// 半成品 return None 直接丢 buffer → 丢尾部 delta。
+    /// 修复后：已发出的 delta 不丢，流正常终止，不死循环。
+    #[tokio::test]
+    async fn chat_stream_messages_early_eof_drains_and_terminates() {
+        let d1 = String::from(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#);
+        let d2 = String::from(r#"{"choices":[{"delta":{"content":"lo"}}]}"#);
+        // 只发 d1+d2，不补 [DONE]，直接关连接 = 提前 EOF
+        let url = spawn_sse_server_early_eof(vec![d1, d2]).await;
+        let client = mock_client(&url);
+        let messages = vec![MlxChatMessage {
+            role: String::from("user"),
+            content: String::from("hi"),
+        }];
+        let mut stream = chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
+        use futures::StreamExt;
+        let mut tokens = String::new();
+        // 带超时兜底：若死循环，3 秒后超时失败（而非挂死 CI）
+        let drain = async {
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(delta) => tokens.push_str(&delta.token),
+                    Err(e) => panic!("stream error: {e}"),
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), drain)
+            .await
+            .expect("流应在 3 秒内终止，不死循环（#18 回归）");
+        // 两帧都已入 buffer 并被 EOF 分支排空 → "Hello" 不丢
+        assert_eq!(tokens, "Hello", "提前 EOF 不应丢失已发出的尾部 delta");
     }
 }
 
