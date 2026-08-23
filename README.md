@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.11 — 12 crates + vendored op-ai, 378 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem. 新增 `chat` 子命令（机器可读流式 NDJSON，供 fusion-studio subprocess 取代直连 MLX，issue #17）+ 修复 chat_stream_messages EOF 尾帧丢失（issue #18）。
+**Status**: v0.1.11 — 12 crates + vendored op-ai, 379 tests pass + perf baseline, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem. 新增 `chat` 子命令（机器可读流式 NDJSON，供 fusion-studio subprocess 取代直连 MLX，issue #17）+ 修复 chat_stream_messages EOF 尾帧丢失（issue #18）。
 
 ## 📋 Overview
 
