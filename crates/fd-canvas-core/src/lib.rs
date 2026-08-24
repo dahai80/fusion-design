@@ -2032,10 +2032,16 @@ impl VersionedDocument {
     }
 
     pub fn active_version(&self) -> &NamedVersion {
-        self.versions
-            .iter()
-            .find(|v| v.id == self.active_version_id)
-            .expect("active_version_id must exist")
+        if let Some(v) = self.versions.iter().find(|v| v.id == self.active_version_id) {
+            v
+        } else {
+            tracing::error!(
+                active_version_id = %self.active_version_id,
+                total = self.versions.len(),
+                "active_version_id 不在版本列表，回退最后一个版本（文件损坏或手动编辑致 id 失配）"
+            );
+            self.versions.last().expect("VersionedDocument 至少含一个版本（构造保证）")
+        }
     }
 
     pub fn active_document(&self) -> &PenDocument {
@@ -2187,7 +2193,19 @@ impl VersionedDocument {
     }
 
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        let vd: VersionedDocument = serde_json::from_str(json)?;
+        let mut vd: VersionedDocument = serde_json::from_str(json)?;
+        if vd.versions.is_empty() {
+            anyhow::bail!("VersionedDocument 版本列表为空（文件损坏或被截断）");
+        }
+        if !vd.versions.iter().any(|v| v.id == vd.active_version_id) {
+            tracing::warn!(
+                active_version_id = %vd.active_version_id,
+                total = vd.versions.len(),
+                "active_version_id 不在版本列表，回退最后一个版本"
+            );
+            let last_id = vd.versions[vd.versions.len() - 1].id.clone();
+            vd.active_version_id = last_id;
+        }
         vd.active_document().validate_limits()?;
         Ok(vd)
     }
@@ -2366,6 +2384,27 @@ mod version_tests {
         let vd2 = VersionedDocument::from_json(&json).unwrap();
         assert_eq!(vd2.document_id, "doc1");
         assert_eq!(vd2.version_count(), 1);
+    }
+
+    #[test]
+    fn from_json_corrupted_active_version_id_falls_back_not_panic() {
+        // E-13 回归：active_version_id 指向不存在的版本（手动编辑/文件损坏），
+        // from_json 应回退到最后一个版本而非 panic。
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        vd.save_version("V2", sample_doc("v1"), None);
+        let mut json = vd.to_json().unwrap();
+        let last_id = vd.versions.last().unwrap().id.clone();
+        json = json.replace(&last_id, "nonexistent-id-corrupted");
+        let vd2 = VersionedDocument::from_json(&json).unwrap();
+        assert!(!vd2.versions.is_empty());
+    }
+
+    #[test]
+    fn from_json_empty_versions_rejected() {
+        // E-13 回归：版本列表为空（文件被截断到只剩头部）→ 显式 Err 而非 panic。
+        let json = r#"{"document_id":"d","versions":[],"active_version_id":"x","undo_redo":[]}"#;
+        assert!(VersionedDocument::from_json(json).is_err());
     }
 
     #[test]
