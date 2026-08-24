@@ -2150,13 +2150,15 @@ fn repair_model_json(s: &str) -> String {
     }
     out = out.replace("{ {", "{").replace("} }", "}");
     // 扫描修复"值后空格+引号键"缺逗号：形如 `#fff "stroke"` 或 `100 "w"`
-    // 逐字符判断更稳妥，这里用简单循环匹配 ` "<word>":` 前缺逗号的模式。
+    // 逐字节匹配 ASCII 模式（空格/引号/字母），但 CJK 等多字节 UTF-8 字符
+    // 必须按原字节复制——旧 `bytes[i] as char` 把每个字节当 Latin-1 码点转
+    // char 再以 UTF-8 编码，CJK 3 字节变 6 字节乱码（R-A9）。模式仅涉及 ASCII，
+    // 非首字节（>=0x80）永不匹配，故按 UTF-8 字符边界推进复制即可。
     let bytes = out.as_bytes();
     let mut rebuilt = String::with_capacity(out.len());
     let mut i = 0;
     while i < bytes.len() {
-        // 检测模式：非逗号/非冒号字符 + 空格 + `"` + 字母 + ... + `":`
-        // 仅在 ` "<id>":` 且前一非空字符不是 `,` `:` `[` `{` 时插入逗号
+        // 检测模式：空格 + `"` + ASCII 字母 + ... + `":`，且前一非空字符非 `, : [ {`
         if bytes[i] == b' '
             && i + 3 < bytes.len()
             && bytes[i + 1] == b'"'
@@ -2168,7 +2170,6 @@ fn repair_model_json(s: &str) -> String {
                 j += 1;
             }
             if j + 1 < bytes.len() && bytes[j] == b'"' && bytes[j + 1] == b':' {
-                // 前一非空字符
                 let prev = rebuilt.trim_end().chars().last();
                 let need_comma = match prev {
                     Some(',') | Some(':') | Some('[') | Some('{') => false,
@@ -2180,12 +2181,37 @@ fn repair_model_json(s: &str) -> String {
                 }
             }
         }
-        rebuilt.push(bytes[i] as char);
-        i += 1;
+        // 按 UTF-8 字符边界复制原字节：ASCII 1 字节，多字节字符整体 push。
+        let char_len = utf8_char_len(bytes[i]);
+        let end = (i + char_len).min(bytes.len());
+        if let Ok(slice) = std::str::from_utf8(&bytes[i..end]) {
+            rebuilt.push_str(slice);
+        } else {
+            // 残缺多字节序列（输入本身非法），整体跳过避免乱码扩散。
+            tracing::warn!(
+                at = i,
+                len = char_len,
+                "repair_model_json 跳过残缺 UTF-8 序列"
+            );
+        }
+        i = end;
     }
     // 括号失衡修复：7B 模型常输出尾部多余 `}` 或中途截断。
     balance_json_braces(&mut rebuilt);
     rebuilt
+}
+
+/// 由首字节判定 UTF-8 字符占用的字节数（1..=4）。非法/续字节返回 1（逐字节跳过）。
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0xC0 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
 }
 
 /// 按 JSON 语义平衡花括号/方括号（跳过字符串字面量与转义）。
@@ -2840,6 +2866,36 @@ mod skills_tests {
         let repaired = repair_model_json(broken);
         let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
         assert_eq!(v["page"]["nodes"][0]["id"], "n0");
+    }
+
+    #[test]
+    fn repair_model_json_preserves_cjk_no_mojibake() {
+        // R-A9 回归：缺逗号修复路径对含 CJK 的 JSON 不得乱码。
+        // 「登录」= E7 99 BB E5 BD 95（4 个 CJK 字符），旧 bytes[i] as char 把
+        // 每字节当 Latin-1 → 6 字节 mojibake。现按 UTF-8 字符边界复制。
+        let broken = "{\"label\":\"登录\" \"w\":400}";
+        let repaired = repair_model_json(broken);
+        assert!(repaired.contains("登录"), "CJK 被乱码: {repaired}");
+        assert!(
+            repaired.contains("\"登录\"")
+                || repaired.contains("\"登录\",")
+                || repaired.contains("\"登录\", \"w\""),
+            "repaired={repaired}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+        assert_eq!(v["label"], "登录");
+        assert_eq!(v["w"], 400);
+    }
+
+    #[test]
+    fn repair_model_json_cjk_value_after_space_no_corruption() {
+        // R-A9 第二场景：CJK 出现在值后空格缺逗号模式附近，验证非首字节不误匹配。
+        let broken = "{\"name\":\"按钮\" \"type\":\"rect\"}";
+        let repaired = repair_model_json(broken);
+        assert!(repaired.contains("按钮"), "CJK 被乱码: {repaired}");
+        let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+        assert_eq!(v["name"], "按钮");
+        assert_eq!(v["type"], "rect");
     }
 
     #[test]
