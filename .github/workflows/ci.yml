@@ -91,6 +91,20 @@ jobs:
             exit 1
           fi
 
+  # 生产代码 unwrap/expect 硬门禁（商用加固项 #3 扩展）。
+  # deny-panic 已封 panic! 宏；本 job 扩展封裸 .unwrap()/.expect()。
+  # 现有安全站点录入 Scripts/unwrap-expect-allowlist.txt（编译期常量、WASM window() 惯用法、
+  # 启动 fail-fast），新增裸 .unwrap()/.expect() 未在 allowlist → CI 失败。
+  # 测试代码（#[cfg(test)] 块）天然排除。已清理站点静默忽略。
+  deny-unwrap-expect:
+    name: deny unwrap/expect in production code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for new bare .unwrap()/.expect() outside allowlist
+        run: bash Scripts/deny-unwrap-expect.sh
+
   # 发布打包：改为 tag 触发 + continue-on-error（商用加固项 #2）。
   # macos-14 runner 供给瓶颈不应阻塞 main CI 恒绿；tag 推送时尽力出包。
   release-pack:

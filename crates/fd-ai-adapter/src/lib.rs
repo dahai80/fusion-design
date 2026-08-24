@@ -395,18 +395,22 @@ pub async fn chat_stream_messages(
     }
 
     let stream = resp.bytes_stream();
+    // L6：buffer 用 Vec<u8> 而非 String。旧实现用 String::from_utf8_lossy(&bytes)
+    //   把每个 chunk 立即解码，但 chunk 可能在多字节 CJK 字符中间切断（UTF-8 一字 3 字节），
+    //   残缺尾字节被替换成 U+FFFD → 中文 UI JSON 乱码。改字节缓冲：完整行（以 \n 分隔）
+    //   才整体 from_utf8 解码，跨 chunk 的残缺多字节字符留在 buffer 等下一 chunk 补全。
     futures::stream::unfold(
-        (stream, String::new()),
+        (stream, Vec::<u8>::new()),
         |(mut stream, mut buffer)| async move {
             use futures::StreamExt;
             loop {
                 match stream.next().await {
                     Some(Ok(bytes)) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        buffer.extend_from_slice(&bytes);
                         // L7：buffer 无上限增长 → 上游慢/大块无换行时内存膨胀。
                         // 超过上限仍无完整行，视为异常流，报错并丢弃缓冲。
                         const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
-                        if buffer.len() > MAX_SSE_BUFFER && !buffer.contains('\n') {
+                        if buffer.len() > MAX_SSE_BUFFER && !buffer.contains(&b'\n') {
                             tracing::error!(
                                 len = buffer.len(),
                                 "SSE buffer 超限且无完整行，终止流"
@@ -415,12 +419,17 @@ pub async fn chat_stream_messages(
                                 Err(anyhow::anyhow!(
                                     "SSE buffer 超限 ({MAX_SSE_BUFFER} 字节) 无完整行"
                                 )),
-                                (stream, String::new()),
+                                (stream, Vec::new()),
                             ));
                         }
-                        while let Some(line_end) = buffer.find("\n") {
-                            let line = buffer[..line_end].trim().to_string();
-                            buffer = buffer[line_end + 1..].to_string();
+                        while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
+                            // L6：完整行整体 from_utf8_lossy 解码（行内已是完整 UTF-8，
+                            //   SSE data: 前缀+JSON 结构为 ASCII，CJK 在 JSON 值内且完整）。
+                            // 先解码再 drain，避免 line_bytes 借用与 buffer.drain 冲突。
+                            let line = String::from_utf8_lossy(&buffer[..line_end])
+                                .trim()
+                                .to_string();
+                            buffer.drain(..=line_end);
                             if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     return Some((
@@ -458,9 +467,11 @@ pub async fn chat_stream_messages(
                         // 上游可能没在最后一帧后补换行，或最后一个 chunk
                         // 还停在 buffer 里没被 while 循环处理 — 直接 return None
                         // 会丢尾部 delta（#18）。
-                        while let Some(line_end) = buffer.find("\n") {
-                            let line = buffer[..line_end].trim().to_string();
-                            buffer = buffer[line_end + 1..].to_string();
+                        while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
+                            let line = String::from_utf8_lossy(&buffer[..line_end])
+                                .trim()
+                                .to_string();
+                            buffer.drain(..=line_end);
                             if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     return Some((
@@ -489,10 +500,11 @@ pub async fn chat_stream_messages(
                                 }
                             }
                         }
-                        // 无换行的尾部残行（上游没补换行就关连接）：尝试按整行解析。
-                        let tail = buffer.trim().to_string();
+                        // 无换行的尾部残行（上游没补换行就关连接）：按整行解析。
+                        // L6：残行也可能是跨 chunk 的 CJK，整体 from_utf8_lossy 解码。
+                        let tail = String::from_utf8_lossy(&buffer).trim().to_string();
                         if !tail.is_empty() {
-                            buffer = String::new();
+                            buffer.clear();
                             if let Some(data) = tail.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     return Some((
@@ -3730,6 +3742,68 @@ mod mlx_integration {
             .expect("流应在 3 秒内终止，不死循环（#18 回归）");
         // 两帧都已入 buffer 并被 EOF 分支排空 → "Hello" 不丢
         assert_eq!(tokens, "Hello", "提前 EOF 不应丢失已发出的尾部 delta");
+    }
+
+    // L6 回归：CJK 多字节字符被网络分块切断在字符中间。
+    // 旧 String::from_utf8_lossy 每 chunk 解码 → 残缺尾字节换 U+FFFD → 中文乱码。
+    // 修复后字节缓冲等完整行再解码 → 跨 chunk 残缺字符补全 → 完整无 U+FFFD。
+    #[tokio::test]
+    async fn chat_stream_messages_cjk_split_across_chunks_no_replacement() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 登录 = e7 99 bb e5 bd 95；构造 SSE 帧切在 0xE7 后 2 字节（半个汉字）。
+        let cjk = "登录";
+        let payload = serde_json::json!({"choices":[{"delta":{"content":cjk}}]}).to_string();
+        let frame = format!("data: {}\r\n\r\n", payload);
+        let frame_bytes = frame.as_bytes().to_vec();
+        let split_at = frame_bytes
+            .iter()
+            .position(|&b| b == 0xE7)
+            .expect("帧内应有 CJK 首字节 0xE7")
+            + 2;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let done = "data: [DONE]\r\n\r\n".to_string();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 200 OK\r\n");
+            resp.push_str("Content-Type: text/event-stream\r\n");
+            resp.push_str("Connection: close\r\n\r\n");
+            let _ = sock.write_all(resp.as_bytes()).await;
+            // 第一块：帧的前半（切在汉字中间）
+            let _ = sock.write_all(&frame_bytes[..split_at]).await;
+            let _ = sock.flush().await;
+            // 第二块：帧后半 + [DONE]
+            let _ = sock.write_all(&frame_bytes[split_at..]).await;
+            let _ = sock.write_all(done.as_bytes()).await;
+            let _ = sock.flush().await;
+        });
+        let client = mock_client(&format!("http://{}", addr));
+        let messages = vec![MlxChatMessage {
+            role: String::from("user"),
+            content: String::from("hi"),
+        }];
+        let mut stream = chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
+        use futures::StreamExt;
+        let mut tokens = String::new();
+        let drain = async {
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(delta) => tokens.push_str(&delta.token),
+                    Err(e) => panic!("stream error: {e}"),
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), drain)
+            .await
+            .expect("流应在 3 秒内终止");
+        assert_eq!(
+            tokens, "登录",
+            "跨 chunk 切断的 CJK 字符应完整还原，无 U+FFFD 替换"
+        );
+        assert!(!tokens.contains('\u{fffd}'), "不得出现 U+FFFD 替换字符");
     }
 }
 

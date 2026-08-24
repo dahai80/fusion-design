@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.12 — 12 crates + vendored op-ai, 393 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖；含 XSS/超深/路径遍历/javascript: URL 对抗回归测试。
+**Status**: v0.1.12 — 12 crates + vendored op-ai, 394 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；CI 零 panic 双门禁（deny-panic + deny-unwrap-expect，allowlist 基线）；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分 对抗回归测试。
 
 ## 📋 Overview
 
@@ -79,7 +79,8 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # Full workspace compiles
-cargo test --workspace                                         # 376 tests pass (+1 ignored perf baseline)
+cargo test --workspace                                         # 394 tests pass (+1 ignored perf baseline)
+bash Scripts/deny-unwrap-expect.sh                             # 零 unwrap/expect 门禁（allowlist 基线）
 cargo test --release -- --ignored perf_baseline                # 1000-node perf baseline (<500ms each)
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM build succeeds
 cargo run -p fd-cli -- --help                                  # CLI available
@@ -92,12 +93,12 @@ cargo run -p fd-cli -- --help                                  # CLI available
 
 **安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
 
-**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
+**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
 | fd-canvas-core | 60+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management, **安全护栏**, perf baseline |
-| fd-ai-adapter | 81 | Mock HTTP, SSE streaming, health check, **深度可用性探针（鉴权/模型/真推理）**, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析 |
+| fd-ai-adapter | 82 | Mock HTTP, SSE streaming, health check, **深度可用性探针（鉴权/模型/真推理）**, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析, **CJK SSE 跨 chunk 切分** |
 | fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
 | fd-design-system | 25 | Token, Theme, Registry, CSS output, 3 built-in presets (incl. robot-sim) |
 | fd-ecosystem | 27 | IPC, sync_to_code, template tag search, built-in scene templates, self-built MCP server, **文件大小护栏** |

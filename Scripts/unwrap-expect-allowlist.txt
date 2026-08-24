@@ -1,0 +1,8 @@
+crates/fd-ai-adapter/src/lib.rs:.expect("blocking tokio runtime 创建失败")
+crates/fd-ai-adapter/src/lib.rs:.expect("DEFAULT_MLX_ENDPOINT 必为合法 localhost（编译期保证）")
+crates/fd-host-web/src/lib.rs:.unwrap()
+crates/fd-host-web/src/lib.rs:let doc = web_sys::window().unwrap().document().unwrap();
+crates/fd-host-web/src/lib.rs:let doc2 = web_sys::window().unwrap().document().unwrap();
+crates/fd-host-web/src/lib.rs:let w = web_sys::window().unwrap();
+crates/fd-host-web/src/lib.rs:let win = web_sys::window().unwrap();
+crates/fd-host-web/src/lib.rs:let window = web_sys::window().unwrap();
