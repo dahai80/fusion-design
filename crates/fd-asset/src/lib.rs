@@ -10,11 +10,14 @@
 //! Data schemas: AssetItem (image metadata + annotations + color palette), AssetLibrary (collection + search)
 //! User instruction: "按照你建议的优先级马上启动落地" — P0 素材库管理模块
 
-use image::GenericImageView;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+// ── 安全上限（防图像解码 DoS）──
+const MAX_PIXELS: u64 = 64_000_000;
+const MAX_IMAGE_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 // ── 素材条目 ──
 
@@ -342,6 +345,15 @@ pub fn import_file(
 
     let metadata = std::fs::metadata(file_path)?;
     let file_size = metadata.len();
+    if file_size > MAX_IMAGE_FILE_SIZE {
+        tracing::warn!(
+            path = %file_path.display(),
+            size = file_size,
+            limit = MAX_IMAGE_FILE_SIZE,
+            "import_file: 文件超过 100MB 上限，拒绝导入"
+        );
+        return Err(AssetError::FileTooLarge(file_size, MAX_IMAGE_FILE_SIZE).into());
+    }
     let id = format!("asset-{}", uuid_simple());
 
     let (width, height) = read_image_dimensions(file_path);
@@ -377,11 +389,22 @@ fn uuid_simple() -> String {
     format!("{:x}-{}", (ts & 0xFFFFFFFF), (ts >> 32) & 0xFFFF)
 }
 
-/// 读取图片尺寸，使用 image crate 解码获取宽高。
+/// 读取图片尺寸：仅读 header，不解码像素缓冲。
 fn read_image_dimensions(path: &Path) -> (u32, u32) {
-    let result = (|| -> Result<(u32, u32), image::ImageError> {
-        let reader = image::ImageReader::open(path)?.decode()?;
-        Ok(reader.dimensions())
+    let result = (|| -> Result<(u32, u32), anyhow::Error> {
+        let (w, h) = image::ImageReader::open(path)?.into_dimensions()?;
+        if w as u64 * h as u64 > MAX_PIXELS {
+            tracing::warn!(
+                path = %path.display(),
+                w,
+                h,
+                pixels = w as u64 * h as u64,
+                limit = MAX_PIXELS,
+                "read_image_dimensions: 像素数超过上限，拒绝"
+            );
+            return Err(AssetError::ImageTooLarge(w, h, MAX_PIXELS).into());
+        }
+        Ok((w, h))
     })();
     match result {
         Ok((w, h)) => {
@@ -520,6 +543,10 @@ pub enum AssetError {
     Io(#[from] std::io::Error),
     #[error("序列化错误: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("文件过大: {0} 字节，超过上限 {1} 字节")]
+    FileTooLarge(u64, u64),
+    #[error("图片像素数超限: {0}x{1} = {2} 像素")]
+    ImageTooLarge(u32, u32, u64),
 }
 
 #[cfg(test)]

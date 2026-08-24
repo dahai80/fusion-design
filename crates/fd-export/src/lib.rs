@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use fd_design_system::DesignSystemRegistry;
 use serde::{Deserialize, Serialize};
 
+// 渲染光栅图（PNG）时画布单边像素上限，防止恶意 .fusiondesign 触发 OOM。
+const MAX_CANVAS_DIM: u32 = 16384;
+
 /// 导出格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -374,6 +377,18 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
     let height = pixmap_size.height() as u32;
     if width == 0 || height == 0 {
         anyhow::bail!("页面尺寸为零，无法渲染 PNG");
+    }
+    if width > MAX_CANVAS_DIM || height > MAX_CANVAS_DIM {
+        tracing::warn!(
+            width, height, limit = MAX_CANVAS_DIM, "画布尺寸超出光栅化上限，拒绝渲染 PNG"
+        );
+        anyhow::bail!(
+            "画布尺寸 {}x{} 超出光栅化上限 {}x{}，拒绝渲染 PNG 防止 OOM",
+            width,
+            height,
+            MAX_CANVAS_DIM,
+            MAX_CANVAS_DIM
+        );
     }
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("无法创建 pixmap ({}x{})", width, height))?;

@@ -48,7 +48,8 @@ impl HostBridgeConfig {
             return Err(HostConfigError::IndexMissing(self.frontend_dir.clone()));
         }
         if !self.block_external {
-            tracing::warn!("block_external=false 违反离线硬约束建议");
+            tracing::warn!("block_external=false 违反离线硬约束");
+            return Err(HostConfigError::OfflineConstraintViolated);
         }
         validate_localhost(&self.backend_endpoint)?;
         Ok(())
@@ -84,6 +85,8 @@ pub enum HostConfigError {
     InvalidEndpoint(String),
     #[error("违反离线约束：endpoint host {0} 非 localhost")]
     PublicEndpoint(String),
+    #[error("违反离线硬约束：block_external=false，离线模式不可关闭")]
+    OfflineConstraintViolated,
 }
 
 /// 外网请求拦截器（供 WKWebView configuration 注入）。
@@ -91,12 +94,21 @@ pub enum HostConfigError {
 /// 在真实 Swift 宿主中，对应 `WKURLSchemeHandler` 注入；
 /// 此处提供 Rust 侧的判定逻辑，供后端服务复用。
 pub fn is_external_url(url: &str) -> bool {
+    // F2/离线强制：allowlist 判定。
+    //   内部 = file://（本地资源，离线前端入口）或 http/https 且 host∈白名单。
+    //   外部 = javascript:/data:（无 host 的危险 scheme，XSS 载体）、解析失败。
+    // 旧实现判无 host 的 javascript:/data: 为"内部/允许"，是 XSS 放行漏洞。
     match reqwest::Url::parse(url) {
         Ok(u) => {
+            let scheme = u.scheme();
+            if scheme == "file" {
+                return false; // 本地文件资源，离线允许
+            }
             let host = u.host_str().unwrap_or("");
-            host != "127.0.0.1" && host != "localhost" && host != "::1" && !host.is_empty()
+            let internal_host = host == "127.0.0.1" || host == "localhost" || host == "::1";
+            !(scheme == "http" || scheme == "https") || !internal_host
         }
-        Err(_) => false, // 非合法 URL（如 file://）不算外网
+        Err(_) => true, // 非法 URL 一律视为外网，保守拒绝
     }
 }
 
@@ -130,9 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn is_external_url_allows_file_and_invalid() {
+    fn is_external_url_allows_file_rejects_dangerous_schemes() {
+        // file:// 本地资源：离线允许
         assert!(!is_external_url("file:///path/index.html"));
-        assert!(!is_external_url("not-a-url"));
+        // F2 回归：javascript:/data: 无 host 危险 scheme 必须判外网（旧实现放行 = XSS 漏洞）
+        assert!(is_external_url("javascript:alert(1)"));
+        assert!(is_external_url("data:text/html,<script>alert(1)</script>"));
+        // 非法 URL 保守判外网
+        assert!(is_external_url("not-a-url"));
     }
 
     #[test]
@@ -178,6 +195,19 @@ mod tests {
             block_external: true,
         };
         cfg.validate().unwrap();
+    }
+
+    // F2 回归：离线是硬约束，block_external=false 必须拒绝启动（旧实现仅 warn）。
+    #[test]
+    fn config_validate_rejects_block_external_false() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("index.html"), "<html></html>").unwrap();
+        let cfg = HostBridgeConfig {
+            frontend_dir: tmp.path().to_path_buf(),
+            backend_endpoint: "http://127.0.0.1:8080".into(),
+            block_external: false,
+        };
+        assert!(cfg.validate().is_err(), "block_external=false 必须拒绝（离线硬约束）");
     }
 
     #[test]

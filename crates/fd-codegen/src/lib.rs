@@ -380,6 +380,16 @@ fn render_page_react(page: &Page) -> String {
     out
 }
 
+// HTML 实体转义（F1/XSS 修复）：node.text 来自 LLM 输出或 parse-html 解析的
+// 不可信文本，原样拼进 HTML/JSX 会执行任意脚本。转义 5 个 HTML 特殊字符。
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 fn node_to_html(node: &PenNode) -> String {
     let style = format_style_inline(node);
     // 子节点对任意 kind 均可能存在（parse-html 把带子节点的 <div> 映射为 Rect），
@@ -409,7 +419,7 @@ fn node_to_html(node: &PenNode) -> String {
             "<div data-id=\"{}\" style=\"{}\">{}{}</div>\n",
             node.id,
             style,
-            node.text.as_deref().unwrap_or(""),
+            escape_html(node.text.as_deref().unwrap_or("")),
             children
         ),
         NodeKind::Image => {
@@ -462,7 +472,7 @@ fn node_to_react(node: &PenNode) -> String {
             "      <div className=\"{}\" data-id=\"{}\">{}{}</div>\n",
             cls,
             node.id,
-            node.text.as_deref().unwrap_or(""),
+            escape_html(node.text.as_deref().unwrap_or("")),
             children
         ),
         NodeKind::Image => {
@@ -657,6 +667,35 @@ mod tests {
         doc.add_page(page);
         let out = HtmlCodegen.generate(&doc);
         assert!(out.contains("data-id=\"inner\""));
+    }
+
+    // F1/XSS 回归：node.text 含脚本载荷，HTML 输出必须转义，不可执行。
+    #[test]
+    fn html_text_escapes_script_payload() {
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let n = PenNode::text("t", 0.0, 0.0, "<img src=x onerror=alert(1)>");
+        page.add(n);
+        doc.add_page(page);
+        let out = HtmlCodegen.generate(&doc);
+        assert!(!out.contains("<img src=x onerror"), "原始标签不得残留在 HTML 输出");
+        assert!(out.contains("&lt;img"), "必须转义为实体");
+    }
+
+    // F1/XSS 回归：React 输出同样转义。
+    #[test]
+    fn react_text_escapes_script_payload() {
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let n = PenNode::text("t", 0.0, 0.0, "<script>alert(1)</script>");
+        page.add(n);
+        doc.add_page(page);
+        let gen = ReactTailwindCodegen {
+            component_name: "XssTest".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(!out.contains("<script>"), "原始 script 标签不得残留在 JSX 输出");
+        assert!(out.contains("&lt;script&gt;"), "必须转义为实体");
     }
 
     #[test]

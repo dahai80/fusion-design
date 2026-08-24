@@ -6,8 +6,12 @@
 //! 【离线硬约束】所有联动走本地文件系统或 127.0.0.1，无公网调用。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+// 进程级 IPC 消息序号，配合 pid + nanos 保证文件名全局唯一，避免同纳秒碰撞（审计 C7）。
+static IPC_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 生态联动目标。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +36,52 @@ impl EcosystemTarget {
             Self::Custom(name) => name.clone(),
         }
     }
+}
+
+// 将 base + sub 解析为安全子路径：拒绝 `..` 组件与绝对路径，并校验结果仍在 base 之内。
+// 用于 send() 防 EcosystemTarget::Custom 携带 `../` 实施路径穿越写（审计 C6）。
+fn sanitize_ipc_subpath(base: &Path, sub: &str) -> anyhow::Result<PathBuf> {
+    if sub.is_empty() {
+        anyhow::bail!("IPC 子路径为空");
+    }
+    let sub_path = Path::new(sub);
+    if sub_path.is_absolute() {
+        tracing::warn!(sub = %sub, "IPC 子路径为绝对路径，拒绝");
+        anyhow::bail!("IPC 子路径不允许绝对路径: {sub}");
+    }
+    for comp in sub_path.components() {
+        use std::path::Component;
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                tracing::warn!(sub = %sub, "IPC 子路径含 `..` 组件，拒绝");
+                anyhow::bail!("IPC 子路径不允许 `..` 组件: {sub}");
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                tracing::warn!(sub = %sub, "IPC 子路径含根/前缀组件，拒绝");
+                anyhow::bail!("IPC 子路径不允许根或前缀组件: {sub}");
+            }
+        }
+    }
+    let joined = base.join(sub_path);
+    // 二次校验：若 base/joined 均可规范化（已存在），比较规范化路径以防符号链接绕过；
+    // 否则退化为词法 starts_with——组件已过滤掉 `..`/绝对路径，词法校验即充分。
+    // 不返回规范化路径，保持与 list()/调用方一致的路径形态。
+    let canonical_base = base.canonicalize();
+    let canonical_joined = joined.canonicalize();
+    let within = match (canonical_base, canonical_joined) {
+        (Ok(cb), Ok(cj)) => cj.starts_with(&cb),
+        _ => joined.starts_with(base),
+    };
+    if !within {
+        tracing::warn!(
+            base = %base.display(),
+            resolved = %joined.display(),
+            "IPC 子路径解析后逃出 base，拒绝"
+        );
+        anyhow::bail!("IPC 子路径逃出基目录: {sub}");
+    }
+    Ok(joined)
 }
 
 /// 联动消息体。
@@ -152,14 +202,23 @@ impl EcosystemLink {
 
     /// 发送一条联动消息（写入目标目录的 JSON 文件）。
     pub fn send(&self, msg: &LinkMessage) -> anyhow::Result<PathBuf> {
-        let dir = self.base_dir.join(msg.target.ipc_dir());
+        let dir = sanitize_ipc_subpath(&self.base_dir, &msg.target.ipc_dir())?;
         std::fs::create_dir_all(&dir)?;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
-        let file = dir.join(format!("{stamp}.json"));
+        let pid = std::process::id();
+        let seq = IPC_SEQ.fetch_add(1, Ordering::SeqCst);
+        let file = dir.join(format!("{stamp}_{pid}_{seq}.json"));
         let json = serde_json::to_string_pretty(msg)?;
-        std::fs::write(&file, json)?;
+        // 原子写：先写 tmp 再 rename，避免崩溃留下半截 JSON（审计 C7）。
+        let tmp = dir.join(format!("{stamp}_{pid}_{seq}.json.tmp.{pid}.{seq}"));
+        std::fs::write(&tmp, &json)?;
+        if let Err(e) = std::fs::rename(&tmp, &file) {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::warn!(?tmp, error = %e, "send: rename 失败，清理 tmp");
+            return Err(anyhow::Error::from(e));
+        }
         tracing::info!(?file, target = msg.target.ipc_dir(), "联动消息已发送");
         Ok(file)
     }
@@ -901,6 +960,72 @@ mod tests {
             EcosystemTarget::Custom("fusion-simulation".into()).ipc_dir(),
             "fusion-simulation"
         );
+    }
+
+    #[test]
+    fn send_rejects_path_traversal_custom_target() {
+        // 审计 C6：Custom("../evil") 必须被拒绝，不得逃出 base 目录。
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let msg = LinkMessage {
+            target: EcosystemTarget::Custom("../evil".into()),
+            action: "traversal".into(),
+            payload: serde_json::json!({}),
+        };
+        let err = link.send(&msg).unwrap_err();
+        assert!(
+            format!("{}", err).contains(".."),
+            "错误信息应提及 `..` 组件，实际: {err}"
+        );
+        // 确认没有文件被写到 base 之外
+        assert!(std::fs::read_dir(tmp.path()).unwrap().count() == 0);
+    }
+
+    #[test]
+    fn send_filename_contains_pid_and_seq() {
+        // 审计 C7：文件名应含 pid + seq，避免同纳秒碰撞。
+        // 静态计数器是进程级，不假定具体 seq 值，只校验 <stamp>_<pid>_<seq>.json 形态。
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let msg = LinkMessage {
+            target: EcosystemTarget::FusionCode,
+            action: "check".into(),
+            payload: serde_json::json!({}),
+        };
+        let file = link.send(&msg).unwrap();
+        let fname = file.file_name().unwrap().to_string_lossy().to_string();
+        let pid = std::process::id().to_string();
+        assert!(
+            fname.contains(&pid),
+            "文件名应含 pid={pid}，实际: {fname}"
+        );
+        // 形态：<数字纳秒>_<pid>_<数字seq>.json
+        let stem = fname
+            .strip_suffix(".json")
+            .unwrap_or_else(|| panic!("文件名应以 .json 结尾: {fname}"));
+        let parts: Vec<&str> = stem.rsplitn(3, '_').collect();
+        // rsplitn 产出顺序：seq, pid, stamp（从右往左切 3 段）
+        assert_eq!(parts.len(), 3, "文件名应有 stamp_pid_seq 三段: {fname}");
+        assert!(parts[0].parse::<u64>().is_ok(), "seq 应为数字: {fname}");
+        assert_eq!(parts[1], pid, "pid 段应匹配当前进程: {fname}");
+        assert!(parts[2].parse::<u128>().is_ok(), "stamp 应为数字: {fname}");
+    }
+
+    #[test]
+    fn send_concurrent_does_not_collide() {
+        // 审计 C7：连续两次 send 应产生不同文件名（seq 递增）。
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let mk = || LinkMessage {
+            target: EcosystemTarget::FusionCLI,
+            action: "burst".into(),
+            payload: serde_json::json!({}),
+        };
+        let f1 = link.send(&mk()).unwrap();
+        let f2 = link.send(&mk()).unwrap();
+        assert_ne!(f1, f2, "两次 send 不应碰撞到同一文件名");
+        assert!(f1.exists());
+        assert!(f2.exists());
     }
 
     #[tokio::test]
