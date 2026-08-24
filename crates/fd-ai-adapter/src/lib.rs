@@ -99,6 +99,10 @@ impl FusionMlxClient {
             endpoint: endpoint.to_string(),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                // C8：缺超时则 fusion-mlx 挂起时请求永久阻塞，调用方
+                // （fusion-studio subprocess）卡死。连接短超时 + 总超时兜底。
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(180))
                 .build()?,
         })
     }
@@ -159,7 +163,16 @@ impl FusionMlxClient {
 
 impl Default for FusionMlxClient {
     fn default() -> Self {
-        Self::new().expect("默认 endpoint 必为 localhost，构造不会失败")
+        // L10/C9：旧实现 .expect() — FUSION_MLX_BASE_URL 坏值即 panic。
+        // 改回退到安全的本地缺省 endpoint（DEFAULT_MLX_ENDPOINT，已 validate_localhost 校验）。
+        match Self::new() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "默认 endpoint 构造失败，回退本地缺省");
+                Self::with_endpoint(DEFAULT_MLX_ENDPOINT)
+                    .expect("DEFAULT_MLX_ENDPOINT 必为合法 localhost（编译期保证）")
+            }
+        }
     }
 }
 
@@ -377,6 +390,16 @@ pub async fn chat_stream_messages(
                 match stream.next().await {
                     Some(Ok(bytes)) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        // L7：buffer 无上限增长 → 上游慢/大块无换行时内存膨胀。
+                        // 超过上限仍无完整行，视为异常流，报错并丢弃缓冲。
+                        const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
+                        if buffer.len() > MAX_SSE_BUFFER && !buffer.contains('\n') {
+                            tracing::error!(len = buffer.len(), "SSE buffer 超限且无完整行，终止流");
+                            return Some((
+                                Err(anyhow::anyhow!("SSE buffer 超限 ({MAX_SSE_BUFFER} 字节) 无完整行")),
+                                (stream, String::new()),
+                            ));
+                        }
                         while let Some(line_end) = buffer.find("\n") {
                             let line = buffer[..line_end].trim().to_string();
                             buffer = buffer[line_end + 1..].to_string();
@@ -2429,6 +2452,13 @@ fn html_element_to_node(
     depth: usize,
     counter: &mut u32,
 ) -> Option<PenNode> {
+    // C2：深度守卫。parse-html 面向任意 HTML，深层嵌套（如 10 万层 <div>）
+    // 无界递归 → 栈溢出。与 fd-canvas-core MAX_NODE_DEPTH 对齐，超限截断该子树。
+    const MAX_PARSE_HTML_DEPTH: usize = 64;
+    if depth > MAX_PARSE_HTML_DEPTH {
+        tracing::warn!(depth, "parse-html 嵌套深度超限，截断子树");
+        return None;
+    }
     let el = el_ref.value();
     let tag = el.name();
 
@@ -2551,6 +2581,12 @@ fn html_element_to_node(
     }
 
     *counter += 1;
+    // C2：节点总数上限，防海量节点 OOM。与 fd-canvas-core MAX_NODE_TOTAL 对齐。
+    const MAX_PARSE_HTML_TOTAL: u32 = 100_000;
+    if *counter > MAX_PARSE_HTML_TOTAL {
+        tracing::warn!(total = *counter, "parse-html 节点总数超限，截断剩余子树");
+        return None;
+    }
     let id = format!("n_{}", counter);
     let node_text = if kind == NodeKind::Text { text } else { None };
 
@@ -3724,6 +3760,23 @@ mod html_parser_tests {
         let doc = html_to_pen_document(html, "NestedPage").unwrap();
         let div = doc.pages[0].nodes.first().unwrap();
         assert!(!div.children.is_empty(), "div should have child nodes");
+    }
+
+    // C2 回归：深度嵌套 HTML（68 层 > MAX_PARSE_HTML_DEPTH=64）必须不栈溢出、
+    // 不 OOM，解析完成（超深子树被截断）。旧实现无界递归会栈溢出崩溃。
+    #[test]
+    fn html_to_pen_document_deeply_nested_no_overflow() {
+        let mut html = String::new();
+        for _ in 0..68 {
+            html.push_str("<div>");
+        }
+        html.push_str("deep");
+        for _ in 0..68 {
+            html.push_str("</div>");
+        }
+        // 关键断言：不 panic（栈溢出）/不 OOM，返回 Ok。
+        let result = html_to_pen_document(&html, "DeepPage");
+        assert!(result.is_ok(), "深度嵌套 HTML 必须被深度守卫截断而非崩溃");
     }
 
     #[test]
