@@ -29,6 +29,11 @@ const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11432";
 /// 历史：方案A（直连 11434）已否决，见 issue #11。
 const FUSION_ROUTE_HEADER: (&str, &str) = ("X-Fusion-Route", "fusion-design");
 
+/// 默认 max_tokens（生成上限）。A5：旧实现散落 9 处硬编码 4096，
+/// 改一处漏十处。提为常量，所有内置技能调用统一引用，调整只动一行。
+/// 可被调用方显式传参覆盖（各 chat 方法仍接受 max_tokens: u32）。
+const DEFAULT_MAX_TOKENS: u32 = 4096;
+
 /// fusion-mlx chat 请求体（OpenAI 兼容形状）。
 #[derive(Debug, Serialize)]
 struct MlxChatPayload<'a> {
@@ -347,6 +352,14 @@ pub async fn chat_stream_messages(
     messages: Vec<MlxChatMessage>,
     max_tokens: u32,
 ) -> impl futures::Stream<Item = anyhow::Result<MlxStreamDelta>> {
+    // A6 可观测性：关键推理入口记关联日志（model/消息数/max_tokens），
+    // 便于商用排障关联同一请求的完整生命周期。
+    tracing::info!(
+        model = %model,
+        msg_count = messages.len(),
+        max_tokens,
+        "chat_stream_messages: 启动流式推理请求"
+    );
     let payload = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -1200,7 +1213,7 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
                     bytes = b64.len(),
                     "image-to-ui: 已加载草图，发送真实多模态请求"
                 );
-                ctx.chat_with_image(&sys, &user, &b64, 4096)?
+                ctx.chat_with_image(&sys, &user, &b64, DEFAULT_MAX_TOKENS)?
             }
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
@@ -1248,7 +1261,8 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
                         bytes = b64.len(),
                         "image-to-ui: 已加载草图，发送真实多模态请求"
                     );
-                    ctx.chat_with_image_async(&sys, &user, &b64, 4096).await?
+                    ctx.chat_with_image_async(&sys, &user, &b64, DEFAULT_MAX_TOKENS)
+                        .await?
                 }
                 Err(e) => {
                     tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
@@ -1400,7 +1414,7 @@ component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?
             sys.push_str(&tokens);
         }
         let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
-        let resp = ctx.chat(&sys, &user, 4096)?;
+        let resp = ctx.chat(&sys, &user, DEFAULT_MAX_TOKENS)?;
         let spec = parse_spec_doc_json(&resp, title)?;
         Ok(SkillOutput::SpecDoc(spec))
     }
@@ -1429,7 +1443,7 @@ component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?
                 sys.push_str(&tokens);
             }
             let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
-            let resp = ctx.chat_async(&sys, &user, 4096).await?;
+            let resp = ctx.chat_async(&sys, &user, DEFAULT_MAX_TOKENS).await?;
             let spec = parse_spec_doc_json(&resp, title)?;
             Ok(SkillOutput::SpecDoc(spec))
         })
@@ -1791,7 +1805,14 @@ impl DesignSkills {
                     bytes = b64.len(),
                     "image_to_ui: 已加载草图，发送真实多模态请求"
                 );
-                chat_with_image_sync(&self.client, &self.default_model, &sys, &user, &b64, 4096)?
+                chat_with_image_sync(
+                    &self.client,
+                    &self.default_model,
+                    &sys,
+                    &user,
+                    &b64,
+                    DEFAULT_MAX_TOKENS,
+                )?
             }
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image_to_ui: 草图加载失败，回退文字描述");
@@ -1799,7 +1820,7 @@ impl DesignSkills {
                     "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
                 );
                 self.client
-                    .chat_sync(&self.default_model, &sys, &user_text, 4096)?
+                    .chat_sync(&self.default_model, &sys, &user_text, DEFAULT_MAX_TOKENS)?
             }
         };
         parse_ui_json(&resp, page_name)
@@ -1812,6 +1833,13 @@ impl DesignSkills {
         hint: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
+        // A6 可观测性：图生 UI 是核心产品入口，记关联字段便于排障追踪。
+        tracing::info!(
+            sketch_path,
+            page_name,
+            model = %self.default_model,
+            "image_to_ui_async: 启动图生 UI 请求"
+        );
         let sys = ui_generator_system_prompt();
         let user =
             format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
@@ -1822,7 +1850,15 @@ impl DesignSkills {
                     bytes = b64.len(),
                     "image_to_ui_async: 已加载草图，发送真实多模态请求"
                 );
-                chat_with_image(&self.client, &self.default_model, &sys, &user, &b64, 4096).await?
+                chat_with_image(
+                    &self.client,
+                    &self.default_model,
+                    &sys,
+                    &user,
+                    &b64,
+                    DEFAULT_MAX_TOKENS,
+                )
+                .await?
             }
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image_to_ui_async: 草图加载失败，回退文字描述");
@@ -1830,7 +1866,7 @@ impl DesignSkills {
                     "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
                 );
                 self.client
-                    .chat_async(&self.default_model, &sys, &user_text, 4096)
+                    .chat_async(&self.default_model, &sys, &user_text, DEFAULT_MAX_TOKENS)
                     .await?
             }
         };
@@ -1848,8 +1884,15 @@ impl DesignSkills {
         tracing::info!(path = %image_path.display(), size_b64 = b64.len(), "screenshot_to_ui: 图片已编码");
         let sys = ui_generator_system_prompt();
         let user = format!("补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
-        let resp =
-            chat_with_image(&self.client, &self.default_model, &sys, &user, &b64, 4096).await?;
+        let resp = chat_with_image(
+            &self.client,
+            &self.default_model,
+            &sys,
+            &user,
+            &b64,
+            DEFAULT_MAX_TOKENS,
+        )
+        .await?;
         parse_ui_json(&resp, page_name)
     }
 

@@ -109,10 +109,10 @@ impl HostBridgeConfig {
 
 /// 校验 endpoint 为 localhost。
 fn validate_localhost(endpoint: &str) -> Result<(), HostConfigError> {
-    let url = reqwest::Url::parse(endpoint)
-        .map_err(|e| HostConfigError::InvalidEndpoint(e.to_string()))?;
+    let url =
+        url::Url::parse(endpoint).map_err(|e| HostConfigError::InvalidEndpoint(e.to_string()))?;
     let host = url.host_str().unwrap_or("");
-    // reqwest::Url 对 IPv6 返回形如 "[::1]"，需去方括号比对
+    // url::Url 对 IPv6 返回形如 "[::1]"，需去方括号比对
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host != "127.0.0.1" && host != "localhost" && host != "::1" {
         return Err(HostConfigError::PublicEndpoint(host.to_string()));
@@ -146,7 +146,7 @@ pub fn is_external_url(url: &str) -> bool {
     //   内部 = file://（本地资源，离线前端入口）或 http/https 且 host∈白名单。
     //   外部 = javascript:/data:（无 host 的危险 scheme，XSS 载体）、解析失败。
     // 旧实现判无 host 的 javascript:/data: 为"内部/允许"，是 XSS 放行漏洞。
-    match reqwest::Url::parse(url) {
+    match url::Url::parse(url) {
         Ok(u) => {
             let scheme = u.scheme();
             if scheme == "file" {

@@ -916,13 +916,13 @@ name = "fd-host-desk"
 version = "0.1.11"
 dependencies = [
  "anyhow",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
