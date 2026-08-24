@@ -2032,7 +2032,11 @@ impl VersionedDocument {
     }
 
     pub fn active_version(&self) -> &NamedVersion {
-        if let Some(v) = self.versions.iter().find(|v| v.id == self.active_version_id) {
+        if let Some(v) = self
+            .versions
+            .iter()
+            .find(|v| v.id == self.active_version_id)
+        {
             v
         } else {
             tracing::error!(
@@ -2040,7 +2044,9 @@ impl VersionedDocument {
                 total = self.versions.len(),
                 "active_version_id 不在版本列表，回退最后一个版本（文件损坏或手动编辑致 id 失配）"
             );
-            self.versions.last().expect("VersionedDocument 至少含一个版本（构造保证）")
+            self.versions
+                .last()
+                .expect("VersionedDocument 至少含一个版本（构造保证）")
         }
     }
 

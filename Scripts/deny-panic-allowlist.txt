@@ -1,0 +1,6 @@
+# 生产代码 panic!/unimplemented!/todo!/unreachable! 允许站点基线。
+# 本门禁零容忍：仅录入确属编译期不可达不变量、且有 PR 说明理由的站点。
+# 新增站点默认 CI 失败。已删除站点静默忽略。
+# 排序：LC_ALL=C 字节序（脚本 comm 前双双 LC_ALL=C sort -u 对齐）。
+#
+# 当前基线：空（fd-export:220 unreachable!() 已改为 anyhow::bail! 传播，E-34）。

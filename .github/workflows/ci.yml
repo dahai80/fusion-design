@@ -43,11 +43,11 @@ jobs:
         run: cargo build -p fd-host-web --target wasm32-unknown-unknown
 
   # 依赖漏洞门禁（商用加固项 #1）。
-  # 失败不阻断主流程：cargo-audit 报告 advisories，作为早期预警。
+  # 修复 E-34：原 continue-on-error: true 致已知 RUSTSEC 通告随发布上线不阻断。
+  # 商用红线：带漏洞发布比延迟发布更糟。改阻断——有 advisory 即 CI 红，强制修。
   audit:
-    name: cargo-audit (advisory scan)
+    name: cargo-audit (advisory scan, blocking)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -63,33 +63,18 @@ jobs:
         run: cargo audit
 
   # 生产代码零 panic 门禁（商用加固项 #3）。
-  # 当前基线：所有 panic!/unimplemented!/todo!/unreachable! 均在 #[cfg(test)] 模块内。
-  # 任何生产代码顶层 panic 语句将使该 job 失败，防未来回归。
+  # 精确排除 #[cfg(test)] mod 块（Python 花括号匹配），扫全部 panic 宏含 match 臂。
+  # 修复 E-34：旧 grep `grep -vE "tests|=>"` 双重假阴性——`=>` 排除把
+  # match 臂 `=> panic!()` 整行过滤（生产 30+ 处漏网），且 `crates/*/src/*.rs`
+  # glob 漏嵌套子目录。
   deny-panic:
     name: deny panic in production code
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Scan for top-level panic statements in non-test source
-        run: |
-          set -euo pipefail
-          # 检测 src/ 文件中行首的 panic!/unimplemented!/todo!/unreachable! 语句。
-          # 测试模块内（mod tests）的 panic! 在 match 臂断言中形如 "=> panic!("，
-          # 故排除含 "=>" 的行与 tests 路径，聚焦生产顶层语句。
-          # 注意：grep 无匹配返回非零，pipefail 下会触发 set -e 提前退出，
-          # 故用 || true 兜底，确保"零匹配"场景能正常走到 echo 与判断。
-          strict=$(grep -rnE "^\s*(panic!|unimplemented!|todo!|unreachable!)\(" \
-            crates/*/src/*.rs 2>/dev/null \
-            | grep -vE "tests|=>" \
-            | wc -l | tr -d ' ' || true)
-          echo "生产代码顶层 panic 语句数: $strict"
-          if [ "$strict" -ne 0 ]; then
-            echo "::error::生产代码含顶层 panic/unimplemented/todo/unreachable 语句，违反商用零 panic 约束"
-            grep -rnE "^\s*(panic!|unimplemented!|todo!|unreachable!)\(" \
-              crates/*/src/*.rs 2>/dev/null | grep -vE "tests|=>" || true
-            exit 1
-          fi
+      - name: Scan for panic macros in non-test source
+        run: bash Scripts/deny-panic.sh
 
   # 生产代码 unwrap/expect 硬门禁（商用加固项 #3 扩展）。
   # deny-panic 已封 panic! 宏；本 job 扩展封裸 .unwrap()/.expect()。
@@ -105,14 +90,15 @@ jobs:
       - name: Scan for new bare .unwrap()/.expect() outside allowlist
         run: bash Scripts/deny-unwrap-expect.sh
 
-  # 发布打包：改为 tag 触发 + continue-on-error（商用加固项 #2）。
-  # macos-14 runner 供给瓶颈不应阻塞 main CI 恒绿；tag 推送时尽力出包。
+  # 发布打包：tag 触发，阻断（修复 E-34）。
+  # 原 continue-on-error: true 致 tag 推送时 tarball 静默失败，CI 绿但用户无包。
+  # release 是 outward-facing 交付物，失败必须红——runner 供给问题用重试/缓存解，
+  # 不用吞退出码掩盖。
   release-pack:
     name: release tarball (apple silicon)
     runs-on: macos-14
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build-test
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

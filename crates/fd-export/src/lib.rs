@@ -217,7 +217,10 @@ impl Exporter {
                     ExportFormat::Html => render_html(page),
                     ExportFormat::Svg => render_svg(page),
                     ExportFormat::Json => serde_json::to_string_pretty(page)?,
-                    _ => unreachable!(),
+                    other => {
+                        tracing::error!(format = ?other, "export_page 不支持的导出格式");
+                        anyhow::bail!("不支持的导出格式: {:?}", other);
+                    }
                 };
                 std::fs::write(&file, content)?;
             }
