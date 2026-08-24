@@ -995,10 +995,7 @@ mod tests {
         let file = link.send(&msg).unwrap();
         let fname = file.file_name().unwrap().to_string_lossy().to_string();
         let pid = std::process::id().to_string();
-        assert!(
-            fname.contains(&pid),
-            "文件名应含 pid={pid}，实际: {fname}"
-        );
+        assert!(fname.contains(&pid), "文件名应含 pid={pid}，实际: {fname}");
         // 形态：<数字纳秒>_<pid>_<数字seq>.json
         let stem = fname
             .strip_suffix(".json")

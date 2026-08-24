@@ -158,6 +158,17 @@ fn render_page_swiftui(page: &Page, indent: usize) -> String {
 }
 
 fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
+    node_to_swiftui_inner(node, indent, 0)
+}
+
+// C3 纵深防御：codegen 递归深度守卫。A4 已在反序列化层卡 MAX_NODE_DEPTH，
+// 此处独立上限防任何绕过路径（如未来新增加载入口）的栈溢出。
+const MAX_CODEGEN_DEPTH: usize = 128;
+
+fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String {
+    if depth > MAX_CODEGEN_DEPTH {
+        return format!("{}/* codegen depth limit reached */\n", "    ".repeat(indent));
+    }
     let pad = "    ".repeat(indent);
     let mut mods = vec![];
 
@@ -255,7 +266,7 @@ fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
                 format!("{}{}({}) {{\n", pad, container, spacing)
             };
             for c in &node.children {
-                out.push_str(&node_to_swiftui(c, indent + 1));
+                out.push_str(&node_to_swiftui_inner(c, indent + 1, depth + 1));
             }
             out.push_str(&format!("{}}}{}\n", pad, mod_str));
             out
@@ -267,7 +278,7 @@ fn node_to_swiftui(node: &PenNode, indent: usize) -> String {
         let mut out = format!("{}ZStack {{\n", pad);
         out.push_str(&rendered);
         for c in &node.children {
-            out.push_str(&node_to_swiftui(c, indent + 1));
+            out.push_str(&node_to_swiftui_inner(c, indent + 1, depth + 1));
         }
         out.push_str(&pad);
         out.push('}');
@@ -391,10 +402,21 @@ fn escape_html(s: &str) -> String {
 }
 
 fn node_to_html(node: &PenNode) -> String {
+    node_to_html_inner(node, 0)
+}
+
+fn node_to_html_inner(node: &PenNode, depth: usize) -> String {
+    if depth > MAX_CODEGEN_DEPTH {
+        return "<!-- codegen depth limit reached -->\n".to_string();
+    }
     let style = format_style_inline(node);
     // 子节点对任意 kind 均可能存在（parse-html 把带子节点的 <div> 映射为 Rect），
     // 统一收集后在各分支注入，避免叶子节点静默丢弃嵌套结构（#7）。
-    let children: String = node.children.iter().map(node_to_html).collect();
+    let children: String = node
+        .children
+        .iter()
+        .map(|c| node_to_html_inner(c, depth + 1))
+        .collect();
     match node.kind {
         NodeKind::Rect | NodeKind::Circle => {
             let tag = "div";
@@ -446,9 +468,20 @@ fn node_to_html(node: &PenNode) -> String {
 }
 
 fn node_to_react(node: &PenNode) -> String {
+    node_to_react_inner(node, 0)
+}
+
+fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
+    if depth > MAX_CODEGEN_DEPTH {
+        return "{/* codegen depth limit reached */}\n".to_string();
+    }
     let cls = node_to_tailwind(node);
     // 同 node_to_html：统一收集子节点并注入各分支，修复叶子节点丢嵌套（#7）。
-    let children: String = node.children.iter().map(node_to_react).collect();
+    let children: String = node
+        .children
+        .iter()
+        .map(|c| node_to_react_inner(c, depth + 1))
+        .collect();
     match node.kind {
         NodeKind::Rect | NodeKind::Circle => {
             let extra = if matches!(node.kind, NodeKind::Circle) {
