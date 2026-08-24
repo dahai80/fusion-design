@@ -14,24 +14,69 @@
 // Data schemas: LayoutMode/FlexParams/GridParams/TrackSizing/ComponentSlot/ComputedLayout
 // User instruction: "现在开始实施"
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // 反序列化安全护栏：限制恶意/损坏 .fusiondesign 的嵌套深度与节点总数，
 // 防止深度嵌套导致栈溢出或海量节点导致 OOM。
 const MAX_NODE_DEPTH: usize = 64;
 const MAX_NODE_TOTAL: usize = 100_000;
 
+// 文件格式 schema 版本（A1：无版本号无法做向前兼容/迁移）。
+// 当前版本 1。加载时校验：缺失视作 1（兼容旧文件），高于当前视作错误。
+pub const SCHEMA_VERSION: u32 = 1;
+
 // ── 文档/页面/节点 ──
 
 /// 画布文档（顶层工程文件 `.fusiondesign` 的结构体）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// A4：安全护栏（深度/总量上限）在反序列化边界强制执行，不经 from_json 走裸
+/// `serde_json::from_str::<PenDocument>` 同样受限——绕过在类型层不可能。
+/// A1：schema_version 字段支撑文件格式向前兼容/迁移。
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PenDocument {
+    /// 文件格式 schema 版本（A1）。缺失/0 视作 1（兼容旧文件）。
+    #[serde(default)]
+    pub schema_version: u32,
     pub pages: Vec<Page>,
     pub variables: Option<HashMap<String, VariableDef>>,
     /// 当前激活的设计规范 ID（对接 fd-design-system）。
     pub active_design_system: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for PenDocument {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct PenDocumentRaw {
+            #[serde(default)]
+            schema_version: u32,
+            #[serde(default)]
+            pages: Vec<Page>,
+            #[serde(default)]
+            variables: Option<HashMap<String, VariableDef>>,
+            #[serde(default)]
+            active_design_system: Option<String>,
+        }
+        let raw = PenDocumentRaw::deserialize(d)?;
+        // 缺失/0 视作 1（兼容 v0.1.x 旧文件）。
+        let schema_version = if raw.schema_version == 0 { SCHEMA_VERSION } else { raw.schema_version };
+        if schema_version > SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "文件 schema 版本 {schema_version} 高于当前支持 {SCHEMA_VERSION}，请升级 fusion-design"
+            )));
+        }
+        let doc = PenDocument {
+            schema_version,
+            pages: raw.pages,
+            variables: raw.variables,
+            active_design_system: raw.active_design_system,
+        };
+        // A4：反序列化边界强制安全护栏——任何加载路径（含裸 from_str、UndoRedoStack
+        // 反序列化内嵌 PenDocument）都无法绕过深度/总量上限。
+        doc.validate_limits().map_err(serde::de::Error::custom)?;
+        Ok(doc)
+    }
 }
 
 /// 页面（一画板）。
@@ -461,12 +506,11 @@ impl PenDocument {
         serde_json::to_string_pretty(self)
     }
 
-    /// 从 JSON 反序列化。
-    /// 含安全护栏：嵌套深度 ≤ `MAX_NODE_DEPTH`、节点总数 ≤ `MAX_NODE_TOTAL`，
-    /// 超限返回错误（防止恶意 .fusiondesign 栈溢出/OOM）。
+    /// 从 JSON 反序列化（anyhow 友好入口）。
+    /// 安全护栏已由 `Deserialize` 实现强制（A4），此方法仅做错误类型转换。
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        let doc: PenDocument = serde_json::from_str(json)?;
-        doc.validate_limits()?;
+        let doc: PenDocument = serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("反序列化失败（含安全护栏校验）: {e}"))?;
         Ok(doc)
     }
 
@@ -945,25 +989,26 @@ pub enum CanvasError {
 
 const UNDO_REDO_MAX_DEPTH: usize = 50;
 
+// P2：VecDeque + pop_front() O(1)，替代 Vec::remove(0) O(n) 深拷贝。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoRedoStack {
-    undo_stack: Vec<PenDocument>,
-    redo_stack: Vec<PenDocument>,
+    undo_stack: VecDeque<PenDocument>,
+    redo_stack: VecDeque<PenDocument>,
 }
 
 impl UndoRedoStack {
     pub fn new() -> Self {
         Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
         }
     }
 
     pub fn push(&mut self, snapshot: PenDocument) {
         if self.undo_stack.len() >= UNDO_REDO_MAX_DEPTH {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
-        self.undo_stack.push(snapshot);
+        self.undo_stack.push_back(snapshot);
         self.redo_stack.clear();
     }
 
@@ -979,14 +1024,14 @@ impl UndoRedoStack {
         if self.undo_stack.len() < 2 {
             return None;
         }
-        let current = self.undo_stack.pop()?;
-        self.redo_stack.push(current);
-        self.undo_stack.last().cloned()
+        let current = self.undo_stack.pop_back()?;
+        self.redo_stack.push_back(current);
+        self.undo_stack.back().cloned()
     }
 
     pub fn redo(&mut self) -> Option<PenDocument> {
-        let snapshot = self.redo_stack.pop()?;
-        self.undo_stack.push(snapshot.clone());
+        let snapshot = self.redo_stack.pop_back()?;
+        self.undo_stack.push_back(snapshot.clone());
         Some(snapshot)
     }
 }
@@ -2348,6 +2393,74 @@ mod version_tests {
         json.push_str(&node);
         json.push_str("]}],\"variables\":null,\"active_design_system\":null}");
         assert!(PenDocument::from_json(&json).is_err(), "深度超限应被拒绝");
+    }
+
+    /// A4：裸 `serde_json::from_str::<PenDocument>`（绕过 from_json 的路径）
+    /// 必须同样被自定义 Deserialize 拦截——CLI/undo/redo 旧绕过点修复的根。
+    #[test]
+    fn raw_deserialize_rejects_deeply_nested() {
+        let mut json =
+            String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
+        let mut node = String::from(
+            r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#,
+        );
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            node.push_str(
+                r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#,
+            );
+        }
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            node.push_str("]}");
+        }
+        json.push_str(&node);
+        json.push_str("]}]}");
+        let result: Result<PenDocument, _> = serde_json::from_str(&json);
+        assert!(result.is_err(), "裸 from_str 必须被自定义 Deserialize 拦截（A4）");
+    }
+
+    /// A4：超量节点（> MAX_NODE_TOTAL）裸 from_str 同样拒绝。
+    #[test]
+    fn raw_deserialize_rejects_too_many_nodes() {
+        let mut nodes = String::new();
+        for i in 0..(MAX_NODE_TOTAL + 10) {
+            if i > 0 {
+                nodes.push(',');
+            }
+            nodes.push_str(&format!(
+                r#"{{"id":"n{i}","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1}}"#
+            ));
+        }
+        let json = format!(
+            r#"{{"pages":[{{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":[{nodes}]}}]}}"#
+        );
+        let result: Result<PenDocument, _> = serde_json::from_str(&json);
+        assert!(result.is_err(), "超量节点裸 from_str 必须拒绝（A4）");
+    }
+
+    /// A1：schema_version 缺失（旧文件）视作 1，正常加载。
+    #[test]
+    fn schema_version_missing_defaults_to_one() {
+        let json = r#"{"pages":[],"variables":null,"active_design_system":null}"#;
+        let doc: PenDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.schema_version, SCHEMA_VERSION, "缺失 schema_version 默认 1");
+    }
+
+    /// A1：schema_version 高于当前 → 拒绝（防未来版本静默丢字段）。
+    #[test]
+    fn schema_version_ahead_rejected() {
+        let json = r#"{"schema_version":999,"pages":[],"variables":null,"active_design_system":null}"#;
+        let result: Result<PenDocument, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "超前 schema_version 应拒绝");
+    }
+
+    /// A1：schema_version=1 正常加载并回写。
+    #[test]
+    fn schema_version_roundtrip() {
+        let doc = PenDocument::new();
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(json.contains("\"schema_version\""), "序列化应含 schema_version");
+        let back: PenDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, SCHEMA_VERSION);
     }
 
     #[test]
