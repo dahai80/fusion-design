@@ -866,7 +866,11 @@ fn apply_tokens_to_nodes(
                 NodeKind::Image => "image",
                 NodeKind::Group => "group",
             };
-            let new_name = format!("{}_{}", kind_str, &node.id[..8.min(node.id.len())]);
+            // E-29：按字符边界取前 8 字符，非字节切片——含 CJK id 字节切片在
+            // 多字节字符中间切断会 panic at non-char boundary。node.id 含中文
+            // （如「登录按钮」）走 lint --fix 即崩。
+            let id_prefix: String = node.id.chars().take(8).collect();
+            let new_name = format!("{}_{}", kind_str, id_prefix);
             let before = node.name.clone();
             node.name = new_name.clone();
             result.fixes_applied += 1;
@@ -1649,6 +1653,28 @@ mod tests {
         let result = linter.auto_fix(&mut doc);
         assert!(result.details.iter().any(|d| d.action == "auto_name"));
         assert!(doc.pages[0].nodes[0].name.starts_with("rect_"));
+    }
+
+    #[test]
+    fn auto_fix_names_cjk_id_no_panic() {
+        // E-29 回归：含 CJK 的 node.id 走 auto_name 不得 panic。
+        // 旧 `&node.id[..8]` 字节切片在「登录」(e7 99 bb e5 bd 95) 第 8 字节
+        // 落在字符中间 → byte index 8 is not a char boundary panic。
+        // 现按字符边界取前 8 字符。
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("apple-hig").expect("apple-hig").clone();
+        let cjk_id = "登录按钮节点标识符0123456789";
+        let node = rect_node(cjk_id, "Rect", NodeStyle::default());
+        let mut doc = make_doc(vec![node]);
+
+        let linter = Linter::new().with_design_system(system);
+        let result = linter.auto_fix(&mut doc);
+        assert!(result.details.iter().any(|d| d.action == "auto_name"));
+        let renamed = &doc.pages[0].nodes[0].name;
+        assert!(renamed.starts_with("rect_"), "renamed={renamed}");
+        // 前缀应含完整 CJK 字符（不切断多字节字符）
+        assert!(renamed.contains("登录"), "renamed={renamed}");
     }
 
     #[test]
