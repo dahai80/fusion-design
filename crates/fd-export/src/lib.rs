@@ -380,7 +380,10 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
     }
     if width > MAX_CANVAS_DIM || height > MAX_CANVAS_DIM {
         tracing::warn!(
-            width, height, limit = MAX_CANVAS_DIM, "画布尺寸超出光栅化上限，拒绝渲染 PNG"
+            width,
+            height,
+            limit = MAX_CANVAS_DIM,
+            "画布尺寸超出光栅化上限，拒绝渲染 PNG"
         );
         anyhow::bail!(
             "画布尺寸 {}x{} 超出光栅化上限 {}x{}，拒绝渲染 PNG 防止 OOM",

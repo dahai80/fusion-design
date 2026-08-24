@@ -394,9 +394,14 @@ pub async fn chat_stream_messages(
                         // 超过上限仍无完整行，视为异常流，报错并丢弃缓冲。
                         const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
                         if buffer.len() > MAX_SSE_BUFFER && !buffer.contains('\n') {
-                            tracing::error!(len = buffer.len(), "SSE buffer 超限且无完整行，终止流");
+                            tracing::error!(
+                                len = buffer.len(),
+                                "SSE buffer 超限且无完整行，终止流"
+                            );
                             return Some((
-                                Err(anyhow::anyhow!("SSE buffer 超限 ({MAX_SSE_BUFFER} 字节) 无完整行")),
+                                Err(anyhow::anyhow!(
+                                    "SSE buffer 超限 ({MAX_SSE_BUFFER} 字节) 无完整行"
+                                )),
                                 (stream, String::new()),
                             ));
                         }

@@ -57,6 +57,9 @@ struct WebShellInner {
     canvas_id: String,
     ready: bool,
     pending_messages: Vec<String>,
+    // C11：缓存最近一次 render_dom 的 PenDocument JSON，替代 DOM 属性存储。
+    // viewport_cull_update 从这里读取，避免每帧从 data-fd-doc 重新解析整文档。
+    cached_doc_json: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -85,6 +88,7 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
         canvas_id: canvas_id.to_string(),
         ready: true,
         pending_messages: vec![],
+        cached_doc_json: None,
     };
 
     // 注册消息监听器
@@ -95,6 +99,7 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
         canvas_id: canvas_id.to_string(),
         ready: true,
         pending_messages: vec![],
+        cached_doc_json: None,
     });
 
     Ok(shell)
@@ -246,7 +251,10 @@ fn handle_host_message(json: &str) {
             web_sys::console::log_1(&"fd-host-web: 宿主就绪".into());
         }
         other => {
-            web_sys::console::debug_1(&format!("fd-host-web: 未处理消息 kind={other}").into());
+            // L5：未识别 kind 用 warn 而非 debug，便于版本不匹配时定位
+            web_sys::console::warn_1(
+                &format!("fd-host-web: 未识别消息 kind={other}，可能版本不匹配").into(),
+            );
         }
     }
 }
@@ -462,19 +470,30 @@ fn render_dom(doc_json: &str) {
     };
 
     // 获取或创建 DOM 容器
-    let container = document
-        .get_element_by_id("fusion-dom-root")
-        .unwrap_or_else(|| {
-            let div = document.create_element("div").unwrap();
-            div.set_id("fusion-dom-root");
-            div.set_attribute(
-                "style",
-                "position:relative;width:100%;height:100%;overflow:hidden;",
-            )
-            .ok();
-            document.body().unwrap().append_child(&div).ok();
-            div
-        });
+    let container = match document.get_element_by_id("fusion-dom-root") {
+        Some(c) => c,
+        None => {
+            // C12：create_element / body 失败不 panic，warn 后提前返回。
+            match document.create_element("div") {
+                Ok(div) => {
+                    div.set_id("fusion-dom-root");
+                    div.set_attribute(
+                        "style",
+                        "position:relative;width:100%;height:100%;overflow:hidden;",
+                    )
+                    .ok();
+                    if let Some(body) = document.body() {
+                        body.append_child(&div).ok();
+                    }
+                    div
+                }
+                Err(_) => {
+                    web_sys::console::warn_1(&"fd-host-web: render_dom 创建容器 div 失败".into());
+                    return;
+                }
+            }
+        }
+    };
 
     // 清空现有 DOM 节点
     container.set_inner_html("");
@@ -484,8 +503,15 @@ fn render_dom(doc_json: &str) {
     container.set_attribute("data-fd-pan-x", "0.0").ok();
     container.set_attribute("data-fd-pan-y", "0.0").ok();
 
-    // 缓存 PenDocument JSON 供视口剔除增量渲染使用
-    container.set_attribute("data-fd-doc", doc_json).ok();
+    // C11：不再把整份 PenDocument JSON 写入 DOM 属性（无界、每帧重解析）。
+    // 改为缓存到 SHELL 全局内存，viewport_cull_update 直接读取。
+    {
+        let mut guard = shell_lock();
+        if let Some(inner) = guard.as_mut() {
+            inner.cached_doc_json = Some(doc_json.to_string());
+        }
+    }
+    web_sys::console::log_1(&"fd-host-web: data-fd-doc 属性缓存已移除，改用内存缓存（C11）".into());
 
     // 使用 DocumentFragment 批量插入
     let fragment = document.create_document_fragment();
@@ -584,9 +610,13 @@ fn viewport_cull_update() {
         None => return,
     };
 
-    let doc_json = match container.get_attribute("data-fd-doc") {
-        Some(j) => j,
-        None => return,
+    // C11：从 SHELL 内存缓存读取 doc JSON，不再从 DOM 属性每帧重解析。
+    let doc_json = {
+        let guard = shell_lock();
+        match guard.as_ref().and_then(|i| i.cached_doc_json.clone()) {
+            Some(j) => j,
+            None => return,
+        }
     };
     let doc = match PenDocument::from_json(&doc_json) {
         Ok(d) => d,
@@ -641,12 +671,25 @@ fn collect_visible_node_ids(
     ids_to_add: &mut Vec<String>,
     ids_in_view: &mut std::collections::HashSet<String>,
 ) {
+    // C13：window/document 每事件调用一次成本高，提到递归外层复用。
+    let document = match web_sys::window().and_then(|w| w.document()) {
+        Some(d) => d,
+        None => return,
+    };
+    collect_visible_node_ids_inner(nodes, container, &document, ids_to_add, ids_in_view);
+}
+
+fn collect_visible_node_ids_inner(
+    nodes: &[fd_canvas_core::PenNode],
+    container: &web_sys::Element,
+    document: &web_sys::Document,
+    ids_to_add: &mut Vec<String>,
+    ids_in_view: &mut std::collections::HashSet<String>,
+) {
     for node in nodes {
         if is_node_in_viewport(node, container) {
             ids_in_view.insert(node.id.clone());
             // 检查 DOM 中是否已存在
-            let window = web_sys::window().unwrap();
-            let document = window.document().unwrap();
             if document
                 .query_selector(&node_selector(&node.id))
                 .unwrap_or(None)
@@ -655,7 +698,13 @@ fn collect_visible_node_ids(
                 ids_to_add.push(node.id.clone());
             }
         }
-        collect_visible_node_ids(&node.children, container, ids_to_add, ids_in_view);
+        collect_visible_node_ids_inner(
+            &node.children,
+            container,
+            document,
+            ids_to_add,
+            ids_in_view,
+        );
     }
 }
 
@@ -919,7 +968,13 @@ fn show_snap_lines(x_lines: &[f32], y_lines: &[f32]) {
         None => return,
     };
     // 创建吸附线容器
-    let overlay = document.create_element("div").unwrap();
+    let overlay = match document.create_element("div") {
+        Ok(el) => el,
+        Err(_) => {
+            web_sys::console::warn_1(&"fd-host-web: show_snap_lines 创建 overlay 失败".into());
+            return;
+        }
+    };
     overlay.set_id("fd-snap-overlay");
     overlay.set_attribute("style",
         "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9998;overflow:visible;"
@@ -927,21 +982,23 @@ fn show_snap_lines(x_lines: &[f32], y_lines: &[f32]) {
 
     // 垂直吸附线（X 坐标 → 竖线）
     for &x in x_lines {
-        let line = document.create_element("div").unwrap();
-        line.set_attribute("style", &format!(
-            "position:absolute;left:{}px;top:0;width:1px;height:100%;background:#007AFF;opacity:0.5;",
-            x
-        )).ok();
-        overlay.append_child(&line).ok();
+        if let Ok(line) = document.create_element("div") {
+            line.set_attribute("style", &format!(
+                "position:absolute;left:{}px;top:0;width:1px;height:100%;background:#007AFF;opacity:0.5;",
+                x
+            )).ok();
+            overlay.append_child(&line).ok();
+        }
     }
     // 水平吸附线（Y 坐标 → 横线）
     for &y in y_lines {
-        let line = document.create_element("div").unwrap();
-        line.set_attribute("style", &format!(
-            "position:absolute;top:{}px;left:0;height:1px;width:100%;background:#007AFF;opacity:0.5;",
-            y
-        )).ok();
-        overlay.append_child(&line).ok();
+        if let Ok(line) = document.create_element("div") {
+            line.set_attribute("style", &format!(
+                "position:absolute;top:{}px;left:0;height:1px;width:100%;background:#007AFF;opacity:0.5;",
+                y
+            )).ok();
+            overlay.append_child(&line).ok();
+        }
     }
     container.append_child(&overlay).ok();
 }
@@ -1369,6 +1426,30 @@ fn replace_css_prop(style: &str, prop: &str, value: &str) -> String {
     result
 }
 
+// L3：从 CSS style 字符串中移除指定属性（用于恢复显示时去掉 display 让 CSS 默认生效）。
+fn strip_css_prop(style: &str, prop: &str) -> String {
+    let prefix = format!("{}:", prop);
+    let parts: Vec<String> = style
+        .split(';')
+        .map(|p| p.trim())
+        .filter(|t| !t.is_empty() && !t.starts_with(&prefix))
+        .map(|t| t.to_string())
+        .collect();
+    parts.join(";")
+}
+
+// L3：读取 CSS style 字符串中指定属性的原始值（非数字也适用，如 display:flex）。
+fn read_css_prop_value(style: &str, prop: &str) -> Option<String> {
+    let prefix = format!("{}:", prop);
+    for part in style.split(';') {
+        let trimmed = part.trim();
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
 /// 设置画布空白区域的点击事件监听。
 fn setup_canvas_click_listener(container_id: &str) {
     let window = match web_sys::window() {
@@ -1548,7 +1629,13 @@ fn setup_marquee_listener(container_id: &str) {
 
         // 创建选框 DOM 元素
         let doc = web_sys::window().unwrap().document().unwrap();
-        let marquee_el = doc.create_element("div").unwrap();
+        let marquee_el = match doc.create_element("div") {
+            Ok(el) => el,
+            Err(_) => {
+                web_sys::console::warn_1(&"fd-host-web: marquee 创建选框元素失败".into());
+                return;
+            }
+        };
         marquee_el.set_id("fd-marquee");
         marquee_el
             .set_attribute(
@@ -1556,8 +1643,10 @@ fn setup_marquee_listener(container_id: &str) {
                 "position:fixed;border:2px dashed #007AFF;background:rgba(0,122,255,0.1);\
              pointer-events:none;z-index:99999;display:none;",
             )
-            .unwrap();
-        doc.body().unwrap().append_child(&marquee_el).ok();
+            .ok();
+        if let Some(body) = doc.body() {
+            body.append_child(&marquee_el).ok();
+        }
 
         let on_move = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let mm = match event.dyn_ref::<web_sys::MouseEvent>() {
@@ -1585,7 +1674,7 @@ fn setup_marquee_listener(container_id: &str) {
                         left, top, width, height
                     ),
                 )
-                .unwrap();
+                .ok();
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
@@ -1659,12 +1748,25 @@ fn collect_nodes_in_rect(left: f32, top: f32, right: f32, bottom: f32) -> Vec<St
         Some(c) => c,
         None => return vec![],
     };
-    let node: &web_sys::Node = container.unchecked_ref();
-    let child_nodes = node.child_nodes();
+    // L2：递归遍历子树，框选才能命中嵌套节点（原先只看一层）。
     let mut result = vec![];
+    let node: &web_sys::Node = container.unchecked_ref();
+    collect_nodes_in_rect_inner(node, left, top, right, bottom, &mut result);
+    result
+}
+
+fn collect_nodes_in_rect_inner(
+    parent: &web_sys::Node,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    out: &mut Vec<String>,
+) {
+    let child_nodes = parent.child_nodes();
     for i in 0..child_nodes.length() {
         if let Some(child) = child_nodes.get(i) {
-            if let Ok(el) = child.dyn_into::<web_sys::Element>() {
+            if let Ok(el) = child.clone().dyn_into::<web_sys::Element>() {
                 if let Some(node_id) = el.get_attribute("data-node-id") {
                     let rect = el.get_bounding_client_rect();
                     let el_left = rect.left() as f32;
@@ -1673,13 +1775,15 @@ fn collect_nodes_in_rect(left: f32, top: f32, right: f32, bottom: f32) -> Vec<St
                     let el_bottom = rect.bottom() as f32;
                     // 判断矩形重叠
                     if el_left < right && el_right > left && el_top < bottom && el_bottom > top {
-                        result.push(node_id);
+                        out.push(node_id);
                     }
                 }
+                // 递归进入子树
+                let child_node: &web_sys::Node = el.unchecked_ref();
+                collect_nodes_in_rect_inner(child_node, left, top, right, bottom, out);
             }
         }
     }
-    result
 }
 
 /// 画布缩放视觉反馈：更新 CSS transform scale + translate。
@@ -1826,25 +1930,17 @@ fn toggle_node_selection(node_id: &str) {
     {
         let is_selected = el.get_attribute("data-fd-selected").unwrap_or_default() == "true";
         if is_selected {
+            // L4：取消选中只移除我们注入的 box-shadow，不触碰用户 outline。
             let style = el.get_attribute("style").unwrap_or_default();
-            let clean = style
-                .split(';')
-                .filter(|s| {
-                    let t = s.trim();
-                    !t.starts_with("outline:") && !t.starts_with("outline-offset:")
-                })
-                .collect::<Vec<&str>>()
-                .join(";");
+            let clean = strip_css_prop(&style, "box-shadow");
             el.set_attribute("style", &clean).ok();
             el.remove_attribute("data-fd-selected").ok();
         } else {
             el.set_attribute("data-fd-selected", "true").ok();
+            // L4：用 box-shadow 做选中高亮，保留节点自身 outline 不被覆盖。
             let style = el.get_attribute("style").unwrap_or_default();
-            el.set_attribute(
-                "style",
-                &format!("{};outline:2px solid #007AFF;outline-offset:2px;", style),
-            )
-            .ok();
+            el.set_attribute("style", &format!("{};box-shadow:0 0 0 2px #007AFF;", style))
+                .ok();
         }
     }
 }
@@ -1867,11 +1963,53 @@ fn apply_tokens_css(css: &str) {
         old.remove();
     }
 
+    // C10：sanitize 后再注入，剥离 @import/@font-face/url()/expression()/javascript:
+    let safe = sanitize_token_css(css);
+
     // 注入新 token style
-    let style_el = document.create_element("style").unwrap();
+    let style_el = match document.create_element("style") {
+        Ok(el) => el,
+        Err(_) => {
+            web_sys::console::warn_1(&"fd-host-web: apply_tokens_css 创建 <style> 失败".into());
+            return;
+        }
+    };
     style_el.set_id("fusion-tokens");
-    style_el.set_text_content(Some(css));
-    document.head().unwrap().append_child(&style_el).ok();
+    style_el.set_text_content(Some(&safe));
+    if let Some(head) = document.head() {
+        head.append_child(&style_el).ok();
+    } else {
+        web_sys::console::warn_1(&"fd-host-web: apply_tokens_css document.head 缺失".into());
+    }
+}
+
+// C10：剥离危险 CSS 内容，只保留 --token: value 形式的声明。
+// 命中以下关键词的整行剔除（大小写不敏感）：@import / @font-face / expression( / url( / javascript:
+// 返回净化后的 CSS；stripped 计数通过 warn 日志输出（不回显原始 payload）。
+fn sanitize_token_css(css: &str) -> String {
+    let dangerous = [
+        "@import",
+        "@font-face",
+        "expression(",
+        "url(",
+        "javascript:",
+    ];
+    let mut stripped: u32 = 0;
+    let mut out: Vec<&str> = Vec::with_capacity(css.lines().count());
+    for line in css.lines() {
+        let lower = line.to_ascii_lowercase();
+        if dangerous.iter().any(|needle| lower.contains(needle)) {
+            stripped += 1;
+            continue;
+        }
+        out.push(line);
+    }
+    if stripped > 0 {
+        web_sys::console::warn_1(
+            &format!("fd-host-web: sanitize_token_css 剔除 {stripped} 行危险 CSS").into(),
+        );
+    }
+    out.join("\n")
 }
 
 /// 选中节点（添加选中高亮 + resize handles）。
@@ -1890,16 +2028,9 @@ fn select_node(node_id: &str) {
         for i in 0..selected.length() {
             if let Some(node) = selected.item(i) {
                 if let Ok(el) = node.dyn_into::<web_sys::Element>() {
-                    // 恢复原始 style（去掉 outline）
+                    // L4：取消选中只移除我们注入的 box-shadow，不触碰用户 outline。
                     let style = el.get_attribute("style").unwrap_or_default();
-                    let clean = style
-                        .split(';')
-                        .filter(|s| {
-                            let t = s.trim();
-                            !t.starts_with("outline:") && !t.starts_with("outline-offset:")
-                        })
-                        .collect::<Vec<&str>>()
-                        .join(";");
+                    let clean = strip_css_prop(&style, "box-shadow");
                     el.set_attribute("style", &clean).ok();
                     el.remove_attribute("data-fd-selected").ok();
                 }
@@ -1923,12 +2054,10 @@ fn select_node(node_id: &str) {
         .unwrap_or(None)
     {
         el.set_attribute("data-fd-selected", "true").ok();
+        // L4：用 box-shadow 做选中高亮，保留节点自身 outline 不被覆盖。
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute(
-            "style",
-            &format!("{};outline:2px solid #007AFF;outline-offset:2px;", style),
-        )
-        .ok();
+        el.set_attribute("style", &format!("{};box-shadow:0 0 0 2px #007AFF;", style))
+            .ok();
 
         // 添加 8 个 resize handles
         let (w, h) = read_node_size(&el);
@@ -2283,13 +2412,24 @@ fn set_node_visibility(node_id: &str, visible: bool) {
     {
         if visible {
             el.remove_attribute("data-fd-hidden").ok();
+            // L3：恢复显示时不强制 display:block，从 data-fd-prev-display 还原；
+            // 缺失则移除 display 声明让 CSS 默认生效，避免破坏 flex/grid。
+            let prev = el.get_attribute("data-fd-prev-display").unwrap_or_default();
             let style = el.get_attribute("style").unwrap_or_default();
-            let new_style = replace_css_prop(&style, "display", "block");
+            let new_style = if prev.is_empty() {
+                strip_css_prop(&style, "display")
+            } else {
+                replace_css_prop(&style, "display", &prev)
+            };
             el.set_attribute("style", &new_style).ok();
+            el.remove_attribute("data-fd-prev-display").ok();
             web_sys::console::log_1(&format!("fd-host-web: node {node_id} set visible").into());
         } else {
             el.set_attribute("data-fd-hidden", "true").ok();
+            // L3：隐藏前把当前 display 存起来，恢复时还原，避免硬编码 block 破坏布局。
             let style = el.get_attribute("style").unwrap_or_default();
+            let prev_display = read_css_prop_value(&style, "display").unwrap_or_default();
+            el.set_attribute("data-fd-prev-display", &prev_display).ok();
             let new_style = replace_css_prop(&style, "display", "none");
             el.set_attribute("style", &new_style).ok();
             web_sys::console::log_1(&format!("fd-host-web: node {node_id} set hidden").into());
@@ -2348,17 +2488,24 @@ fn reorder_node(node_id: &str, new_index: usize) {
         .unwrap_or(None)
     {
         let node: &web_sys::Node = container.unchecked_ref();
+        // L1：先把被移动节点从父容器剥离，再以剩余子节点为基准定位插入点。
+        // 否则被移动节点本身仍占用一个槽位，导致目标 index 偏移一位、错位。
+        node.remove_child(&el).ok();
         let child_nodes = node.child_nodes();
         let count = child_nodes.length() as usize;
-        if new_index < count {
-            if let Some(ref_child) = child_nodes.get(new_index as u32) {
+        // L1：clamp 到有效区间，防止 new_index 越界静默丢弃。
+        let target = new_index.min(count);
+        if target < count {
+            if let Some(ref_child) = child_nodes.get(target as u32) {
                 node.insert_before(&el, Some(&ref_child)).ok();
+            } else {
+                node.append_child(&el).ok();
             }
         } else {
             node.append_child(&el).ok();
         }
         web_sys::console::log_1(
-            &format!("fd-host-web: node {node_id} reordered to {new_index}").into(),
+            &format!("fd-host-web: node {node_id} reordered to {target}").into(),
         );
     }
 }
@@ -2438,15 +2585,35 @@ fn render_plan_preview(doc_json: &str) {
         None => return,
     };
 
-    let overlay = document.create_element("div").unwrap();
+    let overlay = match document.create_element("div") {
+        Ok(el) => el,
+        Err(_) => {
+            web_sys::console::warn_1(&"fd-host-web: render_plan_preview 创建 overlay 失败".into());
+            return;
+        }
+    };
     overlay.set_id("fd-plan-preview");
-    overlay.set_attribute("style",
-        "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1000;"
-    ).unwrap();
+    if overlay
+        .set_attribute(
+            "style",
+            "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1000;",
+        )
+        .is_err()
+    {
+        web_sys::console::warn_1(&"fd-host-web: render_plan_preview overlay set_attribute 失败".into());
+    }
 
     for page in &doc.pages {
         for node in &page.nodes {
-            let el = document.create_element("div").unwrap();
+            let el = match document.create_element("div") {
+                Ok(e) => e,
+                Err(_) => {
+                    web_sys::console::warn_1(
+                        &"fd-host-web: render_plan_preview 创建节点失败".into(),
+                    );
+                    continue;
+                }
+            };
             let style = format!(
                 "position:absolute;left:{}px;top:{}px;width:{}px;height:{}px;\
                  border:2px dashed #007AFF;border-radius:{}px;opacity:0.6;",
@@ -2456,15 +2623,20 @@ fn render_plan_preview(doc_json: &str) {
                 node.h as i32,
                 node.style.radius.map(|r| r as i32).unwrap_or(0)
             );
-            el.set_attribute("style", &style).unwrap();
+            // C12：set_attribute 失败不 panic，warn 后跳过该节点样式注入。
+            if el.set_attribute("style", &style).is_err() {
+                web_sys::console::warn_1(
+                    &"fd-host-web: render_plan_preview 节点 set_attribute 失败".into(),
+                );
+            }
             if let Some(text) = &node.text {
                 el.set_text_content(Some(text));
             }
-            overlay.append_child(&el).unwrap();
+            overlay.append_child(&el).ok();
         }
     }
 
-    container.append_child(&overlay).unwrap();
+    container.append_child(&overlay).ok();
     web_sys::console::log_1(&"fd-host-web: Plan preview rendered".into());
 }
 
@@ -2710,6 +2882,7 @@ mod tests {
                 canvas_id: "canvas".into(),
                 ready: true,
                 pending_messages: vec![],
+                cached_doc_json: None,
             },
         };
     }

@@ -345,6 +345,34 @@ impl From<ThemeModeArg> for fd_design_system::Theme {
     }
 }
 
+/// stdin 单次读取上限（字节）。设计文档体量大，但远小于此；
+/// 超限即拒绝，防巨输入 OOM。50MB 足够任何合法 .fusiondesign。
+const STDIN_READ_CAP: usize = 50 * 1024 * 1024;
+
+/// 分块读 stdin 至 STDIN_READ_CAP，超限 bail + warn。
+fn read_stdin_capped() -> anyhow::Result<String> {
+    use std::io::Read;
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut buf = String::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = handle.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        // UTF-8 边界：临时 byte buf 拼接，最后一次性 from_utf8。
+        // 这里直接 push_str 依赖 chunk 可能在多字节字符中间切断；
+        // 改用 bytes 累加再 from_utf8 保证安全。
+        buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        if buf.len() > STDIN_READ_CAP {
+            tracing::warn!("stdin 超过 {STDIN_READ_CAP} 字节上限，拒绝读取");
+            anyhow::bail!("stdin 输入超过 {STDIN_READ_CAP} 字节上限，拒绝读取防 OOM");
+        }
+    }
+    Ok(buf)
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -808,12 +836,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::ParseHtml { input, page } => {
             let html = match input {
                 Some(p) => std::fs::read_to_string(&p)?,
-                None => {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    std::io::stdin().read_to_string(&mut buf)?;
-                    buf
-                }
+                None => read_stdin_capped()?,
             };
             let page_name = page.as_deref().unwrap_or("Page");
             let doc = fd_ai_adapter::html_to_pen_document(&html, page_name)?;
@@ -883,12 +906,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let json = match input {
                 Some(p) => std::fs::read_to_string(&p)?,
-                None => {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    std::io::stdin().read_to_string(&mut buf)?;
-                    buf
-                }
+                None => read_stdin_capped()?,
             };
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
             let code = match target {

@@ -519,12 +519,26 @@ impl EcosystemLink {
 
         let handle = tokio::spawn(async move {
             use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-            let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Event>(64);
+            let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Event>(256);
 
             let mut watcher = match RecommendedWatcher::new(
                 move |res: Result<Event, notify::Error>| {
                     if let Ok(event) = res {
-                        let _ = notify_tx.blocking_send(event);
+                        // L11：try_send 而非 blocking_send。
+                        //   blocking_send 会阻塞 notify 回调线程 → OS 事件队列（kqueue）积压
+                        //   → 高频下 OS 层整批丢事件（静默）。改 try_send：通道满时丢单条
+                        //   + warn 可见，回调线程不被阻塞，持续消费 OS 事件。
+                        match notify_tx.try_send(event) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    "watch_async: 事件通道满，丢弃文件事件（消费慢于生产）"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::info!("watch_async: 事件通道已关闭，停止回调投递");
+                            }
+                        }
                     }
                 },
                 notify::Config::default(),
@@ -546,7 +560,16 @@ impl EcosystemLink {
             let mut stop_rx = rx;
             loop {
                 tokio::select! {
-                    Some(event) = notify_rx.recv() => {
+                    // L11：通道关闭（watcher 线程退出/panic → notify_tx drop）必须 break，
+                    //   否则 task 永远只等 stop_rx，watcher（持 kqueue fd）不释放 = 泄漏。
+                    event = notify_rx.recv() => {
+                        let event = match event {
+                            Some(e) => e,
+                            None => {
+                                tracing::warn!("watch_async: 事件通道关闭（watcher 线程已退出），停止监听");
+                                break;
+                            }
+                        };
                         let kind = match event.kind {
                             EventKind::Create(_) => WatchEventKind::Created,
                             EventKind::Modify(_) => WatchEventKind::Modified,
@@ -566,6 +589,8 @@ impl EcosystemLink {
                     }
                 }
             }
+            // watcher 在此 drop → 释放 kqueue/inotify 句柄，L11 泄漏点关闭。
+            tracing::info!("watch_async: 监控任务退出，watcher 句柄已释放");
         });
 
         Ok((handle, tx))

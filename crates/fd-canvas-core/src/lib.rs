@@ -60,7 +60,11 @@ impl<'de> Deserialize<'de> for PenDocument {
         }
         let raw = PenDocumentRaw::deserialize(d)?;
         // 缺失/0 视作 1（兼容 v0.1.x 旧文件）。
-        let schema_version = if raw.schema_version == 0 { SCHEMA_VERSION } else { raw.schema_version };
+        let schema_version = if raw.schema_version == 0 {
+            SCHEMA_VERSION
+        } else {
+            raw.schema_version
+        };
         if schema_version > SCHEMA_VERSION {
             return Err(serde::de::Error::custom(format!(
                 "文件 schema 版本 {schema_version} 高于当前支持 {SCHEMA_VERSION}，请升级 fusion-design"
@@ -2415,7 +2419,10 @@ mod version_tests {
         json.push_str(&node);
         json.push_str("]}]}");
         let result: Result<PenDocument, _> = serde_json::from_str(&json);
-        assert!(result.is_err(), "裸 from_str 必须被自定义 Deserialize 拦截（A4）");
+        assert!(
+            result.is_err(),
+            "裸 from_str 必须被自定义 Deserialize 拦截（A4）"
+        );
     }
 
     /// A4：超量节点（> MAX_NODE_TOTAL）裸 from_str 同样拒绝。
@@ -2442,13 +2449,17 @@ mod version_tests {
     fn schema_version_missing_defaults_to_one() {
         let json = r#"{"pages":[],"variables":null,"active_design_system":null}"#;
         let doc: PenDocument = serde_json::from_str(json).unwrap();
-        assert_eq!(doc.schema_version, SCHEMA_VERSION, "缺失 schema_version 默认 1");
+        assert_eq!(
+            doc.schema_version, SCHEMA_VERSION,
+            "缺失 schema_version 默认 1"
+        );
     }
 
     /// A1：schema_version 高于当前 → 拒绝（防未来版本静默丢字段）。
     #[test]
     fn schema_version_ahead_rejected() {
-        let json = r#"{"schema_version":999,"pages":[],"variables":null,"active_design_system":null}"#;
+        let json =
+            r#"{"schema_version":999,"pages":[],"variables":null,"active_design_system":null}"#;
         let result: Result<PenDocument, _> = serde_json::from_str(json);
         assert!(result.is_err(), "超前 schema_version 应拒绝");
     }
@@ -2458,7 +2469,10 @@ mod version_tests {
     fn schema_version_roundtrip() {
         let doc = PenDocument::new();
         let json = serde_json::to_string(&doc).unwrap();
-        assert!(json.contains("\"schema_version\""), "序列化应含 schema_version");
+        assert!(
+            json.contains("\"schema_version\""),
+            "序列化应含 schema_version"
+        );
         let back: PenDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(back.schema_version, SCHEMA_VERSION);
     }

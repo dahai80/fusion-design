@@ -167,7 +167,10 @@ const MAX_CODEGEN_DEPTH: usize = 128;
 
 fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String {
     if depth > MAX_CODEGEN_DEPTH {
-        return format!("{}/* codegen depth limit reached */\n", "    ".repeat(indent));
+        return format!(
+            "{}/* codegen depth limit reached */\n",
+            "    ".repeat(indent)
+        );
     }
     let pad = "    ".repeat(indent);
     let mut mods = vec![];
@@ -711,7 +714,10 @@ mod tests {
         page.add(n);
         doc.add_page(page);
         let out = HtmlCodegen.generate(&doc);
-        assert!(!out.contains("<img src=x onerror"), "原始标签不得残留在 HTML 输出");
+        assert!(
+            !out.contains("<img src=x onerror"),
+            "原始标签不得残留在 HTML 输出"
+        );
         assert!(out.contains("&lt;img"), "必须转义为实体");
     }
 
@@ -727,7 +733,10 @@ mod tests {
             component_name: "XssTest".into(),
         };
         let out = gen.generate(&doc);
-        assert!(!out.contains("<script>"), "原始 script 标签不得残留在 JSX 输出");
+        assert!(
+            !out.contains("<script>"),
+            "原始 script 标签不得残留在 JSX 输出"
+        );
         assert!(out.contains("&lt;script&gt;"), "必须转义为实体");
     }
 
