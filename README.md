@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.12 — 11 crates + vendored op-ai, 431 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制（回环+RFC1918+链路本地，拒公网）、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；死代码清理（fd-asset 整 crate、Taffy compute_layout、apply_patch、fd-ecosystem MCP+watch_async）；chat NDJSON 对齐 studio schema（delta/chat_done/error）；CI 零 panic 双门禁（deny-panic + deny-unwrap-expect，allowlist 基线）；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分/离线边界 对抗回归测试。
+**Status**: v0.1.12 — 11 crates + vendored op-ai, 433 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制（回环+RFC1918+链路本地，拒公网）、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；死代码清理（fd-asset 整 crate、Taffy compute_layout、apply_patch、fd-ecosystem MCP+watch_async）；chat NDJSON 对齐 studio schema（delta/chat_done/error）；CI 零 panic 双门禁（deny-panic + deny-unwrap-expect，allowlist 基线）；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分/离线边界 对抗回归测试。
 
 ## 📋 Overview
 
@@ -77,7 +77,7 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # Full workspace compiles
-cargo test --workspace                                         # 431 tests pass (+1 ignored perf baseline)
+cargo test --workspace                                         # 433 tests pass (+1 ignored perf baseline)
 bash Scripts/deny-unwrap-expect.sh                             # 零 unwrap/expect 门禁（allowlist 基线）
 cargo test --release -- --ignored perf_baseline                # 1000-node perf baseline (<500ms each)
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM build succeeds
