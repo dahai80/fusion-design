@@ -14,6 +14,13 @@
 //! 对 502/503 瞬时错误指数退避重试（500ms→1s→2s→4s→8s 封顶，默认最多 4 次），
 //! 4xx 永久错误（鉴权/请求格式）直接失败不重试。`FUSION_MLX_RETRY_MAX` 环境变量
 //! 调最大尝试次数（含首次），设 1 即关闭重试。流式仅覆盖建连阶段，中途断流不重试。
+//!
+//! 【H-A7 流式塌缩修复】`ChatProvider::send` 受 op-ai trait 同步语义约束
+//! （`Box<dyn Iterator<Item=ChatDelta>>`，非 async Stream），无法做真 SSE 流。
+//! 旧实现把 `chat_sync_messages` 全文包成单个 `TextDelta`，消费方等全文生成完
+//! 才见首个 delta。改为按行分块：每行（含换行）一个 `TextDelta`，消费方逐行收
+//! 增量序列；空文本不产 `TextDelta` 仅 `Done`。真流式仍走 `chat_stream_messages`
+//! （CLI `chat` + studio），trait 路径为同步消费方提供增量逼近。
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
@@ -1210,19 +1217,39 @@ impl ChatProvider for FusionMlxChatProvider {
                 "ChatRequest.attachments 无 wire 支持，已降级忽略（多模态附件尚未接入）"
             );
         }
+        // H-A7：旧实现把全文包成单个 TextDelta，消费方等全文生成完才见首个 delta
+        // （同步 trait 语义下无真流式，但仍应产增量序列而非一次性蹦全文）。
+        // 按行分块：每行（含换行）一个 TextDelta，消费方逐行收增量；末帧 Done。
+        // 空文本不产 TextDelta，仅 Done。
         match self
             .client
             .chat_sync_messages(model, messages, request.max_output_tokens)
         {
-            Ok(text) => Box::new(
-                vec![
-                    ChatDelta::TextDelta(text),
-                    ChatDelta::Done {
-                        stop_reason: StopReason::EndTurn,
-                    },
-                ]
-                .into_iter(),
-            ),
+            Ok(text) => {
+                let mut deltas: Vec<ChatDelta> = Vec::new();
+                let mut rest = text.as_str();
+                while !rest.is_empty() {
+                    match rest.find('\n') {
+                        Some(i) => {
+                            let line_end = i + 1;
+                            deltas.push(ChatDelta::TextDelta(rest[..line_end].to_string()));
+                            rest = &rest[line_end..];
+                        }
+                        None => {
+                            deltas.push(ChatDelta::TextDelta(rest.to_string()));
+                            rest = "";
+                        }
+                    }
+                }
+                tracing::info!(
+                    chunks = deltas.len(),
+                    "ChatProvider::send: 分块产出增量 delta 序列"
+                );
+                deltas.push(ChatDelta::Done {
+                    stop_reason: StopReason::EndTurn,
+                });
+                Box::new(deltas.into_iter())
+            }
             Err(e) => Box::new(vec![ChatDelta::Error(e.to_string())].into_iter()),
         }
     }
@@ -4675,6 +4702,103 @@ mod mlx_integration {
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"], "hi");
         assert_eq!(payload["model"], "default-model", "model=None 回退 default");
+    }
+
+    /// H-A7：多行文本应按行分块产多个 TextDelta，而非塌缩成单段全文。
+    /// 同步 trait 语义下无真流式，但消费方应收到增量序列（逐行 delta + Done）。
+    #[test]
+    fn send_chunks_multiline_into_multiple_deltas() {
+        let body = String::from(r#"{"choices":[{"message":{"content":"line1\nline2\nline3"}}]}"#);
+        let (url, _captured) = capturing_server(&body);
+        let client = mock_client(&url);
+        let provider = FusionMlxChatProvider::new(client, "default-model");
+        let request = ChatRequest {
+            system_prompt: "sys".into(),
+            user_message: "usr".into(),
+            history: vec![],
+            max_output_tokens: 64,
+            thinking: ThinkingMode::default(),
+            effort: EffortLevel::default(),
+            attachments: vec![],
+            model: Some("m".into()),
+        };
+        let deltas: Vec<ChatDelta> = provider.send(request).collect();
+        let text_deltas: Vec<&String> = deltas
+            .iter()
+            .filter_map(|d| match d {
+                ChatDelta::TextDelta(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text_deltas.len(),
+            3,
+            "三行文本应产 3 个 TextDelta，非单段全文"
+        );
+        assert_eq!(text_deltas[0], "line1\n");
+        assert_eq!(text_deltas[1], "line2\n");
+        assert_eq!(text_deltas[2], "line3");
+        assert!(
+            deltas.iter().any(|d| matches!(d, ChatDelta::Done { .. })),
+            "末帧应为 Done"
+        );
+    }
+
+    /// H-A7：无换行单段文本产 1 TextDelta + Done。
+    #[test]
+    fn send_single_line_one_delta() {
+        let body = String::from(r#"{"choices":[{"message":{"content":"oneliner"}}]}"#);
+        let (url, _captured) = capturing_server(&body);
+        let client = mock_client(&url);
+        let provider = FusionMlxChatProvider::new(client, "default-model");
+        let request = ChatRequest {
+            system_prompt: "sys".into(),
+            user_message: "usr".into(),
+            history: vec![],
+            max_output_tokens: 64,
+            thinking: ThinkingMode::default(),
+            effort: EffortLevel::default(),
+            attachments: vec![],
+            model: Some("m".into()),
+        };
+        let deltas: Vec<ChatDelta> = provider.send(request).collect();
+        let text_deltas: Vec<&String> = deltas
+            .iter()
+            .filter_map(|d| match d {
+                ChatDelta::TextDelta(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_deltas.len(), 1);
+        assert_eq!(text_deltas[0], "oneliner");
+    }
+
+    /// H-A7：空文本不产 TextDelta，仅 Done（无空增量噪声）。
+    #[test]
+    fn send_empty_text_no_text_delta() {
+        let body = String::from(r#"{"choices":[{"message":{"content":""}}]}"#);
+        let (url, _captured) = capturing_server(&body);
+        let client = mock_client(&url);
+        let provider = FusionMlxChatProvider::new(client, "default-model");
+        let request = ChatRequest {
+            system_prompt: "sys".into(),
+            user_message: "usr".into(),
+            history: vec![],
+            max_output_tokens: 64,
+            thinking: ThinkingMode::default(),
+            effort: EffortLevel::default(),
+            attachments: vec![],
+            model: Some("m".into()),
+        };
+        let deltas: Vec<ChatDelta> = provider.send(request).collect();
+        assert!(
+            !deltas.iter().any(|d| matches!(d, ChatDelta::TextDelta(_))),
+            "空文本不应产 TextDelta"
+        );
+        assert!(
+            deltas.iter().any(|d| matches!(d, ChatDelta::Done { .. })),
+            "空文本仍应有 Done 帧"
+        );
     }
 }
 
