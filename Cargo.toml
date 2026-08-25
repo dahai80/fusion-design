@@ -11,7 +11,7 @@ members = [
     # Callers: workspace root, cargo build/test. Affected API: new member fd-design-lint. Data schemas: none. User instruction: "现在开始实施" — Task #17
     "crates/fd-export",
     "crates/fd-design-lint",
-    "crates/fd-asset",
+    # H-A12/P1-6：fd-asset 已移除（整 crate 死代码，零生产调用，占"九端"宣传位无功能）。
     "crates/fd-cli",
     # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
     "vendor/openpencil/crates/op-ai",

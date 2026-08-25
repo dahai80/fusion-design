@@ -8,11 +8,11 @@
 //! 模型覆盖 MVP 必需：PenDocument/PenNode/page/node/style/sizing/variable，
 //! 形状参照 OpenPencil `jian_ops_schema` 的公开引用，但裁剪至 fusion-design 用途。
 //!
-//! V0.2 扩展：LayoutMode(Flex/Grid) + Taffy 布局引擎 + ComponentSlot + Token 引用。
-// Callers: fd-host-web (DOM render), fd-codegen (code gen), fd-export (export)
-// Affected API: NodeStyle (new fields), PenNode (rotation/z_index), PenDocument::compute_layout()
-// Data schemas: LayoutMode/FlexParams/GridParams/TrackSizing/ComponentSlot/ComputedLayout
-// User instruction: "现在开始实施"
+//! V0.2 扩展：LayoutMode(Flex/Grid) 声明 + ComponentSlot + Token 引用。
+// Callers: fd-host-web (DOM render), fd-codegen (layout-aware CSS gen), fd-export (export)
+// Affected API: NodeStyle (new fields), PenNode (rotation/z_index)
+// Data schemas: LayoutMode/FlexParams/GridParams/TrackSizing/ComponentSlot
+// H-A10：Taffy compute_layout 已移除（死代码）；Flex/Grid 渲染由 codegen 生成 CSS。
 
 use std::collections::{HashMap, VecDeque};
 
@@ -22,6 +22,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 // 防止深度嵌套导致栈溢出或海量节点导致 OOM。
 const MAX_NODE_DEPTH: usize = 64;
 const MAX_NODE_TOTAL: usize = 100_000;
+
+// H-A14/P2-4：VersionedDocument 落盘体积硬上限（字节）。
+// 命名版本各存整份快照（PenDocument deep copy），多版本下文件线性膨胀，
+// 旧实现 10000 节点×20 命名版本+50 undo 栈 = 70 深拷贝 ≈ 140-350MB，
+// WKWebView jetsam kill。undo 栈改为 session-scoped 不落盘后，
+// 命名版本数本身仍有上限——32MB 兜住 ~160 个 10000 节点版本，超限 fail visibly。
+pub const MAX_VERSIONED_FILE_BYTES: usize = 32 * 1024 * 1024;
 
 // 文件格式 schema 版本（A1：无版本号无法做向前兼容/迁移）。
 // 当前版本 1。加载时校验：缺失视作 1（兼容旧文件），高于当前视作错误。
@@ -535,340 +542,15 @@ impl PenDocument {
         Ok(())
     }
 
-    /// 使用 Taffy 计算所有节点的布局坐标。
-    ///
-    /// 对于 Free 布局的节点，直接使用其 x/y/w/h。
-    /// 对于 Flex/Grid 布局的 Group 节点，使用 Taffy 计算子节点绝对坐标。
-    pub fn compute_layout(&self) -> Vec<ComputedLayout> {
-        let mut results = Vec::new();
-        for page in &self.pages {
-            compute_page_layout(page, &mut results);
-        }
-        tracing::debug!(count = results.len(), "布局计算完成");
-        results
-    }
-
     pub fn snapshot(&self) -> PenDocument {
         self.clone()
     }
 }
 
-// ── 布局计算 ──
-
-/// 节点布局计算后的绝对坐标。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComputedLayout {
-    pub node_id: String,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-fn compute_page_layout(page: &Page, results: &mut Vec<ComputedLayout>) {
-    for node in &page.nodes {
-        compute_node_layout(node, 0.0, 0.0, results);
-    }
-}
-
-fn compute_node_layout(
-    node: &PenNode,
-    parent_x: f32,
-    parent_y: f32,
-    results: &mut Vec<ComputedLayout>,
-) {
-    let abs_x = parent_x + node.x;
-    let abs_y = parent_y + node.y;
-
-    results.push(ComputedLayout {
-        node_id: node.id.clone(),
-        x: abs_x,
-        y: abs_y,
-        w: node.w,
-        h: node.h,
-    });
-
-    match &node.style.layout {
-        LayoutMode::Free => {
-            for child in &node.children {
-                compute_node_layout(child, abs_x, abs_y, results);
-            }
-        }
-        LayoutMode::Flex(params) => {
-            let child_layouts = compute_flex_layout(node, params, abs_x, abs_y);
-            results.extend(child_layouts);
-        }
-        LayoutMode::Grid(params) => {
-            let child_layouts = compute_grid_layout(node, params, abs_x, abs_y);
-            results.extend(child_layouts);
-        }
-    }
-}
-
-fn compute_flex_layout(
-    parent: &PenNode,
-    params: &FlexParams,
-    abs_x: f32,
-    abs_y: f32,
-) -> Vec<ComputedLayout> {
-    let mut taffy_tree: taffy::TaffyTree<()> = taffy::TaffyTree::new();
-    let mut node_map: Vec<(taffy::NodeId, String)> = Vec::new();
-
-    let direction = match params.direction {
-        FlexDirection::Row => taffy::FlexDirection::Row,
-        FlexDirection::RowReverse => taffy::FlexDirection::RowReverse,
-        FlexDirection::Column => taffy::FlexDirection::Column,
-        FlexDirection::ColumnReverse => taffy::FlexDirection::ColumnReverse,
-    };
-
-    let align_items = match params.align_items {
-        AlignItems::Stretch => taffy::AlignItems::Stretch,
-        AlignItems::Start => taffy::AlignItems::Start,
-        AlignItems::End => taffy::AlignItems::End,
-        AlignItems::Center => taffy::AlignItems::Center,
-    };
-
-    let justify_content = match params.justify_content {
-        JustifyContent::Start => taffy::JustifyContent::Start,
-        JustifyContent::Center => taffy::JustifyContent::Center,
-        JustifyContent::End => taffy::JustifyContent::End,
-        JustifyContent::SpaceBetween => taffy::JustifyContent::SpaceBetween,
-        JustifyContent::SpaceAround => taffy::JustifyContent::SpaceAround,
-        JustifyContent::SpaceEvenly => taffy::JustifyContent::SpaceEvenly,
-    };
-
-    let flex_wrap = match params.wrap {
-        FlexWrap::NoWrap => taffy::FlexWrap::NoWrap,
-        FlexWrap::Wrap => taffy::FlexWrap::Wrap,
-    };
-
-    let parent_style = taffy::Style {
-        display: taffy::Display::Flex,
-        flex_direction: direction,
-        align_items: Some(align_items),
-        justify_content: Some(justify_content),
-        flex_wrap,
-        gap: taffy::Size::length(params.gap),
-        padding: taffy::Rect {
-            top: taffy::LengthPercentage::Length(params.padding.top),
-            right: taffy::LengthPercentage::Length(params.padding.right),
-            bottom: taffy::LengthPercentage::Length(params.padding.bottom),
-            left: taffy::LengthPercentage::Length(params.padding.left),
-        },
-        size: taffy::Size {
-            width: taffy::Dimension::Length(parent.w),
-            height: taffy::Dimension::Length(parent.h),
-        },
-        ..Default::default()
-    };
-
-    let mut child_ids: Vec<taffy::NodeId> = Vec::new();
-    for child in &parent.children {
-        let child_style = taffy::Style {
-            size: taffy::Size {
-                width: if child.w > 0.0 {
-                    taffy::Dimension::Length(child.w)
-                } else {
-                    taffy::Dimension::Auto
-                },
-                height: if child.h > 0.0 {
-                    taffy::Dimension::Length(child.h)
-                } else {
-                    taffy::Dimension::Auto
-                },
-            },
-            ..Default::default()
-        };
-        let id = match taffy_tree.new_leaf(child_style) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "Taffy new_leaf 失败，回退自由布局");
-                let mut results = Vec::new();
-                for child in &parent.children {
-                    compute_node_layout(child, abs_x, abs_y, &mut results);
-                }
-                return results;
-            }
-        };
-        child_ids.push(id);
-        node_map.push((id, child.id.clone()));
-    }
-
-    let root_id = match taffy_tree.new_with_children(parent_style, &child_ids) {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::warn!(error = %e, "Taffy new_with_children 失败，回退自由布局");
-            let mut results = Vec::new();
-            for child in &parent.children {
-                compute_node_layout(child, abs_x, abs_y, &mut results);
-            }
-            return results;
-        }
-    };
-
-    let available = taffy::Size {
-        width: taffy::AvailableSpace::Definite(parent.w),
-        height: taffy::AvailableSpace::Definite(parent.h),
-    };
-    if let Err(e) = taffy_tree.compute_layout(root_id, available) {
-        tracing::warn!(error = %e, "Taffy Flex 布局计算失败，回退自由布局");
-        let mut results = Vec::new();
-        for child in &parent.children {
-            compute_node_layout(child, abs_x, abs_y, &mut results);
-        }
-        return results;
-    }
-
-    let mut results = Vec::new();
-    for (taffy_id, node_id) in &node_map {
-        match taffy_tree.layout(*taffy_id) {
-            Ok(layout) => results.push(ComputedLayout {
-                node_id: node_id.clone(),
-                x: abs_x + layout.location.x,
-                y: abs_y + layout.location.y,
-                w: layout.size.width,
-                h: layout.size.height,
-            }),
-            Err(e) => {
-                tracing::warn!(error = %e, node_id = %node_id, "Taffy layout 读取失败，跳过该节点");
-            }
-        }
-    }
-    results
-}
-
-fn compute_grid_layout(
-    parent: &PenNode,
-    params: &GridParams,
-    abs_x: f32,
-    abs_y: f32,
-) -> Vec<ComputedLayout> {
-    let mut taffy_tree: taffy::TaffyTree<()> = taffy::TaffyTree::new();
-    let mut node_map: Vec<(taffy::NodeId, String)> = Vec::new();
-
-    let columns: Vec<taffy::TrackSizingFunction> = params
-        .columns
-        .iter()
-        .map(|t| match t {
-            TrackSizing::Fixed(v) => taffy::style_helpers::length(*v),
-            TrackSizing::Auto => taffy::style_helpers::auto(),
-            TrackSizing::Flex(v) => taffy::style_helpers::flex(*v),
-            TrackSizing::Percent(v) => taffy::style_helpers::percent(*v),
-        })
-        .collect();
-
-    let rows: Vec<taffy::TrackSizingFunction> = params
-        .rows
-        .iter()
-        .map(|t| match t {
-            TrackSizing::Fixed(v) => taffy::style_helpers::length(*v),
-            TrackSizing::Auto => taffy::style_helpers::auto(),
-            TrackSizing::Flex(v) => taffy::style_helpers::flex(*v),
-            TrackSizing::Percent(v) => taffy::style_helpers::percent(*v),
-        })
-        .collect();
-
-    let parent_style = taffy::Style {
-        display: taffy::Display::Grid,
-        grid_template_columns: columns,
-        grid_template_rows: rows,
-        gap: taffy::Size {
-            width: taffy::LengthPercentage::Length(params.gap.1),
-            height: taffy::LengthPercentage::Length(params.gap.0),
-        },
-        size: taffy::Size {
-            width: taffy::Dimension::Length(parent.w),
-            height: taffy::Dimension::Length(parent.h),
-        },
-        ..Default::default()
-    };
-
-    let mut child_ids: Vec<taffy::NodeId> = Vec::new();
-    for (i, child) in parent.children.iter().enumerate() {
-        let mut child_style = taffy::Style {
-            size: taffy::Size {
-                width: if child.w > 0.0 {
-                    taffy::Dimension::Length(child.w)
-                } else {
-                    taffy::Dimension::Auto
-                },
-                height: if child.h > 0.0 {
-                    taffy::Dimension::Length(child.h)
-                } else {
-                    taffy::Dimension::Auto
-                },
-            },
-            ..Default::default()
-        };
-
-        if let Some(area) = params.areas.get(i) {
-            child_style.grid_row = taffy::Line {
-                start: taffy::style_helpers::line(area.row_start as i16),
-                end: taffy::style_helpers::line(area.row_end as i16),
-            };
-            child_style.grid_column = taffy::Line {
-                start: taffy::style_helpers::line(area.col_start as i16),
-                end: taffy::style_helpers::line(area.col_end as i16),
-            };
-        }
-
-        let id = match taffy_tree.new_leaf(child_style) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "Taffy new_leaf 失败，回退自由布局");
-                let mut results = Vec::new();
-                for child in &parent.children {
-                    compute_node_layout(child, abs_x, abs_y, &mut results);
-                }
-                return results;
-            }
-        };
-        child_ids.push(id);
-        node_map.push((id, child.id.clone()));
-    }
-
-    let root_id = match taffy_tree.new_with_children(parent_style, &child_ids) {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::warn!(error = %e, "Taffy new_with_children 失败，回退自由布局");
-            let mut results = Vec::new();
-            for child in &parent.children {
-                compute_node_layout(child, abs_x, abs_y, &mut results);
-            }
-            return results;
-        }
-    };
-
-    let available = taffy::Size {
-        width: taffy::AvailableSpace::Definite(parent.w),
-        height: taffy::AvailableSpace::Definite(parent.h),
-    };
-    if let Err(e) = taffy_tree.compute_layout(root_id, available) {
-        tracing::warn!(error = %e, "Taffy Grid 布局计算失败，回退自由布局");
-        let mut results = Vec::new();
-        for child in &parent.children {
-            compute_node_layout(child, abs_x, abs_y, &mut results);
-        }
-        return results;
-    }
-
-    let mut results = Vec::new();
-    for (taffy_id, node_id) in &node_map {
-        match taffy_tree.layout(*taffy_id) {
-            Ok(layout) => results.push(ComputedLayout {
-                node_id: node_id.clone(),
-                x: abs_x + layout.location.x,
-                y: abs_y + layout.location.y,
-                w: layout.size.width,
-                h: layout.size.height,
-            }),
-            Err(e) => {
-                tracing::warn!(error = %e, node_id = %node_id, "Taffy layout 读取失败，跳过该节点");
-            }
-        }
-    }
-    results
-}
+// H-A10/P1-5：Taffy compute_layout/compute_flex_layout/compute_grid_layout
+// + ComputedLayout 已移除（零生产调用，展示性死代码）。
+// Flex/Grid 渲染现由 layout-aware codegen 生成 flex/grid CSS，浏览器/wasm 执行布局。
+// LayoutMode/FlexParams/GridParams 等 NodeStyle 声明类型保留（codegen/渲染器消费）。
 
 impl Page {
     pub fn new(id: impl Into<String>, name: impl Into<String>, w: f32, h: f32) -> Self {
@@ -1064,8 +746,8 @@ pub struct DiffEntry {
     pub old_value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<serde_json::Value>,
-    /// 新增节点所属页面 ID（仅 Added 有意义）；apply_patch 据此插入正确页，
-    /// 避免恒定落入 pages.first() 导致多页文档节点错位。
+    /// 新增节点所属页面 ID（仅 Added 有意义）；diff 据此标注节点所在页，
+    /// 供 fd-cli diff 子命令展示。避免恒定落入 pages.first() 导致多页文档节点错位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_id: Option<String>,
 }
@@ -1164,46 +846,9 @@ impl PenDocument {
         map
     }
 
-    /// 应用补丁（按 diff 条目增删改节点，保持节点所属页面）。
-    pub fn apply_patch(&mut self, patch: &PenDocumentDiff) {
-        for entry in &patch.entries {
-            match entry.change_type {
-                DiffChangeType::Added => {
-                    if let Some(val) = &entry.new_value {
-                        if let Ok(node) = serde_json::from_value::<PenNode>(val.clone()) {
-                            let target_page_id = entry.page_id.clone().unwrap_or_else(|| {
-                                self.pages.first().map(|p| p.id.clone()).unwrap_or_default()
-                            });
-                            if let Some(page) = self.page_mut(&target_page_id) {
-                                page.nodes.push(node);
-                            } else if let Some(page) = self.pages.first_mut() {
-                                tracing::warn!(
-                                    entry.page_id = ?entry.page_id,
-                                    "apply_patch: 目标页面不存在，回退到首页"
-                                );
-                                page.nodes.push(node);
-                            }
-                        }
-                    }
-                }
-                DiffChangeType::Removed => {
-                    self.remove_node(&entry.node_id);
-                }
-                DiffChangeType::Modified => {
-                    if let Some(node) = self.find_node_mut(&entry.node_id) {
-                        apply_field_change(node, &entry.field, &entry.new_value);
-                    } else {
-                        tracing::warn!(
-                            node_id = %entry.node_id,
-                            field = %entry.field,
-                            "apply_patch: 修改目标节点未找到，跳过"
-                        );
-                    }
-                }
-            }
-        }
-        tracing::info!(count = patch.entries.len(), "apply_patch: 补丁已应用");
-    }
+    // H-A13/P1-7：apply_patch 已移除（零生产调用，展示性死代码）。
+    // diff 计算（diff_versions/diff_adjacent）保留——fd-cli diff 子命令用于展示。
+    // 协同编辑的 apply 路径如需恢复，见 git 历史；当前 PRD 未承诺协同编辑。
 }
 
 fn collect_nodes<'a>(nodes: &'a [PenNode], map: &mut HashMap<String, &'a PenNode>) {
@@ -1251,69 +896,6 @@ fn diff_json_objects(
                     new_value: None,
                     page_id: None,
                 });
-            }
-        }
-    }
-}
-
-fn apply_field_change(node: &mut PenNode, field: &str, new_value: &Option<serde_json::Value>) {
-    if let Some(val) = new_value {
-        match field {
-            "x" => {
-                if let Some(v) = val.as_f64() {
-                    node.x = v as f32;
-                }
-            }
-            "y" => {
-                if let Some(v) = val.as_f64() {
-                    node.y = v as f32;
-                }
-            }
-            "w" => {
-                if let Some(v) = val.as_f64() {
-                    node.w = v as f32;
-                }
-            }
-            "h" => {
-                if let Some(v) = val.as_f64() {
-                    node.h = v as f32;
-                }
-            }
-            "name" => {
-                if let Some(v) = val.as_str() {
-                    node.name = v.to_string();
-                }
-            }
-            "text" => {
-                node.text = val.as_str().map(String::from);
-            }
-            "rotation" => {
-                if let Some(v) = val.as_f64() {
-                    node.rotation = v as f32;
-                }
-            }
-            "z_index" => {
-                if let Some(v) = val.as_i64() {
-                    node.z_index = v as i32;
-                }
-            }
-            "kind" => {
-                if let Ok(k) = serde_json::from_value::<NodeKind>(val.clone()) {
-                    node.kind = k;
-                }
-            }
-            "style" => {
-                if let Ok(s) = serde_json::from_value::<NodeStyle>(val.clone()) {
-                    node.style = s;
-                }
-            }
-            "children" => {
-                if let Ok(c) = serde_json::from_value::<Vec<PenNode>>(val.clone()) {
-                    node.children = c;
-                }
-            }
-            _ => {
-                tracing::debug!(field, "apply_field_change: 未处理字段");
             }
         }
     }
@@ -1528,80 +1110,6 @@ mod tests {
         let n2: PenNode = serde_json::from_str(&s).unwrap();
         assert_eq!(n2.rotation, 45.0);
         assert_eq!(n2.z_index, 5);
-    }
-
-    #[test]
-    fn compute_layout_free_nodes() {
-        let doc = sample_doc();
-        let layouts = doc.compute_layout();
-        assert_eq!(layouts.len(), 2);
-        assert_eq!(layouts[0].node_id, "n1");
-        assert_eq!(layouts[0].x, 0.0);
-        assert_eq!(layouts[1].node_id, "n2");
-    }
-
-    #[test]
-    fn compute_layout_flex_children() {
-        let mut doc = PenDocument::new();
-        let mut page = Page::new("p1", "Flex", 400.0, 200.0);
-        let mut container = PenNode::group(
-            "container",
-            0.0,
-            0.0,
-            vec![
-                PenNode::rect("a", 0.0, 0.0, 100.0, 50.0),
-                PenNode::rect("b", 0.0, 0.0, 100.0, 50.0),
-            ],
-        );
-        container.w = 400.0;
-        container.h = 200.0;
-        container.style.layout = LayoutMode::Flex(FlexParams {
-            direction: FlexDirection::Row,
-            gap: 10.0,
-            ..Default::default()
-        });
-        page.add(container);
-        doc.add_page(page);
-
-        let layouts = doc.compute_layout();
-        assert_eq!(layouts.len(), 3);
-
-        let a = layouts.iter().find(|l| l.node_id == "a").unwrap();
-        let b = layouts.iter().find(|l| l.node_id == "b").unwrap();
-        assert_eq!(a.x, 0.0);
-        assert_eq!(b.x, 110.0);
-    }
-
-    #[test]
-    fn compute_layout_grid_children() {
-        let mut doc = PenDocument::new();
-        let mut page = Page::new("p1", "Grid", 400.0, 200.0);
-        let mut container = PenNode::group(
-            "container",
-            0.0,
-            0.0,
-            vec![
-                PenNode::rect("a", 0.0, 0.0, 0.0, 50.0),
-                PenNode::rect("b", 0.0, 0.0, 0.0, 50.0),
-            ],
-        );
-        container.w = 400.0;
-        container.h = 200.0;
-        container.style.layout = LayoutMode::Grid(GridParams {
-            columns: vec![TrackSizing::Flex(1.0), TrackSizing::Flex(1.0)],
-            rows: vec![TrackSizing::Auto],
-            gap: (10.0, 10.0),
-            areas: vec![],
-        });
-        page.add(container);
-        doc.add_page(page);
-
-        let layouts = doc.compute_layout();
-        let a = layouts.iter().find(|l| l.node_id == "a").unwrap();
-        let b = layouts.iter().find(|l| l.node_id == "b").unwrap();
-        assert!(a.w > 0.0);
-        assert!(b.w > 0.0);
-        assert!(b.x > a.x);
     }
 
     #[test]
@@ -1897,25 +1405,10 @@ mod tests {
             .any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Removed));
     }
 
+    // H-A13：apply_patch 已移除（零生产调用，展示性死代码）。
+    // 保留 diff 的 page_id 归属回归——fd-cli diff 子命令依赖该语义展示节点所在页。
     #[test]
-    fn apply_patch_roundtrip() {
-        let mut doc_v1 = PenDocument::new();
-        doc_v1.add_page(Page {
-            id: "p1".into(),
-            name: "Page 1".into(),
-            width: 800.0,
-            height: 600.0,
-            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
-        });
-        let mut doc_v2 = doc_v1.clone();
-        doc_v2.pages[0].nodes[0].w = 200.0;
-        let patch = doc_v1.diff(&doc_v2);
-        doc_v1.apply_patch(&patch);
-        assert_eq!(doc_v1.pages[0].nodes[0].w, 200.0);
-    }
-
-    #[test]
-    fn apply_patch_added_node_keeps_page() {
+    fn diff_added_node_carries_page_id() {
         let mut doc_v1 = PenDocument::new();
         doc_v1.add_page(Page {
             id: "p1".into(),
@@ -1944,45 +1437,6 @@ mod tests {
             .find(|e| e.node_id == "n2" && e.change_type == DiffChangeType::Added)
             .expect("应有 n2 Added 条目");
         assert_eq!(added.page_id.as_deref(), Some("p2"));
-        doc_v1.apply_patch(&patch);
-        assert!(doc_v1
-            .page("p1")
-            .unwrap()
-            .nodes
-            .iter()
-            .all(|n| n.id != "n2"));
-        assert!(doc_v1
-            .page("p2")
-            .unwrap()
-            .nodes
-            .iter()
-            .any(|n| n.id == "n2"));
-    }
-
-    #[test]
-    fn apply_patch_style_kind_children() {
-        let mut doc_v1 = PenDocument::new();
-        doc_v1.add_page(Page {
-            id: "p1".into(),
-            name: "Page 1".into(),
-            width: 800.0,
-            height: 600.0,
-            nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
-        });
-        let mut doc_v2 = doc_v1.clone();
-        {
-            let n = &mut doc_v2.pages[0].nodes[0];
-            n.kind = NodeKind::Circle;
-            n.style.fill = Some("#ff0000".into());
-            n.children.push(PenNode::text("c1", 0.0, 0.0, "child"));
-        }
-        let patch = doc_v1.diff(&doc_v2);
-        doc_v1.apply_patch(&patch);
-        let n = &doc_v1.pages[0].nodes[0];
-        assert_eq!(n.kind, NodeKind::Circle);
-        assert_eq!(n.style.fill.as_deref(), Some("#ff0000"));
-        assert_eq!(n.children.len(), 1);
-        assert_eq!(n.children[0].id, "c1");
     }
 }
 
@@ -2007,7 +1461,10 @@ pub struct VersionedDocument {
     active_version_id: String,
     /// 细粒度撤销/重做栈，与命名版本互补：save_version 落地命名版本，
     /// 同时 push 快照入栈，供频繁编辑的 undo/redo（50 层上限）。
-    #[serde(default)]
+    // H-A14/P2-4：undo 栈 session-scoped，不落盘（旧实现序列化 50 份整快照，
+    // 致 .fusiondesign 膨胀 70× 触发 jetsam）。from_json 重置为空 + 用激活版本
+    // 重播初始快照，使加载后首次编辑仍可 undo。命名版本仍各存整快照。
+    #[serde(skip)]
     undo_redo: UndoRedoStack,
 }
 
@@ -2032,10 +1489,22 @@ impl VersionedDocument {
     }
 
     pub fn active_version(&self) -> &NamedVersion {
-        self.versions
+        if let Some(v) = self
+            .versions
             .iter()
             .find(|v| v.id == self.active_version_id)
-            .expect("active_version_id must exist")
+        {
+            v
+        } else {
+            tracing::error!(
+                active_version_id = %self.active_version_id,
+                total = self.versions.len(),
+                "active_version_id 不在版本列表，回退最后一个版本（文件损坏或手动编辑致 id 失配）"
+            );
+            self.versions
+                .last()
+                .expect("VersionedDocument 至少含一个版本（构造保证）")
+        }
     }
 
     pub fn active_document(&self) -> &PenDocument {
@@ -2183,15 +1652,47 @@ impl VersionedDocument {
     }
 
     pub fn to_json(&self) -> anyhow::Result<String> {
-        Ok(serde_json::to_string_pretty(self)?)
+        let json = serde_json::to_string_pretty(self)?;
+        // H-A14/P2-4：体积硬护栏。命名版本各存整快照，多版本线性膨胀，
+        // 旧实现 70 深拷贝致 jetsam。undo 栈已不落盘，仍须兜命名版本数膨胀。
+        if json.len() > MAX_VERSIONED_FILE_BYTES {
+            anyhow::bail!(
+                "VersionedDocument 序列化体积 {} 字节超安全上限 {} 字节（{} 命名版本，各存整快照）\
+                 ——删减命名版本或缩减节点规模",
+                json.len(),
+                MAX_VERSIONED_FILE_BYTES,
+                self.versions.len()
+            );
+        }
+        Ok(json)
     }
 
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        let vd: VersionedDocument = serde_json::from_str(json)?;
+        let mut vd: VersionedDocument = serde_json::from_str(json)?;
+        if vd.versions.is_empty() {
+            anyhow::bail!("VersionedDocument 版本列表为空（文件损坏或被截断）");
+        }
+        if !vd.versions.iter().any(|v| v.id == vd.active_version_id) {
+            tracing::warn!(
+                active_version_id = %vd.active_version_id,
+                total = vd.versions.len(),
+                "active_version_id 不在版本列表，回退最后一个版本"
+            );
+            let last_id = vd.versions[vd.versions.len() - 1].id.clone();
+            vd.active_version_id = last_id;
+        }
         vd.active_document().validate_limits()?;
+        // H-A14/P2-4：undo 栈 session-scoped 不落盘，加载时为空。
+        // 用激活版本重播初始快照，使加载后首次编辑仍可 undo。
+        vd.undo_redo = UndoRedoStack::new();
+        vd.undo_redo.push(vd.active_document().clone());
         Ok(vd)
     }
 }
+
+// E-12：版本 id 单调计数器。同纳秒内连续调用拿递增 seq，
+// 保证进程内 id 绝对唯一（旧实现 nanos 低 16 位碰撞 → 重复 id）。
+static VERSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2199,7 +1700,11 @@ fn uuid_v4() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{:016x}-{:04x}", ts, (ts & 0xffff) as u16)
+    let seq = VERSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let pid = std::process::id();
+    // {nanos:016x}-{pid:04x}-{seq:04x}：进程内 seq 递增保唯一，
+    // 跨进程 pid 区分；非 RFC 4122 但满足版本 id 唯一性需求。
+    format!("{:016x}-{:04x}-{:04x}", ts, pid & 0xffff, seq & 0xffff)
 }
 
 fn now_iso() -> String {
@@ -2208,15 +1713,35 @@ fn now_iso() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    // R-A12：旧实现 31536000=365 天忽略闰年、2592000=30 天忽略月份实际天数，
+    // 日期数学全错（2026 算成 2056）。改用 Howard Hinnant civil_from_days 算法
+    //（确定性天数→年月日，无闰年/月份天数近似，零依赖）。
+    let days = (secs / 86400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    let tod = secs % 86400;
+    let hour = tod / 3600;
+    let minute = (tod % 3600) / 60;
+    let second = tod % 60;
     format!(
-        "20{:02}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        (secs / 31536000) as u8 % 100,
-        (secs % 31536000) / 2592000 + 1,
-        ((secs % 2592000) / 86400) + 1,
-        (secs % 86400) / 3600,
-        (secs % 3600) / 60,
-        secs % 60
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, minute, second
     )
+}
+
+/// Howard Hinnant civil_from_days：epoch 天数 → (year, month, day) 公历。
+/// 算法来自 http://howardhinnant.github.io/date_algorithms.html#civil_from_days。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[cfg(test)]
@@ -2369,6 +1894,29 @@ mod version_tests {
     }
 
     #[test]
+    fn from_json_corrupted_active_version_id_falls_back_not_panic() {
+        // E-13 回归：active_version_id 指向不存在的版本（手动编辑/文件损坏），
+        // from_json 应回退到最后一个版本而非 panic。
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        vd.save_version("V2", sample_doc("v1"), None);
+        let mut json = vd.to_json().unwrap();
+        let last_id = vd.versions.last().unwrap().id.clone();
+        json = json.replace(&last_id, "nonexistent-id-corrupted");
+        let vd2 = VersionedDocument::from_json(&json).unwrap();
+        assert!(!vd2.versions.is_empty());
+    }
+
+    #[test]
+    fn from_json_empty_versions_rejected() {
+        // E-13 回归：版本列表为空（文件被截断到只剩头部）→ 显式 Err 而非 panic。
+        // H-A14/P2-4：undo_redo 已 session-scoped 不落盘（serde skip），
+        // 测试 JSON 不再带该字段。
+        let json = r#"{"document_id":"d","versions":[],"active_version_id":"x"}"#;
+        assert!(VersionedDocument::from_json(json).is_err());
+    }
+
+    #[test]
     fn list_versions_order() {
         let doc_v0 = sample_doc("v0");
         let mut vd = VersionedDocument::new("doc1", doc_v0);
@@ -2483,6 +2031,48 @@ mod version_tests {
         assert!(doc.validate_limits().is_ok(), "正常文档应通过校验");
     }
 
+    // E-12 回归：连续生成 id 必须两两不同（旧实现同纳秒低 16 位碰撞）。
+    #[test]
+    fn uuid_v4_rapid_calls_unique() {
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let id = uuid_v4();
+            assert!(ids.insert(id.clone()), "id 重复: {id}");
+        }
+        assert_eq!(ids.len(), 1000, "1000 次 uuid_v4 必须生成 1000 个不同 id");
+    }
+
+    // R-A12 回归：now_iso 输出合法 ISO 8601 且年份正确（旧实现 2026 算成 2056）。
+    #[test]
+    fn now_iso_is_valid_iso_and_year_correct() {
+        let iso = now_iso();
+        // 形如 YYYY-MM-DDTHH:MM:SSZ
+        assert_eq!(iso.len(), 20, "ISO 8601 长度应为 20: {iso}");
+        assert!(iso.ends_with('Z'), "应以 Z 结尾: {iso}");
+        assert_eq!(iso.as_bytes()[4], b'-', "第 5 位应为 -: {iso}");
+        assert_eq!(iso.as_bytes()[7], b'-', "第 8 位应为 -: {iso}");
+        assert_eq!(iso.as_bytes()[10], b'T', "第 11 位应为 T: {iso}");
+        let year: i64 = iso[0..4].parse().expect("年份可解析");
+        // 2026 年跑此测试，年份应落在 [2020, 2100] 区间，
+        // 旧实现算成 2056（year=56→"2056"）会触发此断言。
+        assert!(
+            (2020..=2100).contains(&year),
+            "年份应在合理区间，得 {year}（旧 bug 算成 2056）"
+        );
+    }
+
+    // R-A12 回归：civil_from_days 对已知日期算正确。
+    #[test]
+    fn civil_from_days_known_dates() {
+        // 1970-01-01 = epoch day 0
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2026-08-24：从 epoch 起第 20689 天（python date 算验证）
+        let (y, m, d) = civil_from_days(20689);
+        assert_eq!((y, m, d), (2026, 8, 24), "2026-08-24 应正确");
+        // 2000-02-29 闰日：epoch 起 11016 天
+        assert_eq!(civil_from_days(11016), (2000, 2, 29), "闰日应正确");
+    }
+
     /// 性能基线：1000 节点文档的序列化/反序列化/布局计算耗时。
     /// `#[ignore]`：不进常规 CI，经 `cargo test --release -- --ignored perf_baseline` 运行。
     /// 阈值：各操作 < 500ms（release，Apple Silicon），超阈打印但不断言失败（基线参考）。
@@ -2520,11 +2110,6 @@ mod version_tests {
         eprintln!("perf deserialize(1000): {de_ms}ms");
         assert!(doc2.pages[0].nodes.len() >= 1000, "反序列化节点数应 ≥1000");
 
-        let t = std::time::Instant::now();
-        let _layouts = doc.compute_layout();
-        let layout_ms = t.elapsed().as_millis();
-        eprintln!("perf compute_layout(1000): {layout_ms}ms");
-
         assert!(
             ser_ms < THRESHOLD_MS,
             "serialize {ser_ms}ms > {THRESHOLD_MS}ms"
@@ -2533,9 +2118,130 @@ mod version_tests {
             de_ms < THRESHOLD_MS,
             "deserialize {de_ms}ms > {THRESHOLD_MS}ms"
         );
+    }
+
+    // H-A14/P2-4 回归：undo 栈不落盘。多版本 to_json 体积内不含 undo 栈副本，
+    // 文件较旧实现（序列化 50 份整快照）显著收敛。
+    #[test]
+    fn undo_stack_not_persisted_in_json() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        // 制造 undo 栈深度：连续 save_version + checkpoint 共 30 份快照入栈。
+        for i in 1..=30 {
+            let mut doc = vd.active_document().clone();
+            doc.pages[0].nodes[0].w = 10.0 * i as f32;
+            vd.save_version(format!("V{i}"), doc, None);
+        }
+        let json = vd.to_json().unwrap();
+        // undo_redo 字段已 skip：JSON 不应出现该键名。
         assert!(
-            layout_ms < THRESHOLD_MS,
-            "compute_layout {layout_ms}ms > {THRESHOLD_MS}ms"
+            !json.contains("\"undo_redo\""),
+            "undo 栈不应落盘（H-A14），但 JSON 含 undo_redo 键"
+        );
+        assert!(
+            !json.contains("\"undo_stack\""),
+            "undo 栈内部结构不应落盘（H-A14）"
+        );
+    }
+
+    // H-A14/P2-4 回归：50 命名版本文件体积受限，远小于 50× 单文档。
+    // 旧实现：50 版本各存整快照 + 50 undo 副本 = 100 深拷贝。
+    // 新实现：50 命名版本各存整快照（undo 不落盘）= 50 深拷贝，
+    // 体积应约为旧实现的一半；且绝对值低于 32MB 硬上限。
+    #[test]
+    fn fifty_versions_file_size_bounded() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        for i in 1..50 {
+            let mut doc = vd.active_document().clone();
+            doc.pages[0].nodes[0].w = 10.0 * i as f32;
+            vd.save_version(format!("V{i}"), doc, None);
+        }
+        assert_eq!(vd.version_count(), 50);
+        let json = vd.to_json().unwrap();
+        let bytes = json.len();
+        // 50 版本 × 单页单节点快照，绝对值远低于 32MB 上限。
+        assert!(
+            bytes < MAX_VERSIONED_FILE_BYTES,
+            "50 命名版本体积 {bytes} 字节超 {MAX_VERSIONED_FILE_BYTES} 上限（H-A14 护栏失效）"
+        );
+        // 单文档体积基线：1 版本。
+        let single = VersionedDocument::new("doc1", sample_doc("v0"))
+            .to_json()
+            .unwrap()
+            .len();
+        // 50 版本体积不应超过单版本的 60×（旧实现会达 ~100×，含 undo 栈）。
+        // 留余量给版本元数据（id/name/created_at ×50）。
+        assert!(
+            bytes < single * 60,
+            "50 命名版本体积 {bytes} > 60× 单版本 {single}（= {bound}），\
+             undo 栈可能仍落盘（H-A14 未生效）",
+            bound = single * 60
+        );
+    }
+
+    // H-A14/P2-4 回归：加载后 undo 栈 session-scoped 重置，
+    // 用激活版本重播初始快照，使首次编辑仍可 undo。
+    #[test]
+    fn from_json_reseeds_undo_with_active_version() {
+        let doc_v0 = sample_doc("v0");
+        let mut vd = VersionedDocument::new("doc1", doc_v0);
+        let mut doc_v1 = sample_doc("v1");
+        doc_v1.pages[0].nodes[0].w = 300.0;
+        vd.save_version("V2", doc_v1, None);
+        let json = vd.to_json().unwrap();
+
+        let mut vd2 = VersionedDocument::from_json(&json).unwrap();
+        // 加载后 undo 栈重播激活版本（V2，w=300）。
+        // 首次编辑应可 undo 回激活版本本身——can_undo 为真（栈含 ≥1 快照）。
+        assert!(vd2.can_undo(), "加载后应可 undo（栈已重播激活版本）");
+        // 但栈仅 1 快照（激活版本），undo 应返回 None（需 ≥2 才能 undo）。
+        // 故先 checkpoint 一次新编辑，再 undo 应回到激活版本。
+        let mut edit = vd2.active_document().clone();
+        edit.pages[0].nodes[0].w = 999.0;
+        vd2.checkpoint(edit);
+        let undone = vd2.undo().expect("checkpoint 后应可 undo");
+        assert_eq!(
+            undone.pages[0].nodes[0].w, 300.0,
+            "undo 应回到加载时的激活版本（V2 w=300）"
+        );
+    }
+
+    // H-A14/P2-4 回归：超量命名版本致体积超 32MB 硬上限 → fail visibly。
+    // 构造大文档（~2000 节点/版本）× 足量版本逼近上限，to_json 应 Err。
+    #[test]
+    fn to_json_rejects_oversized_versioned_file() {
+        let make_big = |name: &str| {
+            let mut doc = PenDocument::new();
+            let mut nodes = Vec::new();
+            for i in 0..2000u32 {
+                nodes.push(PenNode::rect(format!("n{i}"), i as f32, 0.0, 100.0, 50.0));
+            }
+            doc.add_page(Page {
+                id: "p1".into(),
+                name: name.into(),
+                width: 8000.0,
+                height: 6000.0,
+                nodes,
+            });
+            doc
+        };
+        let mut vd = VersionedDocument::new("big", make_big("v0"));
+        // 单大版本约 ~150KB；堆 220 版本逼近 32MB。每版本仅微调一节点使内容非全同。
+        for i in 1..220 {
+            let mut doc = make_big(&format!("v{i}"));
+            doc.pages[0].nodes[0].w = 10.0 + i as f32;
+            vd.save_version(format!("V{i}"), doc, None);
+        }
+        let result = vd.to_json();
+        assert!(
+            result.is_err(),
+            "超 32MB 上限的 VersionedDocument 应 fail visibly（H-A14 护栏）"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("超安全上限"),
+            "错误文案应点名体积护栏，得: {err}"
         );
     }
 }

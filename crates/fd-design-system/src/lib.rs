@@ -209,12 +209,31 @@ impl DesignSystemRegistry {
     }
 
     /// 注册三套内置规范（Apple HIG / 极简后台 / 机器人仿真控制台）。
+    /// 幂等：已存在的 ID 跳过并告警，不覆盖用户自定义/激活中的规范（E-32/P3）。
     pub fn register_builtin(&mut self) {
-        self.systems.extend([
+        let builtins = [
             ("apple-hig".to_string(), builtin_apple_hig()),
             ("minimal-dashboard".to_string(), builtin_minimal_dashboard()),
             ("robot-sim".to_string(), builtin_robot_sim()),
-        ]);
+        ];
+        let mut skipped = 0usize;
+        for (id, system) in builtins {
+            if self.systems.contains_key(&id) {
+                tracing::warn!(system_id = %id, "register_builtin: 规范已存在，跳过不覆盖");
+                skipped += 1;
+                continue;
+            }
+            self.systems.insert(id, system);
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                total = 3,
+                "register_builtin: 跳过 {skipped}/3 个已存在内置规范"
+            );
+        } else {
+            tracing::info!("register_builtin: 注册 3 套内置规范");
+        }
     }
 
     /// 按名称查找 Token 值（当前激活规范内）。
@@ -747,5 +766,36 @@ mod tests {
         );
         // 回退到原始 CSS var 输出
         assert_eq!(val, "var(--nonexistent)");
+    }
+
+    #[test]
+    fn register_builtin_idempotent_no_overwrite() {
+        // E-32/P3：重复调用 register_builtin 不应覆盖已注册/用户自定义的规范。
+        let mut reg = DesignSystemRegistry::new();
+        reg.register_builtin();
+        assert_eq!(reg.list().len(), 3);
+        // 二次调用：数量不变，不抛错。
+        reg.register_builtin();
+        assert_eq!(reg.list().len(), 3, "重复注册不应翻倍或覆盖");
+    }
+
+    #[test]
+    fn register_builtin_preserves_user_customized_system() {
+        // E-32/P3：用户自定义同名规范后调用 register_builtin，用户版本不被内置覆盖。
+        let mut reg = DesignSystemRegistry::new();
+        // 用户先注册一个自定义 apple-hig（active 设为自定义值便于验证）。
+        let mut custom = builtin_apple_hig();
+        custom.name = "我的自定义 HIG".into();
+        reg.register(custom).unwrap();
+        // 再注册内置：应跳过 apple-hig，补齐另外两套。
+        reg.register_builtin();
+        assert_eq!(reg.list().len(), 3, "内置补齐另两套，apple-hig 跳过");
+        // 验证 apple-hig 仍是用户自定义版本。
+        reg.activate("apple-hig").unwrap();
+        assert_eq!(
+            reg.active().unwrap().name,
+            "我的自定义 HIG",
+            "用户自定义规范未被内置覆盖"
+        );
     }
 }

@@ -404,6 +404,26 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+// E-10：CSS 颜色值净化。fill/stroke 来自 LLM 输出或 parse-html 不可信输入，
+// 原样拼进 `background:{fill};` / Tailwind `bg-[{fill}]` 可逃逸属性注入任意 CSS
+// （如 `red;} * {position:fixed;background:url(http://evil)` 破离线约束）。
+// 拒绝 url()（离线硬约束 + 外网探测），剔除可逃逸属性边界的 `;{}`，保留 hex/命名色/rgb()。
+fn sanitize_css_color(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("url(") || lower.contains("expression(") || lower.contains("@import") {
+        tracing::warn!(raw = raw, "codegen CSS 颜色含危险函数，降级 transparent");
+        return "transparent".to_string();
+    }
+    raw.chars()
+        .filter(|&c| !matches!(c, ';' | '{' | '}' | '<' | '>'))
+        .collect()
+}
+
+// E-10：node.id 经 escape_html 转义后安全用于属性值（转 " 防 `data-id="a" onclick=…` 注入）。
+fn escape_attr(s: &str) -> String {
+    escape_html(s)
+}
+
 fn node_to_html(node: &PenNode) -> String {
     node_to_html_inner(node, 0)
 }
@@ -431,18 +451,23 @@ fn node_to_html_inner(node: &PenNode, depth: usize) -> String {
             if children.is_empty() {
                 format!(
                     "<{tag} data-id=\"{}\" style=\"{}{}\"></{tag}>\n",
-                    node.id, style, extra
+                    escape_attr(&node.id),
+                    style,
+                    extra
                 )
             } else {
                 format!(
                     "<{tag} data-id=\"{}\" style=\"{}{}\">{}</{tag}>\n",
-                    node.id, style, extra, children
+                    escape_attr(&node.id),
+                    style,
+                    extra,
+                    children
                 )
             }
         }
         NodeKind::Text => format!(
             "<div data-id=\"{}\" style=\"{}\">{}{}</div>\n",
-            node.id,
+            escape_attr(&node.id),
             style,
             escape_html(node.text.as_deref().unwrap_or("")),
             children
@@ -451,18 +476,26 @@ fn node_to_html_inner(node: &PenNode, depth: usize) -> String {
             if children.is_empty() {
                 format!(
                     "<img data-id=\"{}\" style=\"{}\" alt=\"\"/>\n",
-                    node.id, style
+                    escape_attr(&node.id),
+                    style
                 )
             } else {
                 // <img> 为 void 元素；有子节点时外裹 div 承载嵌套结构
                 format!(
                     "<div data-id=\"{}\" style=\"{}\"><img style=\"{}\" alt=\"\"/>{}</div>\n",
-                    node.id, style, style, children
+                    escape_attr(&node.id),
+                    style,
+                    style,
+                    children
                 )
             }
         }
         NodeKind::Group => {
-            let mut s = format!("<div data-id=\"{}\" style=\"{}\">\n", node.id, style);
+            let mut s = format!(
+                "<div data-id=\"{}\" style=\"{}\">\n",
+                escape_attr(&node.id),
+                style
+            );
             s.push_str(&children);
             s.push_str("</div>\n");
             s
@@ -495,19 +528,24 @@ fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
             if children.is_empty() {
                 format!(
                     "      <div className=\"{}{}\" data-id=\"{}\"/>\n",
-                    cls, extra, node.id
+                    cls,
+                    extra,
+                    escape_attr(&node.id)
                 )
             } else {
                 format!(
                     "      <div className=\"{}{}\" data-id=\"{}\">\n{}</div>\n",
-                    cls, extra, node.id, children
+                    cls,
+                    extra,
+                    escape_attr(&node.id),
+                    children
                 )
             }
         }
         NodeKind::Text => format!(
             "      <div className=\"{}\" data-id=\"{}\">{}{}</div>\n",
             cls,
-            node.id,
+            escape_attr(&node.id),
             escape_html(node.text.as_deref().unwrap_or("")),
             children
         ),
@@ -515,20 +553,24 @@ fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
             if children.is_empty() {
                 format!(
                     "      <img className=\"{}\" data-id=\"{}\" alt=\"\"/>\n",
-                    cls, node.id
+                    cls,
+                    escape_attr(&node.id)
                 )
             } else {
                 // <img> 自闭合；有子节点时外裹 div 承载
                 format!(
                     "      <div className=\"{}\" data-id=\"{}\"><img alt=\"\"/>{}</div>\n",
-                    cls, node.id, children
+                    cls,
+                    escape_attr(&node.id),
+                    children
                 )
             }
         }
         NodeKind::Group => {
             let mut s = format!(
                 "      <div className=\"{}\" data-id=\"{}\">\n",
-                cls, node.id
+                cls,
+                escape_attr(&node.id)
             );
             s.push_str(&children);
             s.push_str("      </div>\n");
@@ -538,11 +580,64 @@ fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
 }
 
 fn node_to_tailwind(node: &PenNode) -> String {
-    let mut cls = vec![
-        "absolute".to_string(),
-        format!("left-[{}px]", node.x as i32),
-        format!("top-[{}px]", node.y as i32),
-    ];
+    let mut cls: Vec<String> = Vec::new();
+    // E-9：仅 Free 布局输出 absolute + left/top；Flex/Grid 走文档流。
+    match &node.style.layout {
+        LayoutMode::Free => {
+            cls.push("absolute".into());
+            cls.push(format!("left-[{}px]", node.x as i32));
+            cls.push(format!("top-[{}px]", node.y as i32));
+        }
+        LayoutMode::Flex(p) => {
+            cls.push("relative".into());
+            cls.push("flex".into());
+            cls.push(
+                match p.direction {
+                    FlexDirection::Row => "flex-row",
+                    FlexDirection::RowReverse => "flex-row-reverse",
+                    FlexDirection::Column => "flex-col",
+                    FlexDirection::ColumnReverse => "flex-col-reverse",
+                }
+                .into(),
+            );
+            if p.gap > 0.0 {
+                cls.push(format!("gap-[{}px]", p.gap as i32));
+            }
+            cls.push(
+                match p.align_items {
+                    fd_canvas_core::AlignItems::Start => "items-start",
+                    fd_canvas_core::AlignItems::Center => "items-center",
+                    fd_canvas_core::AlignItems::End => "items-end",
+                    fd_canvas_core::AlignItems::Stretch => "items-stretch",
+                }
+                .into(),
+            );
+            cls.push(
+                match p.justify_content {
+                    fd_canvas_core::JustifyContent::Start => "justify-start",
+                    fd_canvas_core::JustifyContent::Center => "justify-center",
+                    fd_canvas_core::JustifyContent::End => "justify-end",
+                    fd_canvas_core::JustifyContent::SpaceBetween => "justify-between",
+                    fd_canvas_core::JustifyContent::SpaceAround => "justify-around",
+                    fd_canvas_core::JustifyContent::SpaceEvenly => "justify-evenly",
+                }
+                .into(),
+            );
+            cls.push(
+                match p.wrap {
+                    fd_canvas_core::FlexWrap::NoWrap => "flex-nowrap",
+                    fd_canvas_core::FlexWrap::Wrap => "flex-wrap",
+                }
+                .into(),
+            );
+        }
+        LayoutMode::Grid(_) => {
+            // Tailwind Grid 精细类需模板生成，此处用 arbitrary value 兜底；
+            // 真实 grid 布局建议走 format_style_inline（grid-template-columns）。
+            cls.push("relative".into());
+            cls.push("grid".into());
+        }
+    }
     if node.w > 0.0 {
         cls.push(format!("w-[{}px]", node.w as i32));
     }
@@ -550,10 +645,13 @@ fn node_to_tailwind(node: &PenNode) -> String {
         cls.push(format!("h-[{}px]", node.h as i32));
     }
     if let Some(fill) = &node.style.fill {
-        cls.push(format!("bg-[{}]", fill));
+        cls.push(format!("bg-[{}]", sanitize_css_color(fill)));
     }
     if let Some(stroke) = &node.style.stroke {
-        cls.push(format!("border-2 border-[{}]", stroke));
+        // E-8：输出 stroke_width 而非固定 border-2。
+        let sw = node.style.stroke_width.unwrap_or(1.0);
+        cls.push(format!("border-[{}px]", sw as i32));
+        cls.push(format!("border-[{}]", sanitize_css_color(stroke)));
     }
     if let Some(r) = node.style.radius {
         cls.push(format!("rounded-[{}px]", r as i32));
@@ -561,14 +659,42 @@ fn node_to_tailwind(node: &PenNode) -> String {
     if let Some(op) = node.style.opacity {
         cls.push(format!("opacity-[{}]", op));
     }
+    // E-8：rotation / z_index / font。
+    if node.rotation != 0.0 {
+        cls.push(format!("rotate-[{}deg]", node.rotation));
+    }
+    if node.z_index != 0 {
+        cls.push(format!("z-[{}]", node.z_index));
+    }
+    if let Some(fs) = node.style.font_size {
+        cls.push(format!("text-[{}px]", fs as i32));
+    }
+    if let Some(ff) = &node.style.font_family {
+        cls.push(format!("font-[{}]", sanitize_css_color(ff)));
+    }
     cls.join(" ")
 }
 
 fn format_style_inline(node: &PenNode) -> String {
-    let mut parts = vec![format!(
-        "position:absolute;left:{}px;top:{}px;",
-        node.x as i32, node.y as i32
-    )];
+    let mut parts: Vec<String> = Vec::new();
+    // E-9：仅 Free 布局输出 absolute + left/top；Flex/Grid 容器走文档流，
+    // 由 display:flex/grid 驱动子元素排列，不强制 absolute。
+    match &node.style.layout {
+        LayoutMode::Free => {
+            parts.push(format!(
+                "position:absolute;left:{}px;top:{}px;",
+                node.x as i32, node.y as i32
+            ));
+        }
+        LayoutMode::Flex(p) => {
+            parts.push("position:relative;".to_string());
+            parts.extend(flex_css(p));
+        }
+        LayoutMode::Grid(g) => {
+            parts.push("position:relative;".to_string());
+            parts.extend(grid_css(g));
+        }
+    }
     if node.w > 0.0 {
         parts.push(format!("width:{}px;", node.w as i32));
     }
@@ -576,10 +702,16 @@ fn format_style_inline(node: &PenNode) -> String {
         parts.push(format!("height:{}px;", node.h as i32));
     }
     if let Some(fill) = &node.style.fill {
-        parts.push(format!("background:{};", fill));
+        parts.push(format!("background:{};", sanitize_css_color(fill)));
     }
     if let Some(stroke) = &node.style.stroke {
-        parts.push(format!("border:2px solid {};", stroke));
+        // E-8：输出 stroke_width 而非固定 2px。
+        let sw = node.style.stroke_width.unwrap_or(1.0);
+        parts.push(format!(
+            "border:{}px solid {};",
+            sw as i32,
+            sanitize_css_color(stroke)
+        ));
     }
     if let Some(r) = node.style.radius {
         parts.push(format!("border-radius:{}px;", r as i32));
@@ -587,7 +719,116 @@ fn format_style_inline(node: &PenNode) -> String {
     if let Some(op) = node.style.opacity {
         parts.push(format!("opacity:{};", op));
     }
+    // E-8：rotation / z_index。
+    if node.rotation != 0.0 {
+        parts.push(format!("transform:rotate({}deg);", node.rotation));
+    }
+    if node.z_index != 0 {
+        parts.push(format!("z-index:{};", node.z_index));
+    }
+    // E-8：font_family / font_size（Text 节点字号字体，非 Text 节点亦输出供容器继承）。
+    if let Some(fs) = node.style.font_size {
+        parts.push(format!("font-size:{}px;", fs as i32));
+    }
+    if let Some(ff) = &node.style.font_family {
+        parts.push(format!("font-family:{};", sanitize_css_color(ff)));
+    }
     parts.join("")
+}
+
+/// E-9：FlexParams → CSS 声明片段（对齐 host-web 渲染约定）。
+fn flex_css(p: &fd_canvas_core::FlexParams) -> Vec<String> {
+    use fd_canvas_core::{AlignItems, FlexDirection, FlexWrap, JustifyContent};
+    let mut v = vec!["display:flex;".to_string()];
+    v.push(
+        match p.direction {
+            FlexDirection::Row => "flex-direction:row;",
+            FlexDirection::RowReverse => "flex-direction:row-reverse;",
+            FlexDirection::Column => "flex-direction:column;",
+            FlexDirection::ColumnReverse => "flex-direction:column-reverse;",
+        }
+        .into(),
+    );
+    if p.gap > 0.0 {
+        v.push(format!("gap:{}px;", p.gap as i32));
+    }
+    v.push(
+        match p.align_items {
+            AlignItems::Start => "align-items:flex-start;",
+            AlignItems::Center => "align-items:center;",
+            AlignItems::End => "align-items:flex-end;",
+            AlignItems::Stretch => "align-items:stretch;",
+        }
+        .into(),
+    );
+    v.push(
+        match p.justify_content {
+            JustifyContent::Start => "justify-content:flex-start;",
+            JustifyContent::Center => "justify-content:center;",
+            JustifyContent::End => "justify-content:flex-end;",
+            JustifyContent::SpaceBetween => "justify-content:space-between;",
+            JustifyContent::SpaceAround => "justify-content:space-around;",
+            JustifyContent::SpaceEvenly => "justify-content:space-evenly;",
+        }
+        .into(),
+    );
+    v.push(
+        match p.wrap {
+            FlexWrap::NoWrap => "flex-wrap:nowrap;",
+            FlexWrap::Wrap => "flex-wrap:wrap;",
+        }
+        .into(),
+    );
+    if p.padding.top > 0.0
+        || p.padding.right > 0.0
+        || p.padding.bottom > 0.0
+        || p.padding.left > 0.0
+    {
+        v.push(format!(
+            "padding:{}px {}px {}px {}px;",
+            p.padding.top as i32,
+            p.padding.right as i32,
+            p.padding.bottom as i32,
+            p.padding.left as i32
+        ));
+    }
+    v
+}
+
+/// E-9：GridParams → CSS 声明片段。
+fn grid_css(g: &fd_canvas_core::GridParams) -> Vec<String> {
+    use fd_canvas_core::TrackSizing;
+    let mut v = vec!["display:grid;".to_string()];
+    let cols: Vec<String> = g
+        .columns
+        .iter()
+        .map(|t| match t {
+            TrackSizing::Fixed(px) => format!("{}px", *px as i32),
+            TrackSizing::Auto => "auto".into(),
+            TrackSizing::Flex(f) => format!("{f}fr"),
+            TrackSizing::Percent(pct) => format!("{pct}%"),
+        })
+        .collect();
+    if !cols.is_empty() {
+        v.push(format!("grid-template-columns:{};", cols.join(" ")));
+    }
+    let rows: Vec<String> = g
+        .rows
+        .iter()
+        .map(|t| match t {
+            TrackSizing::Fixed(px) => format!("{}px", *px as i32),
+            TrackSizing::Auto => "auto".into(),
+            TrackSizing::Flex(f) => format!("{f}fr"),
+            TrackSizing::Percent(pct) => format!("{pct}%"),
+        })
+        .collect();
+    if !rows.is_empty() {
+        v.push(format!("grid-template-rows:{};", rows.join(" ")));
+    }
+    if g.gap.0 > 0.0 || g.gap.1 > 0.0 {
+        v.push(format!("gap:{}px {}px;", g.gap.1 as i32, g.gap.0 as i32));
+    }
+    v
 }
 
 /// 按 design system 解析 token 引用（如 `color.bg` → 实际 hex）。
@@ -649,6 +890,44 @@ mod tests {
         assert!(out.contains("export function Home()"));
         assert!(out.contains("left-[10px]"));
         assert!(out.contains("bg-[#FFF]"));
+    }
+
+    // E-10 回归：node.id 含 `" onclick="alert(1)` 应转义，不得注入属性；
+    // fill 含 `red;} * {background:url(http://evil)}` 应净化，不得逃逸 CSS 属性边界。
+    #[test]
+    fn codegen_escapes_xss_id_and_css() {
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut r = PenNode::rect("a\" onclick=\"alert(1)", 0.0, 0.0, 10.0, 10.0);
+        r.style.fill = Some("red;} * { background: url(http://evil) }".into());
+        page.add(r);
+        doc.add_page(page);
+
+        let html = HtmlCodegen.generate(&doc);
+        assert!(
+            !html.contains("onclick=\"alert(1)\""),
+            "原始 onclick 不得残留"
+        );
+        assert!(
+            html.contains("data-id=\"a&quot; onclick=&quot;alert(1)\""),
+            "id 引号应转义为 &quot;"
+        );
+        assert!(!html.contains("url(http://evil)"), "fill url() 应被剥离");
+        assert!(!html.contains("} * {"), "CSS 属性逃逸花括号应被剔除");
+        // fill 含 url() → 降级 transparent，不得泄漏外网地址。
+        assert!(
+            html.contains("background:transparent"),
+            "危险 fill 应降级 transparent"
+        );
+
+        let gen = ReactTailwindCodegen {
+            component_name: "P".into(),
+        };
+        let react = gen.generate(&doc);
+        assert!(
+            !react.contains("url(http://evil)"),
+            "Tailwind bg-[...] url() 应被剥离"
+        );
     }
 
     #[test]
@@ -982,5 +1261,102 @@ mod tests {
         assert!(out.contains("ZStack {"), "非 Group 容器应外裹 ZStack");
         assert!(out.contains("Color.clear"), "叶子 Rect 应渲染");
         assert!(out.contains("Text(\"标题\")"), "子节点 Text 不得丢失");
+    }
+
+    // E-8 回归：codegen 必须输出 rotation/z_index/stroke_width/font_family/font_size 5 维。
+    #[test]
+    fn codegen_emits_all_style_dims_html() {
+        let mut node = PenNode::rect("n1", 10.0, 20.0, 50.0, 30.0);
+        node.rotation = 15.0;
+        node.z_index = 10;
+        node.style.stroke = Some("#000000".into());
+        node.style.stroke_width = Some(5.0);
+        node.style.font_size = Some(16.0);
+        node.style.font_family = Some("system-ui".into());
+        let mut page = Page::new("p1", "P", 100.0, 100.0);
+        page.add(node);
+        let mut doc = PenDocument::new();
+        doc.add_page(page);
+        let out = HtmlCodegen.generate(&doc);
+        assert!(out.contains("transform:rotate(15deg)"), "应输出 rotation");
+        assert!(out.contains("z-index:10"), "应输出 z_index");
+        assert!(
+            out.contains("border:5px solid"),
+            "应输出 stroke_width=5 非 2"
+        );
+        assert!(out.contains("font-size:16px"), "应输出 font_size");
+        assert!(out.contains("font-family:system-ui"), "应输出 font_family");
+        // 旧实现固定 border:2px，回归确认不再固定 2px。
+        assert!(!out.contains("border:2px solid"), "不得固定 2px 边框");
+    }
+
+    // E-8 回归：Tailwind 路径同样输出 5 维。
+    #[test]
+    fn codegen_emits_all_style_dims_tailwind() {
+        let mut node = PenNode::rect("n1", 10.0, 20.0, 50.0, 30.0);
+        node.rotation = 15.0;
+        node.z_index = 10;
+        node.style.stroke = Some("#000000".into());
+        node.style.stroke_width = Some(5.0);
+        node.style.font_size = Some(16.0);
+        let mut page = Page::new("p1", "P", 100.0, 100.0);
+        page.add(node);
+        let mut doc = PenDocument::new();
+        doc.add_page(page);
+        let gen = ReactTailwindCodegen {
+            component_name: "C".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(out.contains("rotate-[15deg]"), "Tailwind 应输出 rotation");
+        assert!(out.contains("z-[10]"), "Tailwind 应输出 z_index");
+        assert!(
+            out.contains("border-[5px]"),
+            "Tailwind 应输出 stroke_width=5"
+        );
+        assert!(out.contains("text-[16px]"), "Tailwind 应输出 font_size");
+        assert!(!out.contains("border-2"), "Tailwind 不得固定 border-2");
+    }
+
+    // E-9 回归：Flex 布局节点不得输出 absolute + left/top，应输出 display:flex + flex 属性。
+    #[test]
+    fn codegen_flex_not_absolute_html() {
+        use fd_canvas_core::FlexParams;
+        let mut node = PenNode::rect("flex1", 0.0, 0.0, 80.0, 60.0);
+        node.style.layout = LayoutMode::Flex(FlexParams::default());
+        let mut page = Page::new("p1", "P", 100.0, 100.0);
+        page.add(node);
+        let mut doc = PenDocument::new();
+        doc.add_page(page);
+        let out = HtmlCodegen.generate(&doc);
+        assert!(out.contains("display:flex"), "Flex 应输出 display:flex");
+        assert!(out.contains("flex-direction:row"), "应输出 flex-direction");
+        assert!(
+            !out.contains("position:absolute"),
+            "Flex 容器不得 absolute 定位"
+        );
+    }
+
+    // E-9 回归：Tailwind Flex 路径输出 flex 类，不输出 absolute。
+    #[test]
+    fn codegen_flex_not_absolute_tailwind() {
+        use fd_canvas_core::FlexParams;
+        let mut node = PenNode::rect("flex1", 0.0, 0.0, 80.0, 60.0);
+        node.style.layout = LayoutMode::Flex(FlexParams::default());
+        let mut page = Page::new("p1", "P", 100.0, 100.0);
+        page.add(node);
+        let mut doc = PenDocument::new();
+        doc.add_page(page);
+        let gen = ReactTailwindCodegen {
+            component_name: "C".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(
+            out.contains("flex flex-row"),
+            "Tailwind 应输出 flex flex-row"
+        );
+        assert!(
+            !out.contains("absolute"),
+            "Tailwind Flex 不得 absolute 定位"
+        );
     }
 }

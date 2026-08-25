@@ -47,13 +47,12 @@ Fusion-Design 是 Fusion-MLX「一核九端」产品矩阵的旗舰主力之一�
 ```
 fusion-design/
 ├── crates/                     ← Fusion-Design 自研 Rust crate（workspace）
-│   ├── fd-canvas-core/         ← 画布数据模型（PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument）
+│   ├── fd-canvas-core/         ← 画布数据模型（PenDocument/PenNode + UndoRedo/Diff + VersionedDocument，Flex/Grid 布局声明）
 │   ├── fd-ai-adapter/          ← op-ai → fusion-mlx 适配层（SSE 流式/多模态视觉/7 个 Skill）
-│   ├── fd-codegen/             ← HTML/React+Tailwind 代码导出
+│   ├── fd-codegen/             ← HTML/React+Tailwind 代码导出（layout-aware Flex/Grid CSS）
 │   ├── fd-design-system/       ← 两套内置设计规范 + Token + Light/Dark 主题
 │   ├── fd-design-lint/         ← 13 条 Lint 规则 + auto_fix（Token 引用/空值清理/自动命名）
-│   ├── fd-ecosystem/           ← 生态联动（IPC + 异步文件监听 + 模板标签检索 + 4 类内置场景模板）
-│   ├── fd-asset/               ← 素材库管理（分类/标签/标注/颜色提取/Token 绑定）
+│   ├── fd-ecosystem/           ← 生态联动（文件 IPC + 模板标签检索 + 4 类内置场景模板）
 │   ├── fd-host-desk/           ← Fusion-Desk WKWebView 宿主桥
 │   ├── fd-host-web/            ← WASM 前端渲染（WebShell + BridgeCommand）
 │   ├── fd-export/              ← PNG/SVG/PDF/HTML 批量导出
@@ -91,7 +90,6 @@ cargo run -p fd-cli -- --help                                  # CLI 可用
 | fd-design-lint | 41 | 13 条 Lint 规则、auto_fix、apply_tokens、FixResult 序列化 |
 | fd-design-system | 10+ | Token、Theme、Registry、CSS 输出 |
 | fd-ecosystem | 16 | IPC、sync_to_code、模板标签检索、内置场景模板 |
-| fd-asset | 19 | 素材 CRUD、分类/标签/标注、颜色提取、Token 绑定 |
 | fd-codegen / fd-host-web / fd-export / fd-host-desk | 各 4-10 | 核心功能 |
 | fd-cli | 5+ | CLI 参数解析、子命令分发 |
 

@@ -258,12 +258,15 @@ impl Linter {
 
     fn check_contrast(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
         let style = &node.style;
-        let fg = style.fill.as_deref().unwrap_or("");
-        let bg = style.stroke.as_deref().unwrap_or("");
-
-        if fg.is_empty() || bg.is_empty() {
+        // E-28：旧实现 fg=fill、bg=stroke 语义反转——fill 是背景，stroke 是边框，
+        // 真实背景从未被检查（漏报），边框当背景（误报），WCAG 形同虚设。
+        // 正确语义：fg=文本前景色（无 text_color 字段，渲染器/codegen 均默认 #000000），
+        // bg=fill（节点背景）。无 fill 时背景透明/继承，无法算对比度 → 跳过。
+        let bg = style.fill.as_deref().unwrap_or("");
+        if bg.is_empty() {
             return;
         }
+        let fg = "#000000";
 
         let fg_lum = luminance(fg);
         let bg_lum = luminance(bg);
@@ -866,7 +869,11 @@ fn apply_tokens_to_nodes(
                 NodeKind::Image => "image",
                 NodeKind::Group => "group",
             };
-            let new_name = format!("{}_{}", kind_str, &node.id[..8.min(node.id.len())]);
+            // E-29：按字符边界取前 8 字符，非字节切片——含 CJK id 字节切片在
+            // 多字节字符中间切断会 panic at non-char boundary。node.id 含中文
+            // （如「登录按钮」）走 lint --fix 即崩。
+            let id_prefix: String = node.id.chars().take(8).collect();
+            let new_name = format!("{}_{}", kind_str, id_prefix);
             let before = node.name.clone();
             node.name = new_name.clone();
             result.fixes_applied += 1;
@@ -952,6 +959,8 @@ fn contrast_ratio(l1: f64, l2: f64) -> f64 {
 }
 
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    // E-30/P3：旧实现只认 3/6 位 hex，4 位(#RGBA)/8 位(#RRGGBBAA) 常见格式被拒致假告警。
+    // alpha 通道对亮度对比度无意义，忽略（按不透明处理）。
     let s = s.trim().trim_start_matches('#');
     match s.len() {
         6 => {
@@ -960,7 +969,21 @@ fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
             let b = u8::from_str_radix(&s[4..6], 16).ok()?;
             Some([r, g, b])
         }
+        8 => {
+            // #RRGGBBAA：忽略末 2 位 alpha
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            Some([r, g, b])
+        }
         3 => {
+            let r = u8::from_str_radix(&s[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&s[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&s[2..3], 16).ok()?;
+            Some([r * 17, g * 17, b * 17])
+        }
+        4 => {
+            // #RGBA：忽略末 1 位 alpha，3 位展开 ×17
             let r = u8::from_str_radix(&s[0..1], 16).ok()?;
             let g = u8::from_str_radix(&s[1..2], 16).ok()?;
             let b = u8::from_str_radix(&s[2..3], 16).ok()?;
@@ -1041,6 +1064,8 @@ mod tests {
 
     #[test]
     fn contrast_low_ratio_detected() {
+        // E-28 正确语义：fg=文本（默认 #000000），bg=fill。
+        // fill=#333333 深灰背景 + 黑字 → 对比度 ~1.6:1 不足 → 应检出。
         let style = NodeStyle {
             fill: Some("#333333".into()),
             stroke: Some("#444444".into()),
@@ -1058,9 +1083,11 @@ mod tests {
 
     #[test]
     fn contrast_good_ratio_no_violation() {
+        // E-28 正确语义：fill=#ffffff 白背景 + 默认黑字 → 对比度 21:1 → 无违规。
+        // 旧测试 fill=#000/stroke=#fff 把 stroke 当背景，是 bug 行为，已纠正。
         let style = NodeStyle {
-            fill: Some("#000000".into()),
-            stroke: Some("#ffffff".into()),
+            fill: Some("#ffffff".into()),
+            stroke: Some("#000000".into()),
             ..Default::default()
         };
         let doc = make_doc(vec![rect_node("r1", "box", style)]);
@@ -1071,6 +1098,28 @@ mod tests {
             .filter(|v| v.rule == LintRule::ContrastCheck)
             .collect();
         assert!(contrast_violations.is_empty());
+    }
+
+    // E-28 回归：stroke（边框）不得当背景。仅设 stroke 无 fill → 背景透明 → 跳过，
+    // 不得检出对比度违规（旧实现 bg=stroke 会误报边框对比度）。
+    #[test]
+    fn contrast_stroke_only_not_treated_as_bg() {
+        let style = NodeStyle {
+            fill: None,
+            stroke: Some("#444444".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(
+            contrast_violations.is_empty(),
+            "无 fill（透明背景）应跳过对比度，不得把 stroke 当背景误报"
+        );
     }
 
     #[test]
@@ -1243,9 +1292,11 @@ mod tests {
 
     #[test]
     fn hex_color_3_digit_parsing() {
+        // E-28 正确语义：fill=#fff 白背景 + 默认黑字 → 高对比度，无违规；
+        // 同时验证 3 位 hex 颜色能被 luminance 正确解析。
         let style = NodeStyle {
-            fill: Some("#000".into()),
-            stroke: Some("#fff".into()),
+            fill: Some("#fff".into()),
+            stroke: Some("#000".into()),
             ..Default::default()
         };
         let doc = make_doc(vec![rect_node("r1", "box", style)]);
@@ -1256,6 +1307,52 @@ mod tests {
             .filter(|v| v.rule == LintRule::ContrastCheck)
             .collect();
         assert!(contrast_violations.is_empty());
+    }
+
+    #[test]
+    fn hex_color_4_and_8_digit_alpha_ignored() {
+        // E-30/P3：4 位(#RGBA)/8 位(#RRGGBBAA) hex 必须可解析，alpha 通道忽略。
+        // 8 位 #FF0000FF（红，全不透明）应等价于 6 位 #FF0000。
+        assert_eq!(parse_hex_color("#FF0000FF"), Some([255, 0, 0]));
+        // 8 位 半透明 #00FF0080 应等价于 6 位 #00FF00。
+        assert_eq!(parse_hex_color("#00FF0080"), Some([0, 255, 0]));
+        // 4 位 #F00F（红，全不透明）应等价于 3 位 #F00 = [255,0,0]。
+        assert_eq!(parse_hex_color("#F00F"), Some([255, 0, 0]));
+        // 4 位 #0F0F 应等价于 3 位 #0F0 = [0,255,0]。
+        assert_eq!(parse_hex_color("#0F0F"), Some([0, 255, 0]));
+        // 无 # 前缀同样支持。
+        assert_eq!(parse_hex_color("FF0000FF"), Some([255, 0, 0]));
+        assert_eq!(parse_hex_color("F00F"), Some([255, 0, 0]));
+        // 3 位仍兼容：#FF0 = RGB(F,F,0) = [255,255,0]。
+        assert_eq!(parse_hex_color("#FF0"), Some([255, 255, 0]));
+        // 4 位 #FF00 = RGBA(F,F,0,alpha=0 忽略) = [255,255,0]。
+        assert_eq!(parse_hex_color("#FF00"), Some([255, 255, 0]));
+        // 长度非法（5 位）返回 None。
+        assert_eq!(parse_hex_color("#FF000"), None);
+        assert_eq!(parse_hex_color("#FF0000"), Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn hex_color_8_digit_contrast_no_false_violation() {
+        // E-30/P3 端到端：8 位 hex fill 在对比度检测中不应因解析失败假告警。
+        // #FFFFFF（白）背景 + #000000FF（黑，alpha=FF 忽略）字 → 高对比，无违规。
+        let style = NodeStyle {
+            fill: Some("#FFFFFF".into()),
+            stroke: Some("#000000FF".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(
+            contrast_violations.is_empty(),
+            "8 位 hex 不应触发对比度假告警: {:?}",
+            contrast_violations
+        );
     }
 
     #[test]
@@ -1649,6 +1746,28 @@ mod tests {
         let result = linter.auto_fix(&mut doc);
         assert!(result.details.iter().any(|d| d.action == "auto_name"));
         assert!(doc.pages[0].nodes[0].name.starts_with("rect_"));
+    }
+
+    #[test]
+    fn auto_fix_names_cjk_id_no_panic() {
+        // E-29 回归：含 CJK 的 node.id 走 auto_name 不得 panic。
+        // 旧 `&node.id[..8]` 字节切片在「登录」(e7 99 bb e5 bd 95) 第 8 字节
+        // 落在字符中间 → byte index 8 is not a char boundary panic。
+        // 现按字符边界取前 8 字符。
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("apple-hig").expect("apple-hig").clone();
+        let cjk_id = "登录按钮节点标识符0123456789";
+        let node = rect_node(cjk_id, "Rect", NodeStyle::default());
+        let mut doc = make_doc(vec![node]);
+
+        let linter = Linter::new().with_design_system(system);
+        let result = linter.auto_fix(&mut doc);
+        assert!(result.details.iter().any(|d| d.action == "auto_name"));
+        let renamed = &doc.pages[0].nodes[0].name;
+        assert!(renamed.starts_with("rect_"), "renamed={renamed}");
+        // 前缀应含完整 CJK 字符（不切断多字节字符）
+        assert!(renamed.contains("登录"), "renamed={renamed}");
     }
 
     #[test]
