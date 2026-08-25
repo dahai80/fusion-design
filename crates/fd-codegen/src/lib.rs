@@ -185,8 +185,10 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
         mods.push(format!(".background(swift_ui_color(\"{}\"))", fill));
     }
     if let Some(stroke) = &node.style.stroke {
-        mods.push(format!(".overlay(RoundedRectangle(cornerRadius: {}).stroke(swift_ui_color(\"{}\"), lineWidth: 1))",
-            node.style.radius.unwrap_or(0.0) as i32, stroke));
+        // E-8：stroke_width 而非硬编码 lineWidth:1（对齐 HTML/Tailwind 路径）。
+        let sw = node.style.stroke_width.unwrap_or(1.0);
+        mods.push(format!(".overlay(RoundedRectangle(cornerRadius: {}).stroke(swift_ui_color(\"{}\"), lineWidth: {}))",
+            node.style.radius.unwrap_or(0.0) as i32, stroke, sw as i32));
     }
     if let Some(r) = node.style.radius {
         if r > 0.0 {
@@ -198,8 +200,25 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
             mods.push(format!(".opacity({})", op));
         }
     }
+    // E-8：SwiftUI 路径补 rotation/z_index/font_family（此前仅 font_size，
+    // 对齐 HTML/Tailwind/React 路径 5 维完整渲染）。
+    if node.rotation != 0.0 {
+        mods.push(format!(
+            ".rotationEffect(.degrees({}))",
+            node.rotation as i32
+        ));
+    }
+    if node.z_index != 0 {
+        mods.push(format!(".zIndex({})", node.z_index));
+    }
     if let Some(fs) = node.style.font_size {
-        mods.push(format!(".font(.system(size: {}))", fs as i32));
+        if let Some(ff) = &node.style.font_family {
+            mods.push(format!(".font(.custom(\"{}\", size: {}))", ff, fs as i32));
+        } else {
+            mods.push(format!(".font(.system(size: {}))", fs as i32));
+        }
+    } else if let Some(ff) = &node.style.font_family {
+        mods.push(format!(".font(.custom(\"{}\", size: 16))", ff));
     }
 
     let mod_str = if mods.is_empty() {
@@ -1357,6 +1376,68 @@ mod tests {
         assert!(
             !out.contains("absolute"),
             "Tailwind Flex 不得 absolute 定位"
+        );
+    }
+
+    // E-8 回归（SwiftUI 路径）：rotation/z_index/stroke_width/font_family 4 维
+    // 此前 SwiftUI 仅渲染 font_size，对齐 HTML/Tailwind/React 5 维完整渲染。
+    #[test]
+    fn swiftui_renders_rotation_zindex_stroke_width_font_family() {
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut r = PenNode::rect("n1", 10.0, 20.0, 50.0, 30.0);
+        r.style.fill = Some("#FFF".into());
+        r.style.stroke = Some("#000".into());
+        r.style.stroke_width = Some(3.0);
+        r.rotation = 45.0;
+        r.z_index = 5;
+        r.style.font_family = Some("Helvetica".into());
+        r.style.font_size = Some(18.0);
+        page.add(r);
+        doc.add_page(page);
+        let gen = SwiftUiCodegen {
+            view_name: "V".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(
+            out.contains(".rotationEffect(.degrees(45))"),
+            "SwiftUI 应渲染 rotation: {}",
+            out
+        );
+        assert!(
+            out.contains(".zIndex(5)"),
+            "SwiftUI 应渲染 z_index: {}",
+            out
+        );
+        assert!(
+            out.contains("lineWidth: 3"),
+            "SwiftUI stroke 应使用 stroke_width 而非硬编码 1: {}",
+            out
+        );
+        assert!(
+            out.contains(".font(.custom(\"Helvetica\", size: 18))"),
+            "SwiftUI 应渲染 font_family + font_size: {}",
+            out
+        );
+    }
+
+    // E-8 回归（SwiftUI 路径）：font_family 无 font_size 时回退 size:16。
+    #[test]
+    fn swiftui_font_family_without_size_falls_back() {
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut r = PenNode::rect("n1", 0.0, 0.0, 50.0, 30.0);
+        r.style.font_family = Some("Menlo".into());
+        page.add(r);
+        doc.add_page(page);
+        let gen = SwiftUiCodegen {
+            view_name: "V".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(
+            out.contains(".font(.custom(\"Menlo\", size: 16))"),
+            "font_family 无 size 应回退 16: {}",
+            out
         );
     }
 }
