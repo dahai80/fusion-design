@@ -89,6 +89,8 @@ cargo run -p fd-cli -- --help                                  # CLI available
 
 **服务可用性校验**：`fusion-design check-mlx` 做三段真探测——endpoint 解析 → `/v1/models` 鉴权 + 模型列表 → 1-token 真推理探针。gateway 的 `/v1/models` 会「假绿」（列了云端/本地模型名但 MLX 未加载，generate 实返 502），故最终判定用真 chat 调用。探针模型解析：`--model` > `FUSION_MLX_MODEL` > 列表首个（建议显式传本地 mlx 模型 id）。不可用时以非零退出码 + 诊断文案 fail visibly。
 
+**M-5 重试退避**：`fd-ai-adapter` 三处 HTTP 路径（`blocking_post` / `chat_stream_messages` / `check_generate`）对 502/503 瞬时错误指数退避重试（500ms→1s→2s→4s→8s 封顶，默认 4 次），等模型加载完成即成功；4xx 永久错误直接失败。`FUSION_MLX_RETRY_MAX` 调最大尝试次数（设 1 关闭）。流式仅覆盖建连阶段，中途断流不重试。
+
 **安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
 
 **CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
