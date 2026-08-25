@@ -8,6 +8,12 @@
 //! 【RouteGuard 鉴权】所有出站请求附加 `X-Fusion-Route: fusion-design` 头
 //! （fusion-mlx v0.7.0+ 默认强制，缺失则 403 missing_route），并在
 //! `FUSION_MLX_API_KEY` 设置时附加 `Authorization: Bearer <key>`。
+//!
+//! 【M-5 重试退避】fusion-mlx 模型加载期间返回 503、节点模型被驱逐回 502/503。
+//! 三处 HTTP 路径（`blocking_post` / `chat_stream_messages` / `check_generate`）
+//! 对 502/503 瞬时错误指数退避重试（500ms→1s→2s→4s→8s 封顶，默认最多 4 次），
+//! 4xx 永久错误（鉴权/请求格式）直接失败不重试。`FUSION_MLX_RETRY_MAX` 环境变量
+//! 调最大尝试次数（含首次），设 1 即关闭重试。流式仅覆盖建连阶段，中途断流不重试。
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
@@ -358,9 +364,45 @@ static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("blocking tokio runtime 创建失败")
 });
 
+// ── M-5：502/503 指数退避重试 ──
+// fusion-mlx 模型加载期间返回 503（"model loading"），集群节点模型被驱逐回 502/503。
+// 旧实现直接 bail!，首次请求即失败不等待加载。改瞬时错误退避重试，永久错误直接失败。
+// FUSION_MLX_RETRY_MAX 环境变量调最大尝试次数（含首次），缺省 4。设 1 即关闭重试。
+const RETRY_BACKOFF_BASE_MS: u64 = 500;
+const RETRY_MAX_BACKOFF_MS: u64 = 8_000;
+const RETRY_DEFAULT_MAX_ATTEMPTS: u32 = 4;
+
+fn retry_max_attempts() -> u32 {
+    // FUSION_MLX_RETRY_MAX 覆盖；<1 视为缺省。0/1 = 不重试（仅首次）。
+    std::env::var("FUSION_MLX_RETRY_MAX")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(RETRY_DEFAULT_MAX_ATTEMPTS)
+}
+
+fn is_transient_status(code: u16) -> bool {
+    // 502/503 = 瞬时（模型加载中/被驱逐/网关临时不可达）。4xx = 永久，不重试。
+    code == 502 || code == 503
+}
+
+fn backoff_delay(attempt: u32) -> std::time::Duration {
+    // 指数退避：500ms, 1s, 2s, 4s, 8s(上限)。attempt 从 0 起算（首次重试前的等待）。
+    let exp = if attempt >= 16 {
+        1u64 << 16
+    } else {
+        1u64 << attempt
+    };
+    let delay_ms = RETRY_BACKOFF_BASE_MS
+        .saturating_mul(exp)
+        .min(RETRY_MAX_BACKOFF_MS);
+    std::time::Duration::from_millis(delay_ms)
+}
+
 impl FusionMlxClient {
     /// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
     /// 附加 RouteGuard + Bearer 鉴权头后发往 fusion-mlx。
+    /// M-5：502/503 瞬时错误指数退避重试，4xx 永久错误直接失败。
     fn blocking_post<T: Serialize + ?Sized>(
         &self,
         url: &str,
@@ -370,19 +412,67 @@ impl FusionMlxClient {
         let url = url.to_string();
         let bearer = self.bearer_token();
         BLOCKING_RT.block_on(async move {
-            let req = http
-                .post(&url)
-                .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
-                .json(payload);
-            let req = match bearer {
-                Some(b) => req.header("Authorization", b),
-                None => req,
-            };
-            let resp = req.send().await?;
-            if !resp.status().is_success() {
-                anyhow::bail!("fusion-mlx HTTP {}", resp.status());
+            let max = retry_max_attempts();
+            let mut last_err: Option<anyhow::Error> = None;
+            for attempt in 0..max {
+                // RequestBuilder 消耗性，每次重试重建。
+                let req = http
+                    .post(&url)
+                    .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
+                    .json(payload);
+                let req = match &bearer {
+                    Some(b) => req.header("Authorization", b),
+                    None => req,
+                };
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        return Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?);
+                    }
+                    Ok(resp) => {
+                        let code = resp.status().as_u16();
+                        if is_transient_status(code) && attempt + 1 < max {
+                            let delay = backoff_delay(attempt);
+                            tracing::warn!(
+                                attempt,
+                                code,
+                                ?delay,
+                                "blocking_post: 瞬时错误，退避后重试"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        if attempt + 1 < max {
+                            tracing::warn!(attempt, code, "blocking_post: 永久错误，不重试");
+                        } else {
+                            tracing::error!(attempt, code, "blocking_post: 重试耗尽");
+                        }
+                        anyhow::bail!("fusion-mlx HTTP {code}（尝试 {}/{max} 次）", attempt + 1);
+                    }
+                    Err(e) => {
+                        // 连接错误（fusion-mlx 未起/网关不可达）按瞬时重试。
+                        if attempt + 1 < max {
+                            let delay = backoff_delay(attempt);
+                            tracing::warn!(
+                                attempt,
+                                error = %e,
+                                ?delay,
+                                "blocking_post: 连接失败，退避后重试"
+                            );
+                            last_err = Some(anyhow::Error::from(e));
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        tracing::error!(attempt, error = %e, "blocking_post: 连接失败，重试耗尽");
+                        anyhow::bail!(
+                            "fusion-mlx 连接失败（尝试 {}/{} 次）: {e}",
+                            attempt + 1,
+                            max
+                        );
+                    }
+                }
             }
-            Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?)
+            // max >= 1 由 retry_max_attempts 保证，循环内必 return/bail。
+            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("blocking_post: 重试循环异常退出")))
         })
     }
 }
@@ -445,30 +535,89 @@ pub async fn chat_stream_messages(
     let url = format!("{}/v1/chat/completions", client.endpoint);
     let bearer = client.bearer_token();
     let http = client.http;
-    let req = http
-        .post(&url)
-        .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
-        .json(&payload);
-    let req = match bearer {
-        Some(b) => req.header("Authorization", b),
-        None => req,
-    };
-
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "SSE 请求失败");
-            return futures::stream::once(async move { Err(anyhow::anyhow!("SSE 请求失败: {e}")) })
-                .boxed();
+    // M-5：建连阶段（send + status）指数退避重试 502/503。拿到 2xx 即进流消费。
+    // 流已建立后的中途断流不重试（语义复杂，见 TODO）。
+    // RequestBuilder 消耗性，每次重试重建；bearer 保留 owned，闭包按引用取用。
+    let max = retry_max_attempts();
+    let resp = {
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut got: Option<reqwest::Response> = None;
+        for attempt in 0..max {
+            let build_req = || {
+                let r = http
+                    .post(&url)
+                    .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
+                    .json(&payload);
+                match &bearer {
+                    Some(b) => r.header("Authorization", b),
+                    None => r,
+                }
+            };
+            let attempt_req = build_req();
+            match attempt_req.send().await {
+                Ok(r) if r.status().is_success() => {
+                    got = Some(r);
+                    break;
+                }
+                Ok(r) => {
+                    let code = r.status().as_u16();
+                    if is_transient_status(code) && attempt + 1 < max {
+                        let delay = backoff_delay(attempt);
+                        tracing::warn!(
+                            attempt,
+                            code,
+                            ?delay,
+                            "chat_stream_messages: 建连瞬时错误，退避后重试"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    tracing::error!(
+                        attempt,
+                        code,
+                        "chat_stream_messages: 建连失败，重试耗尽或永久错误"
+                    );
+                    return futures::stream::once(async move {
+                        Err(anyhow::anyhow!(
+                            "fusion-mlx HTTP {code}（尝试 {}/{} 次）",
+                            attempt + 1,
+                            max
+                        ))
+                    })
+                    .boxed();
+                }
+                Err(e) => {
+                    if attempt + 1 < max {
+                        let delay = backoff_delay(attempt);
+                        tracing::warn!(
+                            attempt, error = %e, ?delay,
+                            "chat_stream_messages: 建连失败，退避后重试"
+                        );
+                        last_err = Some(anyhow::Error::from(e));
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    tracing::error!(attempt, error = %e, "chat_stream_messages: 建连失败，重试耗尽");
+                    return futures::stream::once(async move {
+                        Err(anyhow::anyhow!(
+                            "SSE 请求失败（尝试 {}/{} 次）: {e}",
+                            attempt + 1,
+                            max
+                        ))
+                    })
+                    .boxed();
+                }
+            }
+        }
+        match got {
+            Some(r) => r,
+            None => {
+                let e = last_err
+                    .unwrap_or_else(|| anyhow::anyhow!("chat_stream_messages: 重试循环异常退出"));
+                return futures::stream::once(async move { Err(e) }).boxed();
+            }
         }
     };
-    if !resp.status().is_success() {
-        let status = resp.status();
-        return futures::stream::once(
-            async move { Err(anyhow::anyhow!("fusion-mlx HTTP {status}")) },
-        )
-        .boxed();
-    }
 
     let stream = resp.bytes_stream();
     // L6：buffer 用 Vec<u8> 而非 String。旧实现用 String::from_utf8_lossy(&bytes)
@@ -752,62 +901,111 @@ impl FusionMlxClient {
             temperature: None,
         };
         let url = format!("{}/v1/chat/completions", self.endpoint);
-        let resp = self
-            .authed(self.http.post(&url).json(&payload))
-            .send()
-            .await;
-        match resp {
-            Ok(r) => {
-                let code = r.status().as_u16();
-                if r.status().is_success() {
-                    tracing::info!(model, "check_generate: 推理探针通过");
-                    Ok(GenerateProbeStatus {
-                        model_loaded: true,
-                        available: true,
-                        status: Some(format!("推理探针通过（模型 {model} 已加载）")),
-                        http_code: Some(code),
-                    })
-                } else if code == 502 || code == 503 {
-                    let body: serde_json::Value = r.json().await.unwrap_or_default();
-                    let msg = body["error"]["message"]
-                        .as_str()
-                        .unwrap_or("无错误体")
-                        .to_string();
-                    tracing::warn!(code, msg, "check_generate: 模型未加载（502/503）");
-                    Ok(GenerateProbeStatus {
+        // M-5：502/503 = 模型加载中/被驱逐，退避等待后重试。4xx/非瞬时 5xx/连接失败耗尽
+        // 仍按原诊断语义返回（不改变 GenerateProbeStatus 结构）。
+        let max = retry_max_attempts();
+        let mut last_err: Option<String> = None;
+        let mut last_code: Option<u16> = None;
+        for attempt in 0..max {
+            let resp = self
+                .authed(self.http.post(&url).json(&payload))
+                .send()
+                .await;
+            match resp {
+                Ok(r) => {
+                    let code = r.status().as_u16();
+                    if r.status().is_success() {
+                        tracing::info!(model, attempt, "check_generate: 推理探针通过");
+                        return Ok(GenerateProbeStatus {
+                            model_loaded: true,
+                            available: true,
+                            status: Some(format!(
+                                "推理探针通过（模型 {model} 已加载，尝试 {}/{} 次）",
+                                attempt + 1,
+                                max
+                            )),
+                            http_code: Some(code),
+                        });
+                    } else if is_transient_status(code) {
+                        let body: serde_json::Value = r.json().await.unwrap_or_default();
+                        let msg = body["error"]["message"]
+                            .as_str()
+                            .unwrap_or("无错误体")
+                            .to_string();
+                        last_code = Some(code);
+                        if attempt + 1 < max {
+                            let delay = backoff_delay(attempt);
+                            tracing::warn!(
+                                attempt,
+                                code,
+                                msg,
+                                ?delay,
+                                "check_generate: 模型未加载（502/503），退避后重试"
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        tracing::warn!(code, msg, "check_generate: 模型未加载，重试耗尽");
+                        return Ok(GenerateProbeStatus {
+                            model_loaded: false,
+                            available: false,
+                            status: Some(format!(
+                                "模型未加载（{code} {msg}）：重试 {max} 次仍 502/503，generate 失败"
+                            )),
+                            http_code: Some(code),
+                        });
+                    } else if code == 401 || code == 403 {
+                        return Ok(GenerateProbeStatus {
+                            model_loaded: false,
+                            available: false,
+                            status: Some(format!("鉴权失败（{code}）：FUSION_MLX_API_KEY 无效")),
+                            http_code: Some(code),
+                        });
+                    } else {
+                        return Ok(GenerateProbeStatus {
+                            model_loaded: false,
+                            available: false,
+                            status: Some(format!("generate 返回 {code}")),
+                            http_code: Some(code),
+                        });
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(format!("{e}"));
+                    if attempt + 1 < max {
+                        let delay = backoff_delay(attempt);
+                        tracing::warn!(
+                            attempt, error = %e, ?delay,
+                            "check_generate: 请求失败，退避后重试"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    tracing::warn!(error = %e, "check_generate: 请求失败，重试耗尽");
+                    return Ok(GenerateProbeStatus {
                         model_loaded: false,
                         available: false,
-                        status: Some(format!(
-                            "模型未加载（{code} {msg}）：gateway 列了模型名但 MLX 未加载，generate 失败"
-                        )),
-                        http_code: Some(code),
-                    })
-                } else if code == 401 || code == 403 {
-                    Ok(GenerateProbeStatus {
-                        model_loaded: false,
-                        available: false,
-                        status: Some(format!("鉴权失败（{code}）：FUSION_MLX_API_KEY 无效")),
-                        http_code: Some(code),
-                    })
-                } else {
-                    Ok(GenerateProbeStatus {
-                        model_loaded: false,
-                        available: false,
-                        status: Some(format!("generate 返回 {code}")),
-                        http_code: Some(code),
-                    })
+                        status: Some(format!("generate 请求失败（重试 {max} 次）：{e}")),
+                        http_code: None,
+                    });
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "check_generate: 请求失败");
-                Ok(GenerateProbeStatus {
-                    model_loaded: false,
-                    available: false,
-                    status: Some(format!("generate 请求失败：{e}")),
-                    http_code: None,
-                })
-            }
         }
+        // 循环正常退出（max=0 不会发生，retry_max_attempts 已保证 >=1）：兜底。
+        Ok(GenerateProbeStatus {
+            model_loaded: false,
+            available: false,
+            status: Some(format!(
+                "generate 重试 {max} 次未成功{}{}",
+                last_code
+                    .map(|c| format!("，末次 HTTP {c}"))
+                    .unwrap_or_default(),
+                last_err
+                    .map(|e| format!("，末次错误 {e}"))
+                    .unwrap_or_default()
+            )),
+            http_code: last_code,
+        })
     }
 }
 
@@ -3738,6 +3936,100 @@ mod mlx_integration {
         format!("http://{addr}")
     }
 
+    /// 序列 mock server：前 N 次按 statuses[] 返回，之后恒返回 200 + body_for_last。
+    /// 用于 M-5 重试回归：先 502/503 几次，再 200 成功。
+    /// 计数器用 AtomicU32，返回 url + 命中计数句柄供断言调用次数。
+    async fn spawn_sequence_server(
+        statuses: Vec<u16>,
+        body_for_last: String,
+    ) -> (String, Arc<std::sync::atomic::AtomicU32>) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = Arc::new(AtomicU32::new(0));
+        let count_clone = count.clone();
+        let statuses_len = statuses.len();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let idx = count_clone.fetch_add(1, Ordering::SeqCst) as usize;
+                let mut buf = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+                let (status, reason, body) = if idx < statuses_len {
+                    let s = statuses[idx];
+                    let r = match s {
+                        200 => "OK",
+                        401 => "Unauthorized",
+                        403 => "Forbidden",
+                        502 => "Bad Gateway",
+                        503 => "Service Unavailable",
+                        _ => "ERR",
+                    };
+                    (s, r, String::from(r#"{"error":{"message":"loading"}}"#))
+                } else {
+                    (200, "OK", body_for_last.clone())
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), count)
+    }
+
+    /// 序列 SSE mock server：前 N 次返回 statuses[]（瞬时错误），之后返回 200 SSE。
+    /// 用于 chat_stream_messages 建连重试回归：502 几次后 200 流出 delta。
+    async fn spawn_sequence_sse_server(statuses: Vec<u16>, frames: Vec<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let statuses_len = statuses.len();
+        tokio::spawn(async move {
+            let mut hits = 0u32;
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                if (hits as usize) < statuses_len {
+                    let s = statuses[hits as usize];
+                    let reason = match s {
+                        502 => "Bad Gateway",
+                        503 => "Service Unavailable",
+                        _ => "ERR",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {s} {reason}\r\nContent-Type: application/json\r\nContent-Length: 30\r\n\r\n{{\"error\":{{\"message\":\"loading\"}}}}"
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                    hits += 1;
+                    continue;
+                }
+                let mut resp = String::new();
+                resp.push_str("HTTP/1.1 200 OK\r\n");
+                resp.push_str("Content-Type: text/event-stream\r\n");
+                resp.push_str("Connection: close\r\n\r\n");
+                for frame in &frames {
+                    resp.push_str("data: ");
+                    resp.push_str(frame);
+                    resp.push_str("\r\n\r\n");
+                }
+                resp.push_str("data: [DONE]\r\n\r\n");
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
     /// 401 时 available=false 且 auth_ok=Some(false)——修复「假绿」核心场景。
     #[tokio::test]
     async fn health_check_401_marks_auth_failure() {
@@ -3854,6 +4146,169 @@ mod mlx_integration {
             "须点鉴权：{:?}",
             p.status
         );
+    }
+
+    // ── M-5：502/503 指数退避重试回归 ──
+
+    /// is_transient_status 仅 502/503 判瞬时，其余（含 200/401/403/404/500）判永久。
+    #[test]
+    fn is_transient_status_classifies_502_503_only() {
+        assert!(is_transient_status(502));
+        assert!(is_transient_status(503));
+        assert!(!is_transient_status(200));
+        assert!(!is_transient_status(401));
+        assert!(!is_transient_status(403));
+        assert!(!is_transient_status(404));
+        assert!(!is_transient_status(500));
+    }
+
+    /// backoff_delay 指数增长且封顶 8s：attempt 0/1/2/3 → 500ms/1s/2s/4s，10 → 8s。
+    #[test]
+    fn backoff_delay_exponential_capped() {
+        assert_eq!(backoff_delay(0), std::time::Duration::from_millis(500));
+        assert_eq!(backoff_delay(1), std::time::Duration::from_millis(1000));
+        assert_eq!(backoff_delay(2), std::time::Duration::from_millis(2000));
+        assert_eq!(backoff_delay(3), std::time::Duration::from_millis(4000));
+        assert_eq!(
+            backoff_delay(10),
+            std::time::Duration::from_millis(8000),
+            "封顶 8s"
+        );
+    }
+
+    /// FUSION_MLX_RETRY_MAX 覆盖。env 测试有进程全局竞态，故标 #[ignore]，
+    /// 手动验证：`cargo test -p fd-ai-adapter retry_max_attempts_env_override -- --ignored --test-threads=1`。
+    #[test]
+    #[ignore = "env 全局竞态，手动 --test-threads=1 运行"]
+    fn retry_max_attempts_env_override() {
+        std::env::set_var("FUSION_MLX_RETRY_MAX", "2");
+        assert_eq!(retry_max_attempts(), 2);
+        std::env::remove_var("FUSION_MLX_RETRY_MAX");
+        assert_eq!(retry_max_attempts(), RETRY_DEFAULT_MAX_ATTEMPTS);
+        std::env::set_var("FUSION_MLX_RETRY_MAX", "0");
+        assert_eq!(
+            retry_max_attempts(),
+            RETRY_DEFAULT_MAX_ATTEMPTS,
+            "0 视为缺省"
+        );
+        std::env::set_var("FUSION_MLX_RETRY_MAX", "notanumber");
+        assert_eq!(
+            retry_max_attempts(),
+            RETRY_DEFAULT_MAX_ATTEMPTS,
+            "坏值视为缺省"
+        );
+        std::env::remove_var("FUSION_MLX_RETRY_MAX");
+    }
+
+    /// blocking_post：先 503 两次再 200 → 重试成功，调用 3 次。
+    /// 非 #[tokio::test]：chat_sync 内部 BLOCKING_RT.block_on 嵌套 tokio runtime 会 panic，
+    /// 故用独立 runtime 起序列 mock server，再同步调 chat_sync。
+    #[test]
+    fn blocking_post_retries_on_503_then_succeeds() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (url, count) = rt.block_on(spawn_sequence_server(vec![503, 503], body));
+        let client = mock_client(&url);
+        let out = client.chat_sync("m", "sys", "ping", 1);
+        assert!(out.is_ok(), "503×2 后应重试成功：{:?}", out);
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "应调用 3 次（2 次 503 + 1 次 200）"
+        );
+    }
+
+    /// blocking_post：401 永久错误不重试，仅调用 1 次。
+    #[test]
+    fn blocking_post_no_retry_on_401() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (url, count) = rt.block_on(spawn_sequence_server(
+            vec![401],
+            String::from(r#"{"error":"nope"}"#),
+        ));
+        let client = mock_client(&url);
+        let out = client.chat_sync("m", "sys", "ping", 1);
+        assert!(out.is_err(), "401 应直接失败不重试");
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "401 永久错误应仅调用 1 次"
+        );
+    }
+
+    /// blocking_post：恒 503 重试耗尽 → bail，调用 = max 次。
+    /// 用序列 server 恒 503（statuses 覆盖所有调用），断言耗尽失败。
+    #[test]
+    fn blocking_post_retries_exhaust_then_bail() {
+        // statuses 给 8 个 503，足够覆盖默认 max=4 次重试。
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (url, count) = rt.block_on(spawn_sequence_server(
+            vec![503, 503, 503, 503, 503, 503, 503, 503],
+            String::from(r#"{"error":"nope"}"#),
+        ));
+        let client = mock_client(&url);
+        let out = client.chat_sync("m", "sys", "ping", 1);
+        assert!(out.is_err(), "恒 503 应重试耗尽后失败");
+        let calls = count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            calls, RETRY_DEFAULT_MAX_ATTEMPTS,
+            "应调用满 max={RETRY_DEFAULT_MAX_ATTEMPTS} 次"
+        );
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("503"), "错误须含 503：{err}");
+    }
+
+    /// check_generate：先 503 两次再 200 → 探针重试后 model_loaded=true。
+    #[tokio::test]
+    async fn check_generate_retries_on_503_then_loaded() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
+        let (url, count) = spawn_sequence_server(vec![503, 503], body).await;
+        let client = mock_client(&url);
+        let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
+        assert!(p.model_loaded, "503×2 后应重试成功标 model_loaded");
+        assert!(p.available);
+        assert_eq!(p.http_code, Some(200));
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "探针应调用 3 次"
+        );
+    }
+
+    /// chat_stream_messages：建连 502 后 200 SSE → 流重试后产出 delta。
+    #[tokio::test]
+    async fn chat_stream_messages_retries_on_502_then_streams() {
+        let d1 = String::from(r#"{"choices":[{"delta":{"content":"Hi"}}]}"#);
+        let url = spawn_sequence_sse_server(vec![502], vec![d1]).await;
+        let client = mock_client(&url);
+        let messages = vec![MlxChatMessage {
+            role: String::from("user"),
+            content: String::from("hi"),
+        }];
+        let drain = async {
+            let mut stream =
+                chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
+            use futures::StreamExt;
+            let mut tokens = String::new();
+            let mut saw_done = false;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(delta) => {
+                        if delta.finished {
+                            saw_done = true;
+                        }
+                        tokens.push_str(&delta.token);
+                    }
+                    Err(e) => panic!("stream error: {e}"),
+                }
+            }
+            (tokens, saw_done)
+        };
+        let (tokens, saw_done) = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("502 重试后应在 5 秒内建连并完成流");
+        assert_eq!(tokens, "Hi", "重试后应正常产出 delta");
+        assert!(saw_done, "流应正常以 [DONE] 结束");
     }
 
     /// 捕获完整请求体（大缓冲，用于多模态 base64 负载）。
