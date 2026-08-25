@@ -11,10 +11,10 @@ description = "Fusion-Design 生态联动 — 对接 Fusion Code/Simulation/KB/C
 name = "fd_ecosystem"
 path = "src/lib.rs"
 
-# Callers: fd-cli (ecosystem watch), DesignBridge.swift (async file watch)
-# Affected API: EcosystemLink::watch_async(), search_templates_by_tags()
-# Data schemas: LinkMessage IPC files, DesignTemplate with tags, WatchEvent stream
-# User instruction: "按照方案和prd方案全面落地" — Phase 5 async file watch + tag search
+# Callers: fd-cli (export/generate IPC send, train), DesignBridge.swift
+# Affected API: EcosystemLink::send/list/consume/sync_to_code/search_templates/templates,
+#   TrainerClient::run_sft/run_rlsl
+# H-A3/P2-2：watch_async + 自建 MCP 层已移除（零外部调用，死代码）。
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,10 +22,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-notify = { version = "7", features = ["macos_kqueue"] }
+# H-A3/P2-2：notify 已移除（仅 watch_async 用，已删）。
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-codegen = { path = "../fd-codegen" }
-# op-mcp 未引入私有依赖；自建 MCP 协议层已在 lib.rs 实现（McpServer/McpTool）替代
+# op-mcp 未引入私有依赖；自建 MCP 层已移除（不合规，见审计 H-A4）。
 
 [dev-dependencies]
 tempfile = "3"

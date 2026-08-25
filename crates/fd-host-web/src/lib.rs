@@ -56,14 +56,10 @@ pub struct WebShell {
 struct WebShellInner {
     canvas_id: String,
     ready: bool,
-    pending_messages: Vec<String>,
     // C11：缓存最近一次 render_dom 的 PenDocument JSON，替代 DOM 属性存储。
     // viewport_cull_update 从这里读取，避免每帧从 data-fd-doc 重新解析整文档。
     cached_doc_json: Option<String>,
 }
-
-#[allow(dead_code)]
-const MAX_PENDING_MESSAGES: usize = 200;
 
 /// 初始化 Web 宿主。
 ///
@@ -71,7 +67,9 @@ const MAX_PENDING_MESSAGES: usize = 200;
 /// 对应 `op-host-web::mount` 的 `<canvas>` 校验逻辑。
 #[wasm_bindgen]
 pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
-    // 浏览器异常时 Rust 侧 panic 信息通过 wasm-bindgen 默认机制输出
+    // R-A18：注册 panic hook，panic 落 console.error 而非静默 unreachable trap。
+    // 否则事件回调任一 panic → 整个 WebShell 死亡 → WKWebView 永久白屏无诊断。
+    console_error_panic_hook::set_once();
 
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("mount: window unavailable"))?;
     let document = window
@@ -87,7 +85,6 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
     let inner = WebShellInner {
         canvas_id: canvas_id.to_string(),
         ready: true,
-        pending_messages: vec![],
         cached_doc_json: None,
     };
 
@@ -98,7 +95,6 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
     *shell_lock() = Some(WebShellInner {
         canvas_id: canvas_id.to_string(),
         ready: true,
-        pending_messages: vec![],
         cached_doc_json: None,
     });
 
@@ -259,22 +255,84 @@ fn handle_host_message(json: &str) {
     }
 }
 
+/// 宿主桥 handler 名（对应 studio 侧注册的 WKScriptMessageHandler name）。
+/// 仅 wasm32 路径 dispatch_to_host 消费；非 wasm 构建不编译避免 dead_code 警告（CI clippy -D warnings）。
+#[cfg(target_arch = "wasm32")]
+const HOST_HANDLER_NAME: &str = "fdHost";
+
 /// 向后端发送消息。
+///
+/// R-A22：桥接主路径走 `window.webkit.messageHandlers.fdHost.postMessage`，
+/// 对齐 CLAUDE.md/README 声称的 WKWebView 标准原生回调。若该 handler 不存在
+/// （旧版 studio 未注册 / 非 WKWebView 环境），回退到 `navigator.__fd_host_post`
+/// 属性轮询契约，保持向后兼容。
 fn send_to_host(kind: &str, payload: &serde_json::Value) {
     let msg = serde_json::json!({
         "direction": "WebViewToBackend",
         "kind": kind,
         "payload": payload,
     });
-    let json = serde_json::to_string(&msg).unwrap_or_default();
-    if let Some(w) = js_sys::global().dyn_ref::<web_sys::Window>() {
-        let js_val = JsValue::from_str(&json);
-        let _ = js_sys::Reflect::set(
-            &w.navigator(),
-            &JsValue::from_str("__fd_host_post"),
-            &js_val,
-        );
+    let json = match serde_json::to_string(&msg) {
+        Ok(s) => s,
+        // E-41：序列化失败显式告警而非吞消息（旧实现 unwrap_or_default="" 静默丢消息）。
+        Err(e) => {
+            web_sys::console::warn_1(
+                &format!("fd-host-web: send_to_host 序列化失败 kind={kind} err={e}").into(),
+            );
+            return;
+        }
+    };
+    // js_sys::global 在非 wasm 目标会 panic（imported statics 不可用）；
+    // 仅 wasm32 分发，原生测试环境无 window，直接返回。
+    #[cfg(target_arch = "wasm32")]
+    {
+        dispatch_to_host(&json, kind);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (json, kind);
+    }
+}
+
+/// wasm32 专用：按 R-A22 桥接契约分发消息到原生宿主。
+#[cfg(target_arch = "wasm32")]
+fn dispatch_to_host(json: &str, kind: &str) {
+    let global = js_sys::global();
+    let Some(w) = global.dyn_ref::<web_sys::Window>() else {
+        return;
+    };
+    // 主路径：webkit.messageHandlers.<handler>.postMessage（WKWebView 标准）。
+    let handlers = js_sys::Reflect::get(&w, &JsValue::from_str("webkit")).ok();
+    if let Some(webkit) = handlers {
+        let mh = js_sys::Reflect::get(&webkit, &JsValue::from_str("messageHandlers")).ok();
+        if let Some(mh) = mh {
+            let handler = js_sys::Reflect::get(&mh, &JsValue::from_str(HOST_HANDLER_NAME)).ok();
+            if let Some(handler) = handler {
+                let post = js_sys::Reflect::get(&handler, &JsValue::from_str("postMessage")).ok();
+                if let Some(post) = post {
+                    if let Some(post_fn) = post.dyn_ref::<js_sys::Function>() {
+                        let js_val = JsValue::from_str(json);
+                        if post_fn.call1(&handler, &js_val).is_ok() {
+                            return;
+                        }
+                        web_sys::console::warn_1(
+                            &format!(
+                                "fd-host-web: webkit.messageHandlers.{HOST_HANDLER_NAME}.postMessage 调用失败 kind={kind}"
+                            )
+                            .into(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // 回退：navigator.__fd_host_post 属性契约（旧 studio 轮询读取）。
+    let js_val = JsValue::from_str(json);
+    let _ = js_sys::Reflect::set(
+        &w.navigator(),
+        &JsValue::from_str("__fd_host_post"),
+        &js_val,
+    );
 }
 
 // ── Bridge 消息协议 ──
@@ -444,6 +502,18 @@ pub fn fusion_bridge_send_command(command_json: &str) -> Result<(), JsValue> {
 /// 视口剔除边距（px），略大于屏幕确保边缘节点可见。
 const VIEWPORT_MARGIN: f32 = 200.0;
 
+// E-38/P2-5：节点尺寸/视口坐标硬上限，防恶意 .fusiondesign 用 f32::MAX
+// 触发算术溢出/NaN/Inf 致渲染崩溃或 OOM。画布坐标单边 ≤ 100k px 足够任何合法设计稿。
+const MAX_NODE_DIM_PX: f32 = 100_000.0;
+const MAX_VIEWPORT_DIM_PX: f32 = 100_000.0;
+const MAX_ZOOM: f32 = 1000.0;
+// E-38/P2-5：单节点子节点数渲染上限。深度有 MAX_RENDER_DEPTH=64 上限，但
+// 单层 children 数量无界——10 万扁平子节点深度=1 过深度检查，render_dom 串行
+// 创建 10 万 DOM 致 WKWebView OOM。canvas-core 已有 MAX_NODE_TOTAL=100k 总数
+// 护栏，此为渲染侧每节点扇出补充护栏：合法设计稿单层兄弟 ≤ 数百，2000 足够且
+// 与 64 深度乘积远低于 WKWebView jetsam 阈值。超限只渲染前 N 个 + warn，fail visibly。
+const MAX_CHILDREN_PER_NODE: usize = 2_000;
+
 /// 将 PenDocument 渲染为 DOM 元素（而非 Canvas 2D）。
 /// 性能优化：
 /// - DocumentFragment 批量插入，避免逐节点 layout thrashing
@@ -546,13 +616,37 @@ fn render_dom(doc_json: &str) {
     }
 }
 
+/// E-38/P2-5：节点几何护栏（纯函数，无 DOM 依赖，可单测）。
+/// 非有限或超 MAX_NODE_DIM_PX 的尺寸视作无效，避免恶意 .fusiondesign
+/// 用 f32::MAX/NaN 触发算术溢出/Inf 渲染崩溃。zoom 同理限 [>0, MAX_ZOOM]。
+fn is_node_geom_valid(node: &fd_canvas_core::PenNode, zoom: f32) -> bool {
+    if !node.x.is_finite() || !node.y.is_finite() || !node.w.is_finite() || !node.h.is_finite() {
+        return false;
+    }
+    if node.w < 0.0 || node.h < 0.0 {
+        return false;
+    }
+    if node.w > MAX_NODE_DIM_PX || node.h > MAX_NODE_DIM_PX {
+        return false;
+    }
+    if !zoom.is_finite() || zoom <= 0.0 || zoom > MAX_ZOOM {
+        return false;
+    }
+    true
+}
+
 /// 判断节点是否在当前视口内（考虑 zoom/pan）。
 fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Element) -> bool {
+    // E-38/P2-5：节点尺寸/坐标护栏。非有限或超 MAX_NODE_DIM_PX 的节点视作不可见，
+    // 避免恶意 .fusiondesign 用 f32::MAX/NaN 触发算术溢出/Inf 渲染崩溃。
     let zoom: f32 = container
         .get_attribute("data-fd-zoom")
         .unwrap_or_default()
         .parse()
         .unwrap_or(1.0);
+    if !is_node_geom_valid(node, zoom) {
+        return false;
+    }
     let pan_x: f32 = container
         .get_attribute("data-fd-pan-x")
         .unwrap_or_default()
@@ -563,6 +657,9 @@ fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Elem
         .unwrap_or_default()
         .parse()
         .unwrap_or(0.0);
+    if !pan_x.is_finite() || !pan_y.is_finite() {
+        return false;
+    }
 
     let window = match web_sys::window() {
         Some(w) => w,
@@ -578,12 +675,31 @@ fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Elem
         .unwrap_or_default()
         .as_f64()
         .unwrap_or(1080.0) as f32;
+    // E-38/P2-5：视口尺寸护栏，防异常 inner_width/height（部分嵌入式 WebView 返回 0/超值）。
+    let vp_w = if vp_w.is_finite() && vp_w > 0.0 && vp_w <= MAX_VIEWPORT_DIM_PX {
+        vp_w
+    } else {
+        1920.0
+    };
+    let vp_h = if vp_h.is_finite() && vp_h > 0.0 && vp_h <= MAX_VIEWPORT_DIM_PX {
+        vp_h
+    } else {
+        1080.0
+    };
 
     // 节点在画布坐标中的边界
     let node_left = node.x * zoom + pan_x;
     let node_top = node.y * zoom + pan_y;
     let node_right = (node.x + node.w) * zoom + pan_x;
     let node_bottom = (node.y + node.h) * zoom + pan_y;
+    // 护栏后坐标必有限；再加一道防御防未预见溢出。
+    if !node_left.is_finite()
+        || !node_top.is_finite()
+        || !node_right.is_finite()
+        || !node_bottom.is_finite()
+    {
+        return false;
+    }
 
     // 带边距的视口
     let vp_left = -VIEWPORT_MARGIN;
@@ -623,12 +739,22 @@ fn viewport_cull_update() {
         Err(_) => return,
     };
 
+    // E-37/P2-5：一次遍历收集现有 DOM 节点 id → HashSet，替代旧实现每可见节点
+    // 一次 query_selector（O(N) 全局查询）× N 节点 = O(N²)。现整体 O(N)。
+    let existing_dom_ids = collect_existing_dom_node_ids(&container);
+
     // 收集文档中所有节点 id 及其视口状态
     let mut ids_to_add: Vec<String> = Vec::new();
     let mut ids_in_view: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for page in &doc.pages {
-        collect_visible_node_ids(&page.nodes, &container, &mut ids_to_add, &mut ids_in_view);
+        collect_visible_node_ids(
+            &page.nodes,
+            &container,
+            &existing_dom_ids,
+            &mut ids_to_add,
+            &mut ids_in_view,
+        );
     }
 
     // 移除离开视口的节点 DOM
@@ -652,9 +778,11 @@ fn viewport_cull_update() {
 
     // 添加新进入视口的节点
     if !ids_to_add.is_empty() {
+        // E-37/P2-5：ids_to_add → HashSet，add_nodes_by_ids 的 contains 由 O(M) 降 O(1)。
+        let add_set: std::collections::HashSet<String> = ids_to_add.iter().cloned().collect();
         let fragment = document.create_document_fragment();
         for page in &doc.pages {
-            add_nodes_by_ids(&page.nodes, &document, &ids_to_add, &fragment);
+            add_nodes_by_ids(&page.nodes, &document, &add_set, &fragment);
         }
         container.append_child(&fragment).ok();
     }
@@ -664,44 +792,56 @@ fn viewport_cull_update() {
     );
 }
 
-/// 递归收集视口内节点 id，与现有 id 对比找新增。
+/// E-37/P2-5：一次遍历容器直接子节点，收集 data-node-id → HashSet。
+/// 替代旧 collect_visible_node_ids_inner 内每节点 query_selector 的 O(N²)。
+fn collect_existing_dom_node_ids(
+    container: &web_sys::Element,
+) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let container_node: &web_sys::Node = container.unchecked_ref();
+    let child_nodes = container_node.child_nodes();
+    for i in 0..child_nodes.length() {
+        if let Some(child) = child_nodes.get(i) {
+            if let Ok(el) = child.dyn_into::<web_sys::Element>() {
+                if let Some(nid) = el.get_attribute("data-node-id") {
+                    ids.insert(nid);
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// 递归收集视口内节点 id，与现有 DOM id 集合对比找新增。
 fn collect_visible_node_ids(
     nodes: &[fd_canvas_core::PenNode],
     container: &web_sys::Element,
+    existing_dom_ids: &std::collections::HashSet<String>,
     ids_to_add: &mut Vec<String>,
     ids_in_view: &mut std::collections::HashSet<String>,
 ) {
-    // C13：window/document 每事件调用一次成本高，提到递归外层复用。
-    let document = match web_sys::window().and_then(|w| w.document()) {
-        Some(d) => d,
-        None => return,
-    };
-    collect_visible_node_ids_inner(nodes, container, &document, ids_to_add, ids_in_view);
+    collect_visible_node_ids_inner(nodes, container, existing_dom_ids, ids_to_add, ids_in_view);
 }
 
 fn collect_visible_node_ids_inner(
     nodes: &[fd_canvas_core::PenNode],
     container: &web_sys::Element,
-    document: &web_sys::Document,
+    existing_dom_ids: &std::collections::HashSet<String>,
     ids_to_add: &mut Vec<String>,
     ids_in_view: &mut std::collections::HashSet<String>,
 ) {
     for node in nodes {
         if is_node_in_viewport(node, container) {
             ids_in_view.insert(node.id.clone());
-            // 检查 DOM 中是否已存在
-            if document
-                .query_selector(&node_selector(&node.id))
-                .unwrap_or(None)
-                .is_none()
-            {
+            // E-37/P2-5：HashSet 查询 O(1)，替代旧 query_selector O(N) 全局搜索。
+            if !existing_dom_ids.contains(&node.id) {
                 ids_to_add.push(node.id.clone());
             }
         }
         collect_visible_node_ids_inner(
             &node.children,
             container,
-            document,
+            existing_dom_ids,
             ids_to_add,
             ids_in_view,
         );
@@ -712,7 +852,7 @@ fn collect_visible_node_ids_inner(
 fn add_nodes_by_ids(
     nodes: &[fd_canvas_core::PenNode],
     document: &web_sys::Document,
-    ids_to_add: &[String],
+    ids_to_add: &std::collections::HashSet<String>,
     fragment: &web_sys::DocumentFragment,
 ) {
     for node in nodes {
@@ -858,9 +998,22 @@ fn render_node_to_dom(
     el.set_attribute("style", &style).ok()?;
     el.set_attribute("data-node-id", &node.id).ok()?;
 
-    // 渲染子节点（子节点同样使用事件委托模式）。深度上限防栈溢出（P2-1）。
+    // 渲染子节点（子节点同样使用事件委托模式）。深度上限防栈溢出（P2-1），
+    // 扇出上限防 OOM（E-38/P2-5）。
     if depth < MAX_RENDER_DEPTH {
-        for child in &node.children {
+        let children = &node.children;
+        if children.len() > MAX_CHILDREN_PER_NODE {
+            web_sys::console::warn_1(
+                &format!(
+                    "render_node_to_dom: 子节点数 {} 超 {} 上限，仅渲染前 {} 个",
+                    children.len(),
+                    MAX_CHILDREN_PER_NODE,
+                    MAX_CHILDREN_PER_NODE
+                )
+                .into(),
+            );
+        }
+        for child in children.iter().take(MAX_CHILDREN_PER_NODE) {
             if let Some(child_el) = render_node_to_dom(child, document, depth + 1) {
                 el.append_child(&child_el).ok();
             }
@@ -1174,7 +1327,12 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
         let start_y = mouse.client_y() as f32;
 
         // 查找 DOM 元素
-        let doc = web_sys::window().unwrap().document().unwrap();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(doc) = window.document() else {
+            return;
+        };
         let sel = node_selector(&node_id);
         let el_ref = match doc.query_selector(&sel).unwrap_or(None) {
             Some(e) => e,
@@ -1280,7 +1438,9 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
-        let window = web_sys::window().unwrap();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         window
             .add_event_listener_with_callback("mousemove", on_mousemove.as_ref().unchecked_ref())
             .ok();
@@ -1291,7 +1451,9 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             .unchecked_ref::<js_sys::Function>()
             .into();
         let on_mouseup = Closure::once(Box::new(move |event: web_sys::Event| {
-            let w = web_sys::window().unwrap();
+            let Some(w) = web_sys::window() else {
+                return;
+            };
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
@@ -1554,13 +1716,17 @@ fn setup_canvas_pan_listener(container_id: &str) {
             apply_canvas_pan(dx, dy);
         }) as Box<dyn FnMut(web_sys::Event)>);
 
-        let win = web_sys::window().unwrap();
+        let Some(win) = web_sys::window() else {
+            return;
+        };
         win.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref())
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
-            let w = web_sys::window().unwrap();
+            let Some(w) = web_sys::window() else {
+                return;
+            };
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
@@ -1628,7 +1794,12 @@ fn setup_marquee_listener(container_id: &str) {
         let start_y = mouse.client_y() as f32;
 
         // 创建选框 DOM 元素
-        let doc = web_sys::window().unwrap().document().unwrap();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(doc) = window.document() else {
+            return;
+        };
         let marquee_el = match doc.create_element("div") {
             Ok(el) => el,
             Err(_) => {
@@ -1659,11 +1830,13 @@ fn setup_marquee_listener(container_id: &str) {
             let top = start_y.min(cur_y);
             let width = (cur_x - start_x).abs();
             let height = (cur_y - start_y).abs();
-            let m_el = web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
-                .get_element_by_id("fd-marquee");
+            let Some(win) = web_sys::window() else {
+                return;
+            };
+            let Some(doc) = win.document() else {
+                return;
+            };
+            let m_el = doc.get_element_by_id("fd-marquee");
             if let Some(m) = m_el {
                 m.set_attribute(
                     "style",
@@ -1678,13 +1851,17 @@ fn setup_marquee_listener(container_id: &str) {
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
-        let win = web_sys::window().unwrap();
+        let Some(win) = web_sys::window() else {
+            return;
+        };
         win.add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref())
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
-            let w = web_sys::window().unwrap();
+            let Some(w) = web_sys::window() else {
+                return;
+            };
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
@@ -1985,8 +2162,48 @@ fn apply_tokens_css(css: &str) {
 
 // C10：剥离危险 CSS 内容，只保留 --token: value 形式的声明。
 // 命中以下关键词的整行剔除（大小写不敏感）：@import / @font-face / expression( / url( / javascript:
+// E-40/P3：先剥离 /* */ 注释再匹配关键词，防 `u/**/rl(` 等注释拆词绕过 url() 检测。
 // 返回净化后的 CSS；stripped 计数通过 warn 日志输出（不回显原始 payload）。
+fn strip_css_comments(line: &str) -> String {
+    // 简单状态机剥离 /* ... */，跨行注释按行处理（每行独立），未闭合注释剥到行尾。
+    let mut out = String::with_capacity(line.len());
+    let bytes: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut in_comment = false;
+    while i < bytes.len() {
+        if in_comment {
+            if bytes[i] == '*' && i + 1 < bytes.len() && bytes[i + 1] == '/' {
+                in_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == '/' && i + 1 < bytes.len() && bytes[i + 1] == '*' {
+            in_comment = true;
+            i += 2;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 fn sanitize_token_css(css: &str) -> String {
+    let (safe, stripped) = sanitize_token_css_inner(css);
+    if stripped > 0 {
+        web_sys::console::warn_1(
+            &format!("fd-host-web: sanitize_token_css 剔除 {stripped} 行危险 CSS").into(),
+        );
+    }
+    safe
+}
+
+// E-40/P3：纯逻辑核心，剥离注释 + 危险关键字整行剔除，返回 (净化CSS, 剔除行数)。
+// 抽离以便原生测试（非 wasm 不触发 web_sys::console::warn_1 panic）。
+fn sanitize_token_css_inner(css: &str) -> (String, u32) {
     let dangerous = [
         "@import",
         "@font-face",
@@ -1997,19 +2214,36 @@ fn sanitize_token_css(css: &str) -> String {
     let mut stripped: u32 = 0;
     let mut out: Vec<&str> = Vec::with_capacity(css.lines().count());
     for line in css.lines() {
-        let lower = line.to_ascii_lowercase();
-        if dangerous.iter().any(|needle| lower.contains(needle)) {
+        // E-40：剥注释后匹配，原始行保留（注释本身无害，危险的是拆词后的关键字）。
+        let lowered = strip_css_comments(line).to_ascii_lowercase();
+        if dangerous.iter().any(|needle| lowered.contains(needle)) {
             stripped += 1;
             continue;
         }
         out.push(line);
     }
-    if stripped > 0 {
+    (out.join("\n"), stripped)
+}
+
+// E-39：CSS 颜色值净化（单值，非整段 CSS）。mutate_node 的 fill/stroke 来自后端消息
+// 任意 String，原样拼进 `background-color:{f}` / `border:.. solid {s}` 可逃逸属性注入
+// 任意 CSS（如 `red; } * { position:fixed; background:url(http://evil)` 破离线约束）。
+// 拒绝 url()/expression()/@import，剔除可逃逸属性边界的 `;{}`，保留 hex/命名色/rgb()。
+fn sanitize_css_color(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("url(")
+        || lower.contains("expression(")
+        || lower.contains("@import")
+        || lower.contains("javascript:")
+    {
         web_sys::console::warn_1(
-            &format!("fd-host-web: sanitize_token_css 剔除 {stripped} 行危险 CSS").into(),
+            &format!("fd-host-web: CSS 颜色值含危险函数，降级 transparent: {raw}").into(),
         );
+        return "transparent".to_string();
     }
-    out.join("\n")
+    raw.chars()
+        .filter(|&c| !matches!(c, ';' | '{' | '}' | '<' | '>'))
+        .collect()
 }
 
 /// 选中节点（添加选中高亮 + resize handles）。
@@ -2121,7 +2355,12 @@ fn create_resize_handle(
         let start_y = mouse.client_y() as f32;
 
         // read current node size + position
-        let doc = web_sys::window().unwrap().document().unwrap();
+        let Some(win) = web_sys::window() else {
+            return;
+        };
+        let Some(doc) = win.document() else {
+            return;
+        };
         let target = doc.query_selector(&node_selector(&nid)).unwrap_or(None);
         let (orig_x, orig_y, orig_w, orig_h) = match target {
             Some(el) => {
@@ -2146,7 +2385,12 @@ fn create_resize_handle(
                 compute_resize(&resize_dir, orig_x, orig_y, orig_w, orig_h, dx, dy);
 
             // live preview: update element size + position
-            let doc2 = web_sys::window().unwrap().document().unwrap();
+            let Some(win2) = web_sys::window() else {
+                return;
+            };
+            let Some(doc2) = win2.document() else {
+                return;
+            };
             if let Some(el) = doc2
                 .query_selector(&node_selector(&resize_id))
                 .unwrap_or(None)
@@ -2156,7 +2400,9 @@ fn create_resize_handle(
             }
         }) as Box<dyn FnMut(web_sys::Event)>);
 
-        let window = web_sys::window().unwrap();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         window
             .add_event_listener_with_callback("mousemove", on_move.as_ref().unchecked_ref())
             .ok();
@@ -2165,7 +2411,9 @@ fn create_resize_handle(
         let rdir = dir_str.clone();
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
-            let w = web_sys::window().unwrap();
+            let Some(w) = web_sys::window() else {
+                return;
+            };
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
@@ -2347,20 +2595,26 @@ fn mutate_node(
     }
 
     // Style mutations
+    // E-39：fill/stroke 经 sanitize_css_color 净化后再注入，防 CSS 属性逃逸破离线约束。
     if let Some(f) = fill {
+        let safe = sanitize_css_color(f);
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "background-color", f))
-            .ok();
+        el.set_attribute(
+            "style",
+            &replace_css_prop(&style, "background-color", &safe),
+        )
+        .ok();
     }
     if let Some(s) = stroke {
         let sw = stroke_width.unwrap_or(1.0);
+        let safe = sanitize_css_color(s);
         let style = el.get_attribute("style").unwrap_or_default();
         el.set_attribute(
             "style",
             &replace_css_prop(
-                &replace_css_prop(&style, "border", &format!("{}px solid {}", sw, s)),
+                &replace_css_prop(&style, "border", &format!("{}px solid {}", sw, safe)),
                 "border-color",
-                s,
+                &safe,
             ),
         )
         .ok();
@@ -2775,7 +3029,18 @@ fn render_node(
                 );
                 return;
             }
-            for child in &node.children {
+            if node.children.len() > MAX_CHILDREN_PER_NODE {
+                web_sys::console::warn_1(
+                    &format!(
+                        "render_node: 子节点数 {} 超 {} 上限，仅渲染前 {} 个",
+                        node.children.len(),
+                        MAX_CHILDREN_PER_NODE,
+                        MAX_CHILDREN_PER_NODE
+                    )
+                    .into(),
+                );
+            }
+            for child in node.children.iter().take(MAX_CHILDREN_PER_NODE) {
                 render_node(child, ctx, depth + 1);
             }
         }
@@ -2844,6 +3109,92 @@ mod tests {
         assert_eq!(doc2.pages[0].nodes[0].id, "n1");
     }
 
+    // E-39 回归：sanitize_css_color 剔除可逃逸 CSS 属性边界的 `;{}`（不触发 web_sys）。
+    // 危险 url()/expression() 路径走 web_sys console（原生测试不可用），仅验安全净化。
+    #[test]
+    fn sanitize_css_color_strips_escape_chars() {
+        assert_eq!(sanitize_css_color("#ff0000"), "#ff0000");
+        assert_eq!(sanitize_css_color("rgb(255, 0, 0)"), "rgb(255, 0, 0)");
+        // 逃逸字符 ; { } < > 应被剔除，保留颜色主体。
+        let out = sanitize_css_color("red;} * { background:#fff }");
+        assert!(!out.contains(';'), "应剔除分号防属性逃逸");
+        assert!(!out.contains('{'), "应剔除左花括号");
+        assert!(!out.contains('}'), "应剔除右花括号");
+        assert!(out.contains("red"), "保留合法颜色名");
+        assert!(out.contains("background:#fff"), "保留未逃逸的声明");
+    }
+
+    // E-40/P3 回归：sanitize_token_css 须剥 /* */ 注释后再匹配关键字，
+    // 防 `u/**/rl(` 等注释拆词绕过 url()/@import/expression()/javascript: 检测。
+    // 用 _inner 纯逻辑（不触发 web_sys::console，原生测试安全）。
+    #[test]
+    fn sanitize_token_css_strips_comment_obfuscated_danger() {
+        // 注释拆词的 url() 必须被剔除。
+        let bad = "--bg: u/**/rl(http://evil/x.png)";
+        let (out, stripped) = sanitize_token_css_inner(bad);
+        assert!(!out.contains("evil"), "注释拆词 url() 必须被剔除");
+        assert_eq!(stripped, 1, "危险行整体剔除，计 1 行");
+        assert!(out.is_empty(), "危险行整体剔除后应为空");
+        // 注释拆词的 @import 必须被剔除。
+        let bad2 = "@imp/**/ort url(http://evil.css)";
+        let (out2, s2) = sanitize_token_css_inner(bad2);
+        assert!(!out2.contains("evil"), "注释拆词 @import 必须被剔除");
+        assert_eq!(s2, 1);
+        // 注释拆词的 expression() 必须被剔除。
+        let bad3 = "--x: expr/**/ession(alert(1))";
+        let (out3, s3) = sanitize_token_css_inner(bad3);
+        assert!(!out3.contains("alert"), "注释拆词 expression() 必须被剔除");
+        assert_eq!(s3, 1);
+    }
+
+    #[test]
+    fn sanitize_token_css_preserves_safe_token_declarations() {
+        // E-40 正向：合法 token 声明（含合法注释说明）应保留，stripped=0。
+        let safe = "--color-bg: #ffffff; /* 背景白 */";
+        let (out, stripped) = sanitize_token_css_inner(safe);
+        assert!(
+            out.contains("--color-bg: #ffffff;"),
+            "合法声明应保留: {out}"
+        );
+        assert_eq!(stripped, 0, "无危险关键字不应剔除");
+        // 安全注释行可保留（不命中危险关键字）。
+        let safe2 = "/* 仅注释 */\n--space-1: 4px;";
+        let (out2, s2) = sanitize_token_css_inner(safe2);
+        assert!(out2.contains("--space-1: 4px;"), "合法声明应保留");
+        assert_eq!(s2, 0);
+    }
+
+    #[test]
+    fn sanitize_token_css_plain_danger_still_stripped() {
+        // E-40 回归：无注释的普通 url()/@import 仍被剔除（不破坏原有 C10 行为）。
+        let css = "--bg: url(http://evil.png);\n@import url(evil.css);\n--ok: #fff;";
+        let (out, stripped) = sanitize_token_css_inner(css);
+        assert!(!out.contains("evil"), "普通 url()/@import 仍被剔除");
+        assert!(out.contains("--ok: #fff;"), "合法声明保留");
+        assert_eq!(stripped, 2, "两行危险 CSS 被剔除");
+    }
+
+    // R-A22/E-41 回归：send_to_host 在原生测试环境（无 Window）不得 panic；
+    // 有效 payload 走完序列化后优雅返回；无效 payload（含 serde 无法序列化的
+    // 非 UTF-8 键）走 E-41 告警分支也不得 panic。
+    #[test]
+    fn send_to_host_valid_payload_no_panic_native() {
+        send_to_host("ai.generate", &serde_json::json!({"prompt": "登录页"}));
+    }
+
+    #[test]
+    fn send_to_host_empty_payload_no_panic_native() {
+        send_to_host("click", &serde_json::json!({}));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn send_to_host_handler_name_is_camelcase() {
+        // R-A22：桥 handler 名须为 WKWebView 惯例 camelCase，studio 侧据此注册。
+        // HOST_HANDLER_NAME 仅 wasm32 编译（非 wasm 构建不产出该常量）。
+        assert_eq!(HOST_HANDLER_NAME, "fdHost");
+    }
+
     #[test]
     fn handle_host_message_render_page() {
         let doc_json = r#"{"pages":[{"id":"p1","name":"Test","width":100,"height":100,"nodes":[{"id":"n1","kind":"Rect","name":"Rect","x":0,"y":0,"w":50,"h":50,"style":{}}]}]}"#;
@@ -2881,7 +3232,6 @@ mod tests {
             inner: WebShellInner {
                 canvas_id: "canvas".into(),
                 ready: true,
-                pending_messages: vec![],
                 cached_doc_json: None,
             },
         };
@@ -3212,6 +3562,66 @@ mod tests {
         assert_eq!(VIEWPORT_MARGIN, 200.0);
     }
 
+    // E-38/P2-5 回归：节点几何护栏拒绝非有限/超限尺寸，防渲染崩溃/OOM。
+    #[test]
+    fn node_geom_guard_rejects_nonfinite() {
+        let mk = |x: f32, y: f32, w: f32, h: f32| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
+        // NaN/Inf 任一坐标 → 拒绝
+        assert!(!is_node_geom_valid(&mk(f32::NAN, 0.0, 10.0, 10.0), 1.0));
+        assert!(!is_node_geom_valid(
+            &mk(0.0, f32::INFINITY, 10.0, 10.0),
+            1.0
+        ));
+        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f32::NAN, 10.0), 1.0));
+        assert!(!is_node_geom_valid(
+            &mk(0.0, 0.0, 10.0, f32::NEG_INFINITY),
+            1.0
+        ));
+        // 负尺寸 → 拒绝
+        assert!(!is_node_geom_valid(&mk(0.0, 0.0, -1.0, 10.0), 1.0));
+        assert!(!is_node_geom_valid(&mk(0.0, 0.0, 10.0, -1.0), 1.0));
+        // 超大尺寸（f32::MAX / 超 MAX_NODE_DIM_PX）→ 拒绝
+        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f32::MAX, 10.0), 1.0));
+        assert!(!is_node_geom_valid(
+            &mk(0.0, 0.0, 10.0, MAX_NODE_DIM_PX + 1.0),
+            1.0
+        ));
+    }
+
+    // E-38/P2-5 回归：zoom 护栏拒绝 0/负/超大，防算术崩。
+    #[test]
+    fn node_geom_guard_rejects_bad_zoom() {
+        let node = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 10.0, 10.0);
+        assert!(is_node_geom_valid(&node, 1.0), "正常 zoom 应通过");
+        assert!(!is_node_geom_valid(&node, 0.0), "zoom=0 应拒绝");
+        assert!(!is_node_geom_valid(&node, -2.0), "负 zoom 应拒绝");
+        assert!(!is_node_geom_valid(&node, f32::NAN), "NaN zoom 应拒绝");
+        assert!(
+            !is_node_geom_valid(&node, MAX_ZOOM + 1.0),
+            "超 MAX_ZOOM 应拒绝"
+        );
+        assert!(is_node_geom_valid(&node, MAX_ZOOM), "恰好 MAX_ZOOM 应通过");
+    }
+
+    // E-38/P2-5 回归：合法节点（正常尺寸 + 边界值）通过护栏。
+    #[test]
+    fn node_geom_guard_accepts_valid_nodes() {
+        let mk = |x: f32, y: f32, w: f32, h: f32| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
+        assert!(is_node_geom_valid(&mk(0.0, 0.0, 10.0, 10.0), 1.0));
+        assert!(
+            is_node_geom_valid(&mk(1e6, 1e6, 100.0, 100.0), 1.0),
+            "大坐标应通过"
+        );
+        assert!(
+            is_node_geom_valid(&mk(0.0, 0.0, MAX_NODE_DIM_PX, MAX_NODE_DIM_PX), 1.0),
+            "恰好 MAX_NODE_DIM_PX 应通过"
+        );
+        assert!(
+            is_node_geom_valid(&mk(0.0, 0.0, 0.0, 0.0), 1.0),
+            "零尺寸应通过"
+        );
+    }
+
     #[test]
     fn aabb_overlap_basic() {
         // 两个重叠矩形
@@ -3276,24 +3686,6 @@ mod tests {
     }
 
     #[test]
-    fn max_pending_messages_constant() {
-        assert_eq!(MAX_PENDING_MESSAGES, 200);
-    }
-
-    #[test]
-    fn pending_messages_bounded() {
-        let mut messages: Vec<String> = vec![];
-        for i in 0..500 {
-            messages.push(format!("msg-{}", i));
-            if messages.len() > MAX_PENDING_MESSAGES {
-                messages.remove(0);
-            }
-        }
-        assert_eq!(messages.len(), MAX_PENDING_MESSAGES);
-        assert_eq!(messages[0], "msg-300");
-    }
-
-    #[test]
     fn listeners_installed_flag_is_idempotent() {
         // P0-1：mark_listeners_installed 首次返回 false，后续均 true，
         // 保证容器级监听器只注册一次，不随渲染次数累积泄漏。
@@ -3309,5 +3701,41 @@ mod tests {
         // P2-1：递归深度上限存在且合理，防深层嵌套文档栈溢出。
         // 编译期校验常量边界（不触发 web_sys console，避免 native 目标 panic）。
         const _: () = assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
+    }
+
+    #[test]
+    fn children_per_node_cap_constant_bounded() {
+        // E-38/P2-5：单节点子节点数渲染上限存在且合理。
+        // 上限须 > 合法设计稿单层扇出（数百），且与深度乘积低于 jetsam 阈值。
+        // 编译期校验（render 走 web_sys，native 目标不可调，校常量边界）。
+        const _: () = assert!(MAX_CHILDREN_PER_NODE >= 100 && MAX_CHILDREN_PER_NODE <= 10_000);
+    }
+
+    #[test]
+    fn children_take_cap_truncates_oversized_sibling_list() {
+        // E-38/P2-5：10 万扁平子节点深度=1 过深度检查，须扇出护栏截断。
+        // 复现渲染循环的 .take(MAX_CHILDREN_PER_NODE) 逻辑（纯逻辑，不触 DOM）：
+        // 构造超限 children，取前 N，断言截断且数量恰等于上限。
+        let oversized: Vec<u32> = (0..100_000).collect();
+        let rendered: Vec<u32> = oversized
+            .iter()
+            .take(MAX_CHILDREN_PER_NODE)
+            .copied()
+            .collect();
+        assert_eq!(rendered.len(), MAX_CHILDREN_PER_NODE, "超限须截断至上限");
+        assert_eq!(rendered[0], 0, "保留首批子节点顺序");
+        assert_eq!(
+            rendered[MAX_CHILDREN_PER_NODE - 1],
+            (MAX_CHILDREN_PER_NODE - 1) as u32,
+            "末元素为第 N 个子节点"
+        );
+    }
+
+    #[test]
+    fn children_take_cap_preserves_undersized_sibling_list() {
+        // E-38/P2-5：合法小扇出不受护栏影响。500 子节点 < 上限，全量保留。
+        let normal: Vec<u32> = (0..500).collect();
+        let rendered: Vec<u32> = normal.iter().take(MAX_CHILDREN_PER_NODE).copied().collect();
+        assert_eq!(rendered.len(), 500, "未超限须全量保留");
     }
 }

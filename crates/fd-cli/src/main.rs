@@ -395,6 +395,38 @@ fn main() {
     }
 }
 
+/// MultiVariants 风格选择（E-27/P3）。
+/// 旧实现 `<3 styles` 静默 `_ => default_styles` 丢弃全部用户输入。
+/// 改为优先用用户提供的 styles，不足 3 用默认补齐并 warn；None/空用全部默认。
+fn pick_multi_variant_styles(styles: Option<Vec<String>>) -> [String; 3] {
+    let default_styles = ["极简风", "卡片风", "深色风"];
+    match styles {
+        Some(s) if s.len() >= 3 => [s[0].clone(), s[1].clone(), s[2].clone()],
+        Some(s) if !s.is_empty() => {
+            let mut out: Vec<String> = s.into_iter().take(3).collect();
+            let user_count = out.len();
+            for d in default_styles {
+                if out.len() >= 3 {
+                    break;
+                }
+                if !out.iter().any(|x| x == d) {
+                    out.push(d.to_string());
+                }
+            }
+            tracing::warn!(
+                provided = user_count,
+                filled = 3 - user_count,
+                "MultiVariants: 用户 styles 不足 3 个，已用默认风格补齐至 3 个"
+            );
+            [out[0].clone(), out[1].clone(), out[2].clone()]
+        }
+        _ => {
+            tracing::info!("MultiVariants: 未提供 styles，使用默认三种风格");
+            default_styles.map(|s| s.to_string())
+        }
+    }
+}
+
 /// 把 anyhow 错误分类为可操作的商用级提示，而非裸栈。
 fn report_error(e: &anyhow::Error) {
     let msg = format!("{e}");
@@ -646,7 +678,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(model = %model, count = messages.len(), "chat: 流式推理开始");
 
-            // NDJSON 成帧输出：delta / done / error
+            // NDJSON 成帧输出：delta / chat_done / error
+            // H-A16/P1-8：done → chat_done，对齐 fusion-studio StreamingBridge.swift
+            // 既有 schema（:187,319,325 期望 delta/chat_done/error）。
+            // issue #17 落地时 studio 工程师按此契约接 fd-cli chat，零成本冻结期已对齐。
             if stream && json {
                 let s =
                     fd_ai_adapter::chat_stream_messages(client, model, messages, max_tokens).await;
@@ -655,20 +690,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     match item {
                         Ok(MlxStreamDelta { token, finished }) => {
                             if finished {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({"type":"done","finish_reason":"stop"})
-                                );
+                                println!("{}", ndjson_frame_done());
                                 break;
                             } else if !token.is_empty() {
-                                println!("{}", serde_json::json!({"type":"delta","token":token}));
+                                println!("{}", ndjson_frame_delta(&token));
                             }
                         }
                         Err(e) => {
-                            println!(
-                                "{}",
-                                serde_json::json!({"type":"error","message":e.to_string()})
-                            );
+                            println!("{}", ndjson_frame_error(&e.to_string()));
                             tracing::error!(error = %e, "chat: 流式错误");
                             break;
                         }
@@ -716,11 +745,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
             )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let default_styles = ["极简风", "卡片风", "深色风"];
-            let picked: [String; 3] = match styles {
-                Some(s) if s.len() >= 3 => [s[0].clone(), s[1].clone(), s[2].clone()],
-                _ => default_styles.map(|s| s.to_string()),
-            };
+            let picked = pick_multi_variant_styles(styles);
             let docs = skills
                 .multi_variants_async(
                     &prompt,
@@ -1040,6 +1065,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
+// H-A16/P1-8：NDJSON 成帧函数抽出为纯函数，便于回归测试契约对齐 studio。
+// 三帧 schema：delta / chat_done / error（对齐 StreamingBridge.swift）。
+fn ndjson_frame_delta(token: &str) -> serde_json::Value {
+    serde_json::json!({"type":"delta","token":token})
+}
+
+fn ndjson_frame_done() -> serde_json::Value {
+    serde_json::json!({"type":"chat_done","finish_reason":"stop"})
+}
+
+fn ndjson_frame_error(message: &str) -> serde_json::Value {
+    serde_json::json!({"type":"error","message":message})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,6 +1131,42 @@ mod tests {
             }
             _ => panic!("应为 MultiVariants"),
         }
+    }
+
+    #[test]
+    fn pick_multi_variant_styles_preserves_full_user_input() {
+        // E-27/P3：>=3 用户 styles 全量保留，不补齐。
+        let picked =
+            pick_multi_variant_styles(Some(vec!["neon".into(), "glass".into(), "flat".into()]));
+        assert_eq!(picked, ["neon", "glass", "flat"]);
+    }
+
+    #[test]
+    fn pick_multi_variant_styles_fills_under3_with_defaults() {
+        // E-27/P3：1 个用户 style 须保留，不足用默认补齐至 3，不得丢弃用户输入。
+        let picked = pick_multi_variant_styles(Some(vec!["neon".into()]));
+        assert_eq!(picked[0], "neon", "用户提供的 style 须保留");
+        assert_eq!(picked.len(), 3);
+        // 补齐项须来自默认（极简风/卡片风/深色风），不重复 neon
+        let defaults = ["极简风", "卡片风", "深色风"];
+        assert!(
+            picked[1..].iter().all(|s| defaults.contains(&s.as_str())),
+            "补齐项须为默认: {picked:?}"
+        );
+    }
+
+    #[test]
+    fn pick_multi_variant_styles_none_uses_all_defaults() {
+        // E-27/P3：未提供 styles 用全部默认三种。
+        let picked = pick_multi_variant_styles(None);
+        assert_eq!(picked, ["极简风", "卡片风", "深色风"]);
+    }
+
+    #[test]
+    fn pick_multi_variant_styles_empty_uses_all_defaults() {
+        // E-27/P3：空 styles 数组视为未提供，用全部默认。
+        let picked = pick_multi_variant_styles(Some(vec![]));
+        assert_eq!(picked, ["极简风", "卡片风", "深色风"]);
     }
 
     #[test]
@@ -1165,5 +1240,31 @@ mod tests {
             }
             _ => panic!("应为 Chat"),
         }
+    }
+
+    // H-A16 回归：NDJSON 三帧 schema 必须对齐 fusion-studio StreamingBridge.swift
+    // （:187,319,325 期望 delta/chat_done/error）。任一 type 字符串漂移即破坏契约。
+    #[test]
+    fn ndjson_delta_frame_matches_studio_schema() {
+        let frame = ndjson_frame_delta("你");
+        assert_eq!(frame["type"], "delta", "delta 帧 type 必须为 delta");
+        assert_eq!(frame["token"], "你", "delta 帧 token 透传原文");
+    }
+
+    #[test]
+    fn ndjson_done_frame_is_chat_done_not_done() {
+        let frame = ndjson_frame_done();
+        assert_eq!(
+            frame["type"], "chat_done",
+            "H-A16：done 已对齐 studio 的 chat_done，回退 done 即破坏契约"
+        );
+        assert_eq!(frame["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn ndjson_error_frame_matches_studio_schema() {
+        let frame = ndjson_frame_error("连接失败");
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["message"], "连接失败");
     }
 }

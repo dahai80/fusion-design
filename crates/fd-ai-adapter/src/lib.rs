@@ -2,13 +2,14 @@
 //! 后端对接 fusion-mlx 本地多模态推理。
 //!
 //! 【禁云端硬约束】本 crate 是 fusion-design 唯一允许发起 HTTP 请求的模块，
-//! 但请求目标被 `FusionMlxClient` 限制为 `127.0.0.1` 本地 fusion-mlx 服务，
-//! 不存在任何公网调用路径。
+//! 请求目标被 `FusionMlxClient` 限制为本地/局域网（回环 + RFC1918 + 链路本地），
+//! 见 `validate_localhost`——杜绝一切公网调用路径。
 //!
 //! 【RouteGuard 鉴权】所有出站请求附加 `X-Fusion-Route: fusion-design` 头
 //! （fusion-mlx v0.7.0+ 默认强制，缺失则 403 missing_route），并在
 //! `FUSION_MLX_API_KEY` 设置时附加 `Authorization: Bearer <key>`。
 
+use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
 
 use futures::StreamExt;
@@ -164,6 +165,43 @@ impl FusionMlxClient {
             .message
             .content)
     }
+
+    /// 多轮同步 chat：messages 由调用方构造（system + 多轮 user/assistant 历史 + 当前 user）。
+    /// H-A9：`ChatProvider::send` 旧实现只用 system_prompt+user_message，静默丢弃
+    /// `request.history`（多轮上下文丢失）、`thinking`/`effort`/`attachments`（无 wire 支持）。
+    /// 此方法把完整 messages[] 透传到 OpenAI 兼容 API，恢复多轮上下文。
+    pub fn chat_sync_messages(
+        &self,
+        model: &str,
+        messages: Vec<MlxChatMessage>,
+        max_tokens: u32,
+    ) -> anyhow::Result<String> {
+        // 持有 owned String，构造 &'a str 的 MlxMessage 借用本帧局部。
+        let owned: Vec<(String, String)> =
+            messages.into_iter().map(|m| (m.role, m.content)).collect();
+        let mlx_msgs: Vec<MlxMessage> = owned
+            .iter()
+            .map(|(r, c)| MlxMessage {
+                role: r.as_str(),
+                content: c.as_str(),
+            })
+            .collect();
+        let payload = MlxChatPayload {
+            model,
+            messages: mlx_msgs,
+            max_tokens,
+            temperature: None,
+        };
+        let url = format!("{}/v1/chat/completions", self.endpoint);
+        let resp: MlxChatResponse = self.blocking_post(&url, &payload)?;
+        Ok(resp
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("fusion-mlx 返回空 choices"))?
+            .message
+            .content)
+    }
 }
 
 impl Default for FusionMlxClient {
@@ -250,17 +288,51 @@ impl FusionMlxClient {
     }
 }
 
-/// 强校验 endpoint host 为 localhost，杜绝公网调用路径。
+/// 强校验 endpoint host 为本地/局域网，杜绝公网调用路径。
+///
+/// H-A1/P2-1：旧实现仅放行 `127.0.0.1`/`localhost`/`::1`，把 fusion-mlx 集群
+/// 入口焊死——用户无法指向局域网内的 MLX worker（如 `10.x`/`192.168.x`）。
+/// 现放行回环 + RFC1918 私有段 + 链路本地（169.254/fe80）+ 唯一本地（fc00::/7），
+/// 仍拒绝一切公网 IP 与公网域名。离线硬约束（无公网调用）保持不变。
 fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
     let url = reqwest::Url::parse(endpoint)
         .map_err(|e| anyhow::anyhow!("无效 endpoint {endpoint:?}: {e}"))?;
     let host = url.host_str().unwrap_or("");
-    // reqwest::Url 对 IPv6 返回形如 "[::1]"，需去方括号比对
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
-        anyhow::bail!("违反离线硬约束：endpoint host {host:?} 非 localhost，禁止公网调用");
+    // localhost 名义放行（回环别名）
+    if host == "localhost" {
+        return Ok(());
     }
-    Ok(())
+    // IP 字面量：按 IpAddr 判定私有/回环/链路本地
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip.is_loopback() {
+            return Ok(());
+        }
+        if is_private_or_local(&ip) {
+            return Ok(());
+        }
+        anyhow::bail!("违反离线硬约束：endpoint host {host:?} 为公网 IP，禁止公网调用");
+    }
+    // 非localhost域名一律拒（DNS 可能解析到公网，无法在静态期保证离线）
+    anyhow::bail!("违反离线硬约束：endpoint host {host:?} 非 localhost/私有IP，禁止公网调用");
+}
+
+/// 判定 IP 是否为私有段（RFC1918）或链路本地/唯一本地地址。
+/// 公网 IP（含 8.8.8.8、1.1.1.1 等）返回 false。
+fn is_private_or_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private() // 10/8、172.16/12、192.168/16
+                || v4.is_link_local() // 169.254/16
+                || v4.is_unspecified() // 0.0.0.0
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // 唯一本地 fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // 链路本地 fe80::/10
+        }
+    }
 }
 
 /// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
@@ -274,9 +346,13 @@ fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
 ///
 /// 专用 runtime 是 multi-thread 的，因此 `block_in_place` 可用，
 /// `reqwest` 的 DNS/TLS 解析不会阻塞主线程。
+///
+/// H-A6：worker_threads 由 1 提升到 4。旧值 1 使所有并发 block_on 串行化到
+/// 单线程，首个 180s 长推理请求饿死后续请求（FIFO 头阻塞），多面板并发 UI 冻结。
+/// multi-thread runtime 保持 block_in_place 可用，不引入嵌套 runtime panic。
 static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+        .worker_threads(4)
         .enable_all()
         .build()
         .expect("blocking tokio runtime 创建失败")
@@ -764,6 +840,31 @@ struct ImageUrlPayload<'a> {
 }
 
 /// 多模态 chat 请求：发送图片 + 文字到 fusion-mlx。
+/// 从 base64 数据头嗅探真实图片 MIME（E-7/P3）。
+/// 旧实现硬编码 `image/png`，非 PNG（JPEG/WebP/GIF）被误标，多模态模型可能拒识。
+/// 解码首 12 字节读 magic：PNG 89504E47、JPEG FFD8FF、WebP "RIFF....WEBP"、GIF "GIF8"，
+/// 未知则回退 png（OpenAI vision 兼容最广，模型侧通常容忍 mime 不精确）。
+fn detect_image_mime(image_base64: &str) -> &'static str {
+    use base64::Engine;
+    let head_b64 = image_base64.get(..16).unwrap_or(image_base64);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(head_b64)
+        .unwrap_or_default();
+    if decoded.len() >= 4 && decoded[0..4] == [0x89, 0x50, 0x4E, 0x47] {
+        "image/png"
+    } else if decoded.len() >= 3 && decoded[0..3] == [0xFF, 0xD8, 0xFF] {
+        "image/jpeg"
+    } else if decoded.len() >= 12 && &decoded[0..4] == b"RIFF" && &decoded[8..12] == b"WEBP" {
+        "image/webp"
+    } else if decoded.len() >= 6 && &decoded[0..6] == b"GIF89a"
+        || decoded.len() >= 6 && &decoded[0..6] == b"GIF87a"
+    {
+        "image/gif"
+    } else {
+        "image/png"
+    }
+}
+
 pub async fn chat_with_image(
     client: &FusionMlxClient,
     model: &str,
@@ -772,7 +873,8 @@ pub async fn chat_with_image(
     image_base64: &str,
     max_tokens: u32,
 ) -> anyhow::Result<String> {
-    let image_data_url = format!("data:image/png;base64,{image_base64}");
+    let mime = detect_image_mime(image_base64);
+    let image_data_url = format!("data:{mime};base64,{image_base64}");
     let content = vec![
         VisionContent::Text { text: user_text },
         VisionContent::ImageUrl {
@@ -845,7 +947,9 @@ pub fn chat_with_image_sync(
 
 // ── OpenPencil ChatProvider 适配 ──
 
-use op_ai::chat_provider::{ChatDelta, ChatProvider, ChatRequest, StopReason};
+use op_ai::chat_provider::{
+    ChatDelta, ChatProvider, ChatRequest, EffortLevel, StopReason, ThinkingMode,
+};
 
 /// Fusion-MLX ChatProvider 适配器（实现 OpenPencil ChatProvider trait）。
 pub struct FusionMlxChatProvider {
@@ -868,12 +972,50 @@ impl ChatProvider for FusionMlxChatProvider {
     }
     fn send(&self, request: ChatRequest) -> Box<dyn Iterator<Item = ChatDelta> + Send> {
         let model = request.model.as_deref().unwrap_or(&self.default_model);
-        match self.client.chat_sync(
-            model,
-            &request.system_prompt,
-            &request.user_message,
-            request.max_output_tokens,
-        ) {
+        // H-A9：旧实现丢弃 history/thinking/effort/attachments，多轮上下文丢失且无诊断。
+        // history 折叠进 messages[]（system + 历史 + 当前 user），透传到 MLX。
+        let mut messages: Vec<MlxChatMessage> = Vec::with_capacity(2 + request.history.len());
+        if !request.system_prompt.trim().is_empty() {
+            messages.push(MlxChatMessage {
+                role: "system".into(),
+                content: request.system_prompt,
+            });
+        }
+        for (role, content) in &request.history {
+            messages.push(MlxChatMessage {
+                role: role.as_str().into(),
+                content: content.clone(),
+            });
+        }
+        messages.push(MlxChatMessage {
+            role: "user".into(),
+            content: request.user_message,
+        });
+        // thinking/effort/attachments 暂无 wire 支持（fusion-mlx OpenAI 兼容形状未暴露这些字段）。
+        // 静默丢弃即功能缺失无诊断；显式 warn 让上游可观测到能力降级，便于后续补 wire。
+        if !matches!(request.thinking, ThinkingMode::Adaptive) {
+            tracing::warn!(
+                thinking = request.thinking.as_str(),
+                "ChatRequest.thinking 无 wire 支持，已降级忽略（fusion-mlx 未暴露 thinking 开关）"
+            );
+        }
+        if !matches!(request.effort, EffortLevel::Low) {
+            tracing::warn!(
+                effort = request.effort.as_str(),
+                "ChatRequest.effort 无 wire 支持，已降级忽略（fusion-mlx 未暴露 effort 旋钮）"
+            );
+        }
+        if !request.attachments.is_empty() {
+            tracing::warn!(
+                count = request.attachments.len(),
+                names = ?request.attachments.iter().map(|a| &a.name).collect::<Vec<_>>(),
+                "ChatRequest.attachments 无 wire 支持，已降级忽略（多模态附件尚未接入）"
+            );
+        }
+        match self
+            .client
+            .chat_sync_messages(model, messages, request.max_output_tokens)
+        {
             Ok(text) => Box::new(
                 vec![
                     ChatDelta::TextDelta(text),
@@ -902,17 +1044,103 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_localhost_accepts_127() {
+    fn detect_image_mime_png() {
+        // E-7/P3：PNG magic 89504E47 嗅探为 image/png（旧实现硬编码 png 误标全部）。
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .encode([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(detect_image_mime(&png), "image/png");
+    }
+
+    #[test]
+    fn detect_image_mime_jpeg() {
+        // E-7/P3：JPEG FFD8FF 须嗅探为 image/jpeg，不得误标 png。
+        use base64::Engine;
+        let jpg = base64::engine::general_purpose::STANDARD
+            .encode([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F']);
+        assert_eq!(detect_image_mime(&jpg), "image/jpeg");
+    }
+
+    #[test]
+    fn detect_image_mime_webp() {
+        // E-7/P3：WebP RIFF....WEBP 须嗅探为 image/webp。
+        use base64::Engine;
+        let mut webp = vec![b'R', b'I', b'F', b'F', 0, 0, 0, 0];
+        webp.extend_from_slice(b"WEBPVP8 ");
+        let webp_b64 = base64::engine::general_purpose::STANDARD.encode(&webp);
+        assert_eq!(detect_image_mime(&webp_b64), "image/webp");
+    }
+
+    #[test]
+    fn detect_image_mime_gif() {
+        // E-7/P3：GIF89a/GIF87a 须嗅探为 image/gif。
+        use base64::Engine;
+        let gif = base64::engine::general_purpose::STANDARD.encode(b"GIF89a...");
+        assert_eq!(detect_image_mime(&gif), "image/gif");
+    }
+
+    #[test]
+    fn detect_image_mime_unknown_falls_back_png() {
+        // E-7/P3：未知/空/残缺 base64 回退 image/png（兼容最广，模型侧容忍）。
+        use base64::Engine;
+        let unknown = base64::engine::general_purpose::STANDARD.encode([0x00, 0x01, 0x02, 0x03]);
+        assert_eq!(detect_image_mime(&unknown), "image/png");
+        assert_eq!(detect_image_mime(""), "image/png");
+        assert_eq!(detect_image_mime("!!!not-base64!!!"), "image/png");
+    }
+
+    #[test]
+    fn sanitize_node_id_collision_deduped_in_same_array() {
+        // E-6/P3："a-b!" 和 "a-b" 过滤后都归 "a-b"，同级碰撞须追加 _2 去重，
+        // 否则两个节点共享 id → mutate/select 操作错乱。
+        let json = serde_json::json!([
+            { "id": "a-b!", "kind": "rect", "x": 0, "y": 0, "w": 10, "h": 10 },
+            { "id": "a-b",  "kind": "rect", "x": 20, "y": 0, "w": 10, "h": 10 },
+            { "id": "a-b@", "kind": "rect", "x": 40, "y": 0, "w": 10, "h": 10 }
+        ]);
+        let nodes = parse_nodes_with_depth(&json, 0).unwrap();
+        let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), 3, "三个过滤后归一的 id 须全部去重: {ids:?}");
+        assert!(
+            ids.contains(&"a-b".to_string()),
+            "首个保留原归一值: {ids:?}"
+        );
+        assert!(ids.contains(&"a-b_2".to_string()), "第二追加 _2: {ids:?}");
+        assert!(ids.contains(&"a-b_3".to_string()), "第三追加 _3: {ids:?}");
+    }
+
+    #[test]
+    fn validate_localhost_accepts_loopback() {
         assert!(validate_localhost("http://127.0.0.1:8080").is_ok());
         assert!(validate_localhost("http://localhost:9000").is_ok());
         assert!(validate_localhost("http://[::1]:8080").is_ok());
     }
 
     #[test]
+    fn validate_localhost_accepts_private_lan() {
+        // H-A1：RFC1918 私有段 + 链路本地放行（fusion-mlx 集群入口）
+        assert!(validate_localhost("http://10.0.0.1:8080").is_ok());
+        assert!(validate_localhost("http://192.168.1.1:8080").is_ok());
+        assert!(validate_localhost("http://172.16.5.4:11434").is_ok());
+        assert!(
+            validate_localhost("http://169.254.1.1:8080").is_ok(),
+            "链路本地应放行"
+        );
+    }
+
+    #[test]
     fn validate_localhost_rejects_public() {
-        assert!(validate_localhost("http://10.0.0.1:8080").is_err());
+        // H-A1：公网 IP + 公网域名仍拒
+        assert!(validate_localhost("http://8.8.8.8:8080").is_err());
         assert!(validate_localhost("https://api.openai.com").is_err());
-        assert!(validate_localhost("http://192.168.1.1:8080").is_err());
+        assert!(validate_localhost("http://1.1.1.1:8080").is_err());
+    }
+
+    #[test]
+    fn validate_localhost_rejects_non_localhost_domain() {
+        // 非 localhost 域名一律拒（DNS 可解析到公网，静态期无法保证离线）
+        assert!(validate_localhost("http://ml-worker.internal:8080").is_err());
     }
 
     #[test]
@@ -2322,8 +2550,25 @@ fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Result
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("nodes 非数组"))?;
     let mut nodes = Vec::with_capacity(arr.len());
+    // E-6/P3：sanitize_node_id 过滤后不同原始 id 可能归一（"a-b!" 和 "a-b" → "a-b"），
+    // 同级 id 碰撞致后续节点操作错乱。per-array seen 集合对碰撞 id 追加 _<n> 去重。
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, item) in arr.iter().enumerate() {
-        nodes.push(parse_node_with_depth(item, i, depth)?);
+        let mut node = parse_node_with_depth(item, i, depth)?;
+        if !seen.insert(node.id.clone()) {
+            let original = node.id.clone();
+            let mut suffix = 2;
+            loop {
+                let candidate = format!("{original}_{suffix}");
+                if seen.insert(candidate.clone()) {
+                    node.id = candidate;
+                    break;
+                }
+                suffix += 1;
+            }
+            tracing::warn!(original = %original, new = %node.id, "sanitize_node_id 碰撞，已追加后缀去重");
+        }
+        nodes.push(node);
     }
     Ok(nodes)
 }
@@ -3138,6 +3383,7 @@ mod skills_tests {
 mod mlx_integration {
     use super::*;
     use fd_canvas_core::NodeKind;
+    use op_ai::chat_provider::ChatHistoryRole;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
@@ -3860,6 +4106,120 @@ mod mlx_integration {
             "跨 chunk 切断的 CJK 字符应完整还原，无 U+FFFD 替换"
         );
         assert!(!tokens.contains('\u{fffd}'), "不得出现 U+FFFD 替换字符");
+    }
+
+    /// 捕获请求体到 Mutex 的 mock server：返回固定响应，同时把收到的 raw 请求行+body 存下来。
+    /// H-A9 回归：验证 send 把 history 折叠进 messages[]，而非静默丢弃。
+    /// 在 BLOCKING_RT（专用持久 multi-thread runtime）上 spawn，避免 #[test] 同步线程
+    /// 与 tokio::test runtime 嵌套 block_on panic（参见 lib.rs:310 注释）。
+    async fn spawn_capturing_mock_server(body: String) -> (String, Arc<Mutex<Vec<u8>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap_clone = captured.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if n > 0 {
+                    cap_clone.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        (format!("http://{addr}"), captured)
+    }
+
+    /// 在 BLOCKING_RT 上启动 capturing mock 并返回 (url, captured)。
+    /// 普通同步测试线程调此 helper：BLOCKING_RT.block_on spawn server（首帧结束），
+    /// 随后 send → chat_sync_messages → BLOCKING_RT.block_on（顺序，不嵌套）。
+    fn capturing_server(body: &str) -> (String, Arc<Mutex<Vec<u8>>>) {
+        BLOCKING_RT.block_on(spawn_capturing_mock_server(body.to_string()))
+    }
+
+    /// H-A9：send 必须把 history 折叠进 messages[]（system + 历史轮 + 当前 user），
+    /// 而非旧实现的 system + user 两条。用 capturing mock 验证 wire payload。
+    #[test]
+    fn send_folds_history_into_messages_wire() {
+        let body = String::from(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+        let (url, captured) = capturing_server(&body);
+        let client = mock_client(&url);
+        let provider = FusionMlxChatProvider::new(client, "default-model");
+        let request = ChatRequest {
+            system_prompt: "你是 UI 生成器".into(),
+            user_message: "生成登录页".into(),
+            history: vec![
+                (ChatHistoryRole::User, "什么是登录页".into()),
+                (
+                    ChatHistoryRole::Assistant,
+                    "登录页是用户身份认证入口".into(),
+                ),
+            ],
+            max_output_tokens: 256,
+            thinking: ThinkingMode::default(),
+            effort: EffortLevel::default(),
+            attachments: vec![],
+            model: Some("qwen3.5".into()),
+        };
+        let deltas: Vec<ChatDelta> = provider.send(request).collect();
+        // 应收到 TextDelta + Done。
+        let has_text = deltas.iter().any(|d| matches!(d, ChatDelta::TextDelta(_)));
+        assert!(has_text, "send 应返回 TextDelta");
+        // 验证 wire payload 含 4 条 messages（system + 2 历史 + 1 当前 user）。
+        let raw = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&raw.as_bytes()[body_start..]).unwrap();
+        let msgs = payload["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4, "history 应折叠为 4 条 messages");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "你是 UI 生成器");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "什么是登录页");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "登录页是用户身份认证入口");
+        assert_eq!(msgs[3]["role"], "user");
+        assert_eq!(msgs[3]["content"], "生成登录页");
+        assert_eq!(payload["model"], "qwen3.5");
+    }
+
+    /// H-A9：空 system_prompt 应被跳过（不产生空 system message），避免 MLX 报错。
+    #[test]
+    fn send_empty_system_prompt_omits_system_message() {
+        let body = String::from(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+        let (url, captured) = capturing_server(&body);
+        let client = mock_client(&url);
+        let provider = FusionMlxChatProvider::new(client, "default-model");
+        let request = ChatRequest {
+            system_prompt: "   ".into(),
+            user_message: "hi".into(),
+            history: vec![],
+            max_output_tokens: 64,
+            thinking: ThinkingMode::default(),
+            effort: EffortLevel::default(),
+            attachments: vec![],
+            model: None,
+        };
+        let _ = provider.send(request).collect::<Vec<_>>();
+        let raw = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&raw.as_bytes()[body_start..]).unwrap();
+        let msgs = payload["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1, "空 system_prompt 不应产生 system message");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "hi");
+        assert_eq!(payload["model"], "default-model", "model=None 回退 default");
     }
 }
 

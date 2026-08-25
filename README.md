@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.12 — 12 crates + vendored op-ai, 394 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), self-built MCP protocol layer in fd-ecosystem, op-editor-core/op-codegen/op-mcp replaced by fd-canvas-core/fd-codegen/fd-ecosystem. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；CI 零 panic 双门禁（deny-panic + deny-unwrap-expect，allowlist 基线）；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分 对抗回归测试。
+**Status**: v0.1.12 — 11 crates + vendored op-ai, 389 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制（回环+RFC1918+链路本地，拒公网）、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；死代码清理（fd-asset 整 crate、Taffy compute_layout、apply_patch、fd-ecosystem MCP+watch_async）；chat NDJSON 对齐 studio schema（delta/chat_done/error）；CI 零 panic 双门禁（deny-panic + deny-unwrap-expect，allowlist 基线）；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分/离线边界 对抗回归测试。
 
 ## 📋 Overview
 
@@ -27,33 +27,31 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 
 ## 🚀 V0.2 Feature Matrix
 
-1. **Infinite vector canvas** — zoom/pan/grid/multi-artboard/layer management, CSS Flex/Grid layout, Taffy layout engine
+1. **Infinite vector canvas** — zoom/pan/grid/multi-artboard/layer management, CSS Flex/Grid layout declarations (rendered by layout-aware codegen / browser)
 2. **Conversational AI design generation** — text-to-UI, image-to-UI, SSE streaming, multimodal visual input
 3. **Local design system** — two built-in specs (Apple HIG / Admin Dashboard), Light/Dark themes, global Token sync
 4. **Design lint + auto-fix** — 13 lint rules + auto-fix for Token references / null cleanup / auto-naming
 5. **Fusion Code bidirectional sync** — canvas one-click export to React/HTML/Tailwind, reverse style sync
 6. **Prototype interaction & handoff** — PNG/SVG/PDF/HTML export, batch export
 7. **Ecosystem integration** — Simulation / Desk / KB / CLI full integration, async file watching, template tag search
-8. **Undo/Redo + Diff** — snapshot stack (50 levels) + node-level Diff/Patch
+8. **Undo/Redo + Diff** — snapshot stack (50 levels) + node-level Diff
 9. **Full-featured CLI** — generate / export / export-batch / lint --fix / undo / redo / health / diff / theme / chat（机器可读流式 NDJSON，供 fusion-studio subprocess 取代直连 MLX，issue #17）
-10. **Asset library management** — asset categorization/tagging/annotation/color extraction/design system Token binding
-11. **Design spec document generation** — AI auto-generates interaction specs / component specs / page architecture docs (SpecDocSkill)
-12. **Page flow batch generation** — AI generates multi-page layouts from flow descriptions with unified style (PageFlowSkill)
-13. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison
-14. **Built-in scene templates** — 4 preset categories (mobile app / admin dashboard / marketing site / mini program), one-click install
+10. **Design spec document generation** — AI auto-generates interaction specs / component specs / page architecture docs (SpecDocSkill)
+11. **Page flow batch generation** — AI generates multi-page layouts from flow descriptions with unified style (PageFlowSkill)
+12. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison
+13. **Built-in scene templates** — 4 preset categories (mobile app / admin dashboard / marketing site / mini program), one-click install
 
 ## 🗂️ Project Structure
 
 ```
 fusion-design/
 ├── crates/                     ← Fusion-Design custom Rust crates (workspace)
-│   ├── fd-canvas-core/         ← Canvas data model (PenDocument/PenNode + UndoRedo/Diff/Taffy + VersionedDocument)
+│   ├── fd-canvas-core/         ← Canvas data model (PenDocument/PenNode + UndoRedo/Diff + VersionedDocument, Flex/Grid layout declarations)
 │   ├── fd-ai-adapter/          ← op-ai → fusion-mlx adapter (SSE streaming / multimodal vision / 7 Skills)
-│   ├── fd-codegen/             ← HTML/React+Tailwind code export
+│   ├── fd-codegen/             ← HTML/React+Tailwind code export (layout-aware Flex/Grid CSS)
 │   ├── fd-design-system/       ← Three built-in design specs (Apple HIG / minimal dashboard / robot-sim) + Token + Light/Dark themes
 │   ├── fd-design-lint/         ← 13 lint rules + auto-fix (Token references / null cleanup / auto-naming)
-│   ├── fd-ecosystem/           ← Ecosystem integration (IPC + async file watching + template tag search + 4 built-in scene templates + self-built MCP JSON-RPC server)
-│   ├── fd-asset/               ← Asset library management (categorization / tagging / annotation / color extraction / Token binding)
+│   ├── fd-ecosystem/           ← Ecosystem integration (file IPC + template tag search + 4 built-in scene templates)
 │   ├── fd-host-desk/           ← Fusion-Desk WKWebView host bridge
 │   ├── fd-host-web/            ← WASM frontend rendering (WebShell + BridgeCommand)
 │   ├── fd-export/              ← PNG/SVG/PDF/HTML batch export
@@ -101,8 +99,7 @@ cargo run -p fd-cli -- --help                                  # CLI available
 | fd-ai-adapter | 82 | Mock HTTP, SSE streaming, health check, **深度可用性探针（鉴权/模型/真推理）**, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析, **CJK SSE 跨 chunk 切分** |
 | fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
 | fd-design-system | 25 | Token, Theme, Registry, CSS output, 3 built-in presets (incl. robot-sim) |
-| fd-ecosystem | 27 | IPC, sync_to_code, template tag search, built-in scene templates, self-built MCP server, **文件大小护栏** |
-| fd-asset | 19 | Asset CRUD, categorization/tagging/annotation, color extraction, Token binding |
+| fd-ecosystem | 22 | IPC, sync_to_code, template tag search, built-in scene templates, **文件大小护栏** |
 | fd-codegen / fd-host-web / fd-export / fd-host-desk | 4-10 each | Core functionality |
 | fd-cli | 7+ | CLI argument parsing, subcommand dispatch, **商用级错误报告** |
 

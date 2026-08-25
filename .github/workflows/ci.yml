@@ -42,6 +42,29 @@ jobs:
       - name: WASM build (fd-host-web)
         run: cargo build -p fd-host-web --target wasm32-unknown-unknown
 
+  # 修复 E-35：macOS 盲区。main/PR 只跑 ubuntu，macOS 原生工具链
+  # （链接器/libsystem/大小写敏感文件系统/临时目录布局）差异到 tag 才暴露。
+  # 源码无 macOS 特定 cfg，但 release bin 是 aarch64-apple-darwin，须在
+  # 目标平台验证编译+测试，非 tag 才红。轻量 check+test，不打 tarball。
+  build-test-macos:
+    name: check + test (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (1.94)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Workspace compile check
+        run: cargo check --workspace
+
+      - name: Tests
+        run: cargo test --workspace
+
   # 依赖漏洞门禁（商用加固项 #1）。
   # 修复 E-34：原 continue-on-error: true 致已知 RUSTSEC 通告随发布上线不阻断。
   # 商用红线：带漏洞发布比延迟发布更糟。改阻断——有 advisory 即 CI 红，强制修。

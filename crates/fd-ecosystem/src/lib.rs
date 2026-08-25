@@ -1,12 +1,15 @@
 //! Fusion-Design 生态联动 — 对接 Fusion Code/Simulation/KB/CLI。
 //!
 //! 对应 PRD 模块 6「生态联动能力」。通过本地文件 IPC（约定目录下的
-//! JSON 消息文件）+ 自建 MCP 协议层（JSON-RPC over stdio）打通全系生态。
+//! JSON 消息文件）打通全系生态：send/list/consume、sync_to_code、模板检索/预置。
+//!
+//! 【H-A3/P2-2】自建 MCP 协议层 + watch_async 已移除（零外部调用，死代码）。
 //!
 //! 【离线硬约束】所有联动走本地文件系统或 127.0.0.1，无公网调用。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -186,10 +189,24 @@ impl Default for TrainerClient {
     }
 }
 
+/// E-16/P2-6：模板检索缓存。按模板目录 mtime 失效——save_template 写文件后
+/// 目录 mtime 变化，下次检索重新扫盘；未变则复用内存解析结果，零磁盘 IO。
+/// 旧实现每次检索 read_dir + 逐文件 read_to_string + from_str，N 模板线性退化。
+#[derive(Debug, Clone, Default)]
+struct TemplateCache {
+    /// 缓存对应的模板目录 mtime（秒级，跨秒变化即失效）。
+    dir_mtime_secs: u64,
+    /// 已解析的全部模板（按 created_at 降序）。
+    templates: Vec<DesignTemplate>,
+}
+
 /// 生态联动客户端（基于本地文件 IPC）。
-#[derive(Debug, Clone)]
+// E-16/P2-6：含 Mutex 缓存，不再 derive Clone（Mutex 非 Clone；全仓无 EcosystemLink::clone 调用）。
+#[derive(Debug)]
 pub struct EcosystemLink {
     base_dir: PathBuf,
+    // E-16/P2-6：模板检索缓存，Mutex 包裹供多线程安全复用。
+    template_cache: Mutex<TemplateCache>,
 }
 
 impl EcosystemLink {
@@ -197,6 +214,7 @@ impl EcosystemLink {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
+            template_cache: Mutex::new(TemplateCache::default()),
         }
     }
 
@@ -326,10 +344,28 @@ impl EcosystemLink {
             if let Ok(msg) = self.consume(file) {
                 if msg.action == "style-change" {
                     if let Some(arr) = msg.payload.get("mutations").and_then(|v| v.as_array()) {
+                        // E-18/P3：旧实现对 parse_mutate_command 返回 None 静默丢弃，
+                        // 解析失败的 mutation 项无任何告警，调试无从定位。统计并显式告警。
+                        let total = arr.len();
+                        let mut dropped = 0usize;
                         for item in arr {
-                            if let Some(cmd) = parse_mutate_command(item) {
-                                commands.push(cmd);
+                            match parse_mutate_command(item) {
+                                Some(cmd) => commands.push(cmd),
+                                None => {
+                                    dropped += 1;
+                                    tracing::warn!(
+                                        item = %item,
+                                        "watch_code_changes: mutation 解析失败被丢弃（非对象或缺 node_id）"
+                                    );
+                                }
                             }
+                        }
+                        if dropped > 0 {
+                            tracing::warn!(
+                                total,
+                                dropped,
+                                "watch_code_changes: 本消息丢弃 {dropped}/{total} 个 mutation"
+                            );
                         }
                     }
                 }
@@ -337,6 +373,8 @@ impl EcosystemLink {
         }
         if !commands.is_empty() {
             tracing::info!(count = commands.len(), "watch_code_changes: 发现样式变更");
+        } else {
+            tracing::debug!("watch_code_changes: 无有效样式变更指令");
         }
         Ok(commands)
     }
@@ -416,6 +454,10 @@ impl EcosystemLink {
         let json = serde_json::to_string_pretty(tmpl)?;
         std::fs::write(&file, json)?;
         tracing::info!(?file, id = %tmpl.id, "save_template: 模板已保存");
+        // E-16/P2-6：写入即失效缓存（mtime 秒级精度，同秒连续写可能漏判，显式清空更稳）。
+        if let Ok(mut c) = self.template_cache.lock() {
+            *c = TemplateCache::default();
+        }
         // 同时发 IPC 消息通知
         let msg = LinkMessage {
             target: EcosystemTarget::FusionKB,
@@ -430,17 +472,40 @@ impl EcosystemLink {
         Ok(file)
     }
 
-    /// 检索模板：按关键词匹配 name/tags/category。
-    pub fn search_templates(&self, query: &str) -> anyhow::Result<Vec<DesignTemplate>> {
+    /// E-16/P2-6：返回（降序）全部模板，命中缓存则零磁盘 IO。
+    /// 缓存按模板目录 mtime（秒级）失效：save_template 写文件 → mtime 变 → 重扫。
+    /// 旧实现每次检索都 read_dir + 逐文件 read_to_string + from_str，N 模板线性退化。
+    fn load_all_templates_cached(&self) -> anyhow::Result<Vec<DesignTemplate>> {
         let kb_dir = self
             .base_dir
             .join(EcosystemTarget::FusionKB.ipc_dir())
             .join("templates");
         if !kb_dir.exists() {
+            // 目录不存在：清缓存，返回空。
+            if let Ok(mut c) = self.template_cache.lock() {
+                *c = TemplateCache::default();
+            }
             return Ok(vec![]);
         }
-        let q = query.to_lowercase();
-        let mut results = vec![];
+        // 目录 mtime（秒级）作缓存键。失败（权限等）则强制重扫，不信任旧缓存。
+        let mtime_secs = std::fs::metadata(&kb_dir)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Ok(c) = self.template_cache.lock() {
+            if c.dir_mtime_secs == mtime_secs && mtime_secs != 0 {
+                tracing::debug!(
+                    dir_mtime = mtime_secs,
+                    count = c.templates.len(),
+                    "load_all_templates_cached: 缓存命中（零磁盘 IO）"
+                );
+                return Ok(c.templates.clone());
+            }
+        }
+        // 未命中：扫盘解析。
+        let mut templates = vec![];
         for entry in std::fs::read_dir(&kb_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -449,503 +514,73 @@ impl EcosystemLink {
             }
             if let Ok(data) = std::fs::read_to_string(&path) {
                 if let Ok(tmpl) = serde_json::from_str::<DesignTemplate>(&data) {
-                    let name_match = tmpl.name.to_lowercase().contains(&q);
-                    let tag_match = tmpl.tags.iter().any(|t| t.to_lowercase().contains(&q));
-                    let cat_match = tmpl.category.to_lowercase().contains(&q);
-                    if q.is_empty() || name_match || tag_match || cat_match {
-                        results.push(tmpl);
-                    }
+                    templates.push(tmpl);
                 }
             }
         }
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        templates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        tracing::info!(
+            dir_mtime = mtime_secs,
+            count = templates.len(),
+            "load_all_templates_cached: 缓存未命中，已扫盘填充"
+        );
+        if let Ok(mut c) = self.template_cache.lock() {
+            c.dir_mtime_secs = mtime_secs;
+            c.templates = templates.clone();
+        }
+        Ok(templates)
+    }
+
+    /// 检索模板：按关键词匹配 name/tags/category。
+    pub fn search_templates(&self, query: &str) -> anyhow::Result<Vec<DesignTemplate>> {
+        let all = self.load_all_templates_cached()?;
+        let q = query.to_lowercase();
+        // E-16/P2-6：内存过滤，无磁盘 IO（all 已降序，保序过滤即可）。
+        let results: Vec<DesignTemplate> = all
+            .iter()
+            .filter(|tmpl| {
+                if q.is_empty() {
+                    return true;
+                }
+                let name_match = tmpl.name.to_lowercase().contains(&q);
+                let tag_match = tmpl.tags.iter().any(|t| t.to_lowercase().contains(&q));
+                let cat_match = tmpl.category.to_lowercase().contains(&q);
+                name_match || tag_match || cat_match
+            })
+            .cloned()
+            .collect();
         tracing::info!(query = %query, count = results.len(), "search_templates: 检索完成");
         Ok(results)
     }
 
     /// 按 tag 精确匹配检索模板（多 tag 取交集）。
     pub fn search_templates_by_tags(&self, tags: &[String]) -> anyhow::Result<Vec<DesignTemplate>> {
-        let kb_dir = self
-            .base_dir
-            .join(EcosystemTarget::FusionKB.ipc_dir())
-            .join("templates");
-        if !kb_dir.exists() {
-            return Ok(vec![]);
-        }
+        let all = self.load_all_templates_cached()?;
         let lower_tags: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
-        let mut results = vec![];
-        for entry in std::fs::read_dir(&kb_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(data) = std::fs::read_to_string(&path) {
-                if let Ok(tmpl) = serde_json::from_str::<DesignTemplate>(&data) {
-                    let tmpl_tags_lower: Vec<String> =
-                        tmpl.tags.iter().map(|t| t.to_lowercase()).collect();
-                    let all_match = lower_tags
-                        .iter()
-                        .all(|t| tmpl_tags_lower.iter().any(|tt| tt == t));
-                    if all_match {
-                        results.push(tmpl);
-                    }
-                }
-            }
-        }
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // E-16/P2-6：内存过滤，无磁盘 IO。
+        let results: Vec<DesignTemplate> = all
+            .iter()
+            .filter(|tmpl| {
+                let tmpl_tags_lower: Vec<String> =
+                    tmpl.tags.iter().map(|t| t.to_lowercase()).collect();
+                lower_tags
+                    .iter()
+                    .all(|t| tmpl_tags_lower.iter().any(|tt| tt == t))
+            })
+            .cloned()
+            .collect();
         tracing::info!(tags = ?tags, count = results.len(), "search_templates_by_tags: 检索完成");
         Ok(results)
     }
-
-    /// 异步文件监听：持续监控指定目标的 IPC 目录变更。
-    ///
-    /// 返回一个 tokio 任务句柄和关闭通道。每检测到文件变更，调用回调处理。
-    // Callers: fd-cli (ecosystem watch), DesignBridge.swift (async file watch)
-    // Affected API: watch_async(), WatchEvent, WatchEventKind, search_templates_by_tags()
-    // User instruction: "按照方案和prd方案全面落地" — Phase 5
-    pub fn watch_async(
-        &self,
-        target: EcosystemTarget,
-        mut on_change: impl FnMut(WatchEvent) + Send + 'static,
-    ) -> anyhow::Result<(
-        tokio::task::JoinHandle<()>,
-        tokio::sync::oneshot::Sender<()>,
-    )> {
-        let watch_dir = self.base_dir.join(target.ipc_dir());
-        std::fs::create_dir_all(&watch_dir)?;
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-
-        let handle = tokio::spawn(async move {
-            use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-            let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<Event>(256);
-
-            let mut watcher = match RecommendedWatcher::new(
-                move |res: Result<Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        // L11：try_send 而非 blocking_send。
-                        //   blocking_send 会阻塞 notify 回调线程 → OS 事件队列（kqueue）积压
-                        //   → 高频下 OS 层整批丢事件（静默）。改 try_send：通道满时丢单条
-                        //   + warn 可见，回调线程不被阻塞，持续消费 OS 事件。
-                        match notify_tx.try_send(event) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                tracing::warn!(
-                                    "watch_async: 事件通道满，丢弃文件事件（消费慢于生产）"
-                                );
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                tracing::info!("watch_async: 事件通道已关闭，停止回调投递");
-                            }
-                        }
-                    }
-                },
-                notify::Config::default(),
-            ) {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::error!(?e, "watch_async: 创建 watcher 失败");
-                    return;
-                }
-            };
-
-            if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::Recursive) {
-                tracing::error!(?e, "watch_async: 监控目录失败");
-                return;
-            }
-
-            tracing::info!(dir = %watch_dir.display(), "watch_async: 开始监控目录");
-
-            let mut stop_rx = rx;
-            loop {
-                tokio::select! {
-                    // L11：通道关闭（watcher 线程退出/panic → notify_tx drop）必须 break，
-                    //   否则 task 永远只等 stop_rx，watcher（持 kqueue fd）不释放 = 泄漏。
-                    event = notify_rx.recv() => {
-                        let event = match event {
-                            Some(e) => e,
-                            None => {
-                                tracing::warn!("watch_async: 事件通道关闭（watcher 线程已退出），停止监听");
-                                break;
-                            }
-                        };
-                        let kind = match event.kind {
-                            EventKind::Create(_) => WatchEventKind::Created,
-                            EventKind::Modify(_) => WatchEventKind::Modified,
-                            EventKind::Remove(_) => WatchEventKind::Removed,
-                            _ => continue,
-                        };
-                        for path in &event.paths {
-                            on_change(WatchEvent {
-                                kind,
-                                path: path.clone(),
-                            });
-                        }
-                    }
-                    _ = &mut stop_rx => {
-                        tracing::info!("watch_async: 收到停止信号, 退出监控");
-                        break;
-                    }
-                }
-            }
-            // watcher 在此 drop → 释放 kqueue/inotify 句柄，L11 泄漏点关闭。
-            tracing::info!("watch_async: 监控任务退出，watcher 句柄已释放");
-        });
-
-        Ok((handle, tx))
-    }
 }
 
-/// 文件监听事件。
-#[derive(Debug, Clone)]
-pub struct WatchEvent {
-    pub kind: WatchEventKind,
-    pub path: PathBuf,
-}
-
-/// 事件类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WatchEventKind {
-    Created,
-    Modified,
-    Removed,
-}
-
-// ── 自建 MCP 协议层（替代缺失的 op-mcp）──
-//
-// PRD 模块 6：以 JSON-RPC 2.0 over stdio 暴露生态能力为 MCP 工具，
-// 供 Fusion Code / Agent / CLI 等本地调用方接入。100% 本地，无公网。
-//
-// 与现有文件 IPC（EcosystemLink）互补：文件 IPC 用于解耦的消息投递，
-// MCP 用于同步的工具调用（按 JSON-RPC 请求/响应）。
-
-/// JSON-RPC 2.0 请求。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpRequest {
-    pub jsonrpc: String,
-    #[serde(default)]
-    pub id: serde_json::Value,
-    pub method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<serde_json::Value>,
-}
-
-/// JSON-RPC 2.0 响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpResponse {
-    pub jsonrpc: String,
-    pub id: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<McpError>,
-}
-
-/// JSON-RPC 错误对象。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpError {
-    pub code: i32,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-impl McpError {
-    pub fn parse_error() -> Self {
-        Self {
-            code: -32700,
-            message: "Parse error".into(),
-            data: None,
-        }
-    }
-
-    pub fn method_not_found(id: serde_json::Value) -> McpResponse {
-        McpResponse {
-            jsonrpc: "2.0".into(),
-            id,
-            result: None,
-            error: Some(Self {
-                code: -32601,
-                message: "Method not found".into(),
-                data: None,
-            }),
-        }
-    }
-
-    pub fn invalid_params(id: serde_json::Value, detail: String) -> McpResponse {
-        McpResponse {
-            jsonrpc: "2.0".into(),
-            id,
-            result: None,
-            error: Some(Self {
-                code: -32602,
-                message: "Invalid params".into(),
-                data: Some(serde_json::Value::String(detail)),
-            }),
-        }
-    }
-
-    pub fn internal(id: serde_json::Value, detail: String) -> McpResponse {
-        McpResponse {
-            jsonrpc: "2.0".into(),
-            id,
-            result: None,
-            error: Some(Self {
-                code: -32603,
-                message: "Internal error".into(),
-                data: Some(serde_json::Value::String(detail)),
-            }),
-        }
-    }
-}
-
-/// MCP 工具描述（用于 tools/list 响应）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpToolInfo {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
-
-/// MCP 工具 trait：自建替身，每个工具一个实现。
-pub trait McpTool: Send + Sync {
-    fn info(&self) -> McpToolInfo;
-    fn invoke(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value>;
-}
-
-/// MCP 服务端：注册工具并按 JSON-RPC 行分派。
-pub struct McpServer {
-    server_name: String,
-    server_version: String,
-    tools: Vec<Box<dyn McpTool>>,
-}
-
-impl McpServer {
-    pub fn new(server_name: impl Into<String>, server_version: impl Into<String>) -> Self {
-        Self {
-            server_name: server_name.into(),
-            server_version: server_version.into(),
-            tools: vec![],
-        }
-    }
-
-    /// 注册一个工具。
-    pub fn register_tool(&mut self, tool: Box<dyn McpTool>) {
-        tracing::info!(tool = tool.info().name, "MCP 注册工具");
-        self.tools.push(tool);
-    }
-
-    /// 处理一行 JSON-RPC 文本，返回响应（解析失败返回 parse error）。
-    pub fn handle_line(&self, line: &str) -> Option<McpResponse> {
-        let req: McpRequest = match serde_json::from_str(line) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, line = %line, "MCP 请求解析失败");
-                return Some(McpResponse {
-                    jsonrpc: "2.0".into(),
-                    id: serde_json::Value::Null,
-                    result: None,
-                    error: Some(McpError::parse_error()),
-                });
-            }
-        };
-        Some(self.handle_request(&req))
-    }
-
-    /// 处理一个 JSON-RPC 请求对象。
-    pub fn handle_request(&self, req: &McpRequest) -> McpResponse {
-        let id = req.id.clone();
-        match req.method.as_str() {
-            "initialize" => Some(McpResponse {
-                jsonrpc: "2.0".into(),
-                id: id.clone(),
-                result: Some(serde_json::json!({
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {
-                        "name": self.server_name,
-                        "version": self.server_version,
-                    },
-                    "capabilities": {
-                        "tools": {}
-                    }
-                })),
-                error: None,
-            }),
-            "tools/list" => Some(McpResponse {
-                jsonrpc: "2.0".into(),
-                id: id.clone(),
-                result: Some(serde_json::json!({
-                    "tools": self.tools.iter().map(|t| t.info()).collect::<Vec<_>>()
-                })),
-                error: None,
-            }),
-            "tools/call" => Some(self.handle_tools_call(id.clone(), req.params.as_ref())),
-            other => {
-                tracing::warn!(method = other, "MCP 未知方法");
-                Some(McpError::method_not_found(id.clone()))
-            }
-        }
-        .unwrap_or_else(|| McpError::internal(id, "无响应".into()))
-    }
-
-    fn handle_tools_call(
-        &self,
-        id: serde_json::Value,
-        params: Option<&serde_json::Value>,
-    ) -> McpResponse {
-        let params = match params {
-            Some(v) => v,
-            None => return McpError::invalid_params(id, "缺少 params".into()),
-        };
-        let name = match params.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n.to_string(),
-            None => return McpError::invalid_params(id, "缺少 tool name".into()),
-        };
-        let args = params
-            .get("arguments")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let tool = self.tools.iter().find(|t| t.info().name == name);
-        match tool {
-            None => McpError::invalid_params(id, format!("未知工具: {name}")),
-            Some(t) => match t.invoke(&args) {
-                Ok(value) => McpResponse {
-                    jsonrpc: "2.0".into(),
-                    id,
-                    result: Some(serde_json::json!({
-                        "content": [{ "type": "text", "text": value.to_string() }]
-                    })),
-                    error: None,
-                },
-                Err(e) => {
-                    tracing::warn!(tool = %name, error = %e, "MCP 工具调用失败");
-                    McpError::internal(id, e.to_string())
-                }
-            },
-        }
-    }
-}
-
-// ── 内置 MCP 工具（桥接 EcosystemLink 已有能力）──
-
-/// 工具：列出生态联动目标。
-pub struct ListTargetsTool;
-
-impl McpTool for ListTargetsTool {
-    fn info(&self) -> McpToolInfo {
-        McpToolInfo {
-            name: "list_targets".into(),
-            description: "列出可用的生态联动目标目录名".into(),
-            input_schema: serde_json::json!({"type": "object", "properties": {}}),
-        }
-    }
-    fn invoke(&self, _params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::json!({
-            "targets": ["fusion-code", "fusion-kb", "fusion-cli"]
-        }))
-    }
-}
-
-/// 工具：检索设计模板。
-pub struct SearchTemplatesTool {
-    link: EcosystemLink,
-}
-
-impl SearchTemplatesTool {
-    pub fn new(link: EcosystemLink) -> Self {
-        Self { link }
-    }
-}
-
-impl McpTool for SearchTemplatesTool {
-    fn info(&self) -> McpToolInfo {
-        McpToolInfo {
-            name: "search_templates".into(),
-            description: "按关键词检索 Fusion-KB 设计模板（匹配 name/tags/category）".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "检索关键词，空串返回全部" }
-                },
-                "required": ["query"]
-            }),
-        }
-    }
-    fn invoke(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        let results = self.link.search_templates(query)?;
-        Ok(serde_json::to_value(&results)?)
-    }
-}
-
-/// 工具：发送一条联动 IPC 消息。
-pub struct SendMessageTool {
-    link: EcosystemLink,
-}
-
-impl SendMessageTool {
-    pub fn new(link: EcosystemLink) -> Self {
-        Self { link }
-    }
-}
-
-impl McpTool for SendMessageTool {
-    fn info(&self) -> McpToolInfo {
-        McpToolInfo {
-            name: "send_message".into(),
-            description: "向指定生态目标发送一条联动 IPC 消息".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target": { "type": "string", "enum": ["fusion-code", "fusion-kb", "fusion-cli"] },
-                    "action": { "type": "string" },
-                    "payload": {}
-                },
-                "required": ["target", "action"]
-            }),
-        }
-    }
-    fn invoke(&self, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let target = params
-            .get("target")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("缺少 target"))?;
-        let action = params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("缺少 action"))?;
-        let payload = params
-            .get("payload")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let target_enum = match target {
-            "fusion-code" => EcosystemTarget::FusionCode,
-            "fusion-kb" => EcosystemTarget::FusionKB,
-            "fusion-cli" => EcosystemTarget::FusionCLI,
-            other => EcosystemTarget::Custom(other.into()),
-        };
-        let msg = LinkMessage {
-            target: target_enum,
-            action: action.into(),
-            payload,
-        };
-        let file = self.link.send(&msg)?;
-        Ok(serde_json::json!({
-            "ok": true,
-            "file": file.to_string_lossy()
-        }))
-    }
-}
-
-impl McpServer {
-    /// 注册全部内置工具（桥接给定 EcosystemLink）。
-    pub fn register_builtin_tools(&mut self, link: EcosystemLink) {
-        self.register_tool(Box::new(ListTargetsTool));
-        self.register_tool(Box::new(SearchTemplatesTool::new(link.clone())));
-        self.register_tool(Box::new(SendMessageTool::new(link)));
-    }
-}
+// H-A3/P2-2：watch_async（异步文件监听，notify）+ 自建 MCP 协议层（McpServer/
+// McpTool/ListTargetsTool/SearchTemplatesTool/SendMessageTool + WatchEvent/Kind）
+// 已移除——零外部调用，展示性死代码。
+// MCP 层不合规（仅 initialize/tools 列表/call 三方法，缺握手/resources/progress，
+// 无法被标准 MCP client 接入，见审计 H-A4）；watch_async 无消费方。
+// EcosystemLink IPC 核心（send/list/consume/sync_to_code/search_templates/templates）保留。
+// 如需恢复，见 git 历史。
 
 #[cfg(test)]
 mod tests {
@@ -1136,6 +771,36 @@ mod tests {
     }
 
     #[test]
+    fn watch_code_changes_drops_invalid_mutations_keeps_valid() {
+        // E-18/P3：混合有效/无效 mutation 项。旧实现静默丢全部无效项；
+        // 修复后须保留有效项、丢弃无效项（非对象/缺 node_id/非数组元素），不 panic。
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let msg = LinkMessage {
+            target: EcosystemTarget::FusionCode,
+            action: "style-change".into(),
+            payload: serde_json::json!({
+                "mutations": [
+                    { "node_id": "good1", "fill": "#abc" },
+                    "not-an-object",
+                    { "fill": "#fff" },
+                    42,
+                    { "node_id": "good2", "w": 100.0 },
+                    null
+                ]
+            }),
+        };
+        link.send(&msg).unwrap();
+        let cmds = link.watch_code_changes().unwrap();
+        let ids: Vec<&str> = cmds.iter().map(|c| c.node_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["good1", "good2"],
+            "仅保留有 node_id 的有效项: {ids:?}"
+        );
+    }
+
+    #[test]
     fn save_and_search_template() {
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
@@ -1226,119 +891,95 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
-    // ── MCP 协议层测试 ──
-
-    fn make_server(tmp: &tempfile::TempDir) -> McpServer {
-        let mut server = McpServer::new("fusion-design", "0.1.9");
-        server.register_builtin_tools(EcosystemLink::new(tmp.path()));
-        server
-    }
-
+    // E-16/P2-6 回归：缓存命中——重复检索返回一致结果（缓存生效，无重扫）。
     #[test]
-    fn mcp_initialize_returns_server_info() {
-        let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let resp = server.handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#);
-        let resp = resp.unwrap();
-        assert_eq!(resp.id, serde_json::json!(1));
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        assert_eq!(result["serverInfo"]["name"], "fusion-design");
-        assert_eq!(result["capabilities"]["tools"], serde_json::json!({}));
-    }
-
-    #[test]
-    fn mcp_tools_list_contains_builtin_tools() {
-        let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let resp = server.handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
-        let resp = resp.unwrap();
-        let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"list_targets"));
-        assert!(names.contains(&"search_templates"));
-        assert!(names.contains(&"send_message"));
-    }
-
-    #[test]
-    fn mcp_call_unknown_method_returns_error() {
-        let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let resp = server.handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#);
-        let resp = resp.unwrap();
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, -32601);
-    }
-
-    #[test]
-    fn mcp_parse_error_on_bad_json() {
-        let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let resp = server.handle_line("not json").unwrap();
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, -32700);
-    }
-
-    #[test]
-    fn mcp_call_list_targets_returns_targets() {
-        let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let req = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_targets","arguments":{}}}"#;
-        let resp = server.handle_line(req).unwrap();
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("fusion-code"));
-    }
-
-    #[test]
-    fn mcp_call_search_templates_returns_results() {
+    fn template_search_cache_repeated_query_consistent() {
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
-        let tmpl = DesignTemplate {
-            id: "login".into(),
-            name: "登录".into(),
-            tags: vec!["auth".into()],
-            category: "表单".into(),
+        link.save_template(&DesignTemplate {
+            id: "c1".into(),
+            name: "Cache".into(),
+            tags: vec!["x".into()],
+            category: "cat".into(),
             document_json: "{}".into(),
             created_at: 1000,
-        };
-        link.save_template(&tmpl).unwrap();
-        let mut server = McpServer::new("fd", "0.1.9");
-        server.register_builtin_tools(link);
-        let req = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_templates","arguments":{"query":"登录"}}}"#;
-        let resp = server.handle_line(req).unwrap();
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("login"));
+        })
+        .unwrap();
+        // 多次检索，缓存填充后应命中（结果一致）。
+        let r1 = link.search_templates("Cache").unwrap();
+        let r2 = link.search_templates("Cache").unwrap();
+        let r3 = link.search_templates_by_tags(&["x".into()]).unwrap();
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r2.len(), 1, "缓存命中应返回一致结果");
+        assert_eq!(r3.len(), 1, "by_tags 同样走缓存");
+        assert_eq!(r1[0].id, "c1");
+        assert_eq!(r2[0].id, "c1");
     }
 
+    // E-16/P2-6 回归：save_template 后缓存即时失效——
+    // 同秒连续写也必须让下次检索看到新模板（mtime 秒级精度漏洞的兜底）。
     #[test]
-    fn mcp_call_send_message_writes_ipc_file() {
+    fn template_cache_invalidated_on_save_same_second() {
         let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let req = r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"send_message","arguments":{"target":"fusion-cli","action":"batch","payload":{"x":1}}}}"#;
-        let resp = server.handle_line(req).unwrap();
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("ok"));
-        // 验证 IPC 文件确实写入
-        let files = EcosystemLink::new(tmp.path())
-            .list(EcosystemTarget::FusionCLI)
-            .unwrap();
-        assert_eq!(files.len(), 1);
+        let link = EcosystemLink::new(tmp.path());
+        link.save_template(&DesignTemplate {
+            id: "s1".into(),
+            name: "First".into(),
+            tags: vec![],
+            category: "c".into(),
+            document_json: "{}".into(),
+            created_at: 1000,
+        })
+        .unwrap();
+        // 填充缓存。
+        assert_eq!(link.search_templates("").unwrap().len(), 1);
+        // 同秒再存一个（save_template 显式清缓存）。
+        link.save_template(&DesignTemplate {
+            id: "s2".into(),
+            name: "Second".into(),
+            tags: vec![],
+            category: "c".into(),
+            document_json: "{}".into(),
+            created_at: 2000,
+        })
+        .unwrap();
+        // 若缓存未失效，此处仍返回 1（旧缓存）——必须返回 2。
+        let results = link.search_templates("").unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "save 后缓存应失效，检索须见新模板（同秒写兜底）"
+        );
     }
 
+    // E-16/P2-6 回归：目录不存在时缓存被清空，不返回陈旧结果。
     #[test]
-    fn mcp_call_unknown_tool_returns_invalid_params() {
+    fn template_cache_cleared_when_dir_absent() {
         let tmp = tempdir().unwrap();
-        let server = make_server(&tmp);
-        let req = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ghost","arguments":{}}}"#;
-        let resp = server.handle_line(req).unwrap();
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, -32602);
+        let link = EcosystemLink::new(tmp.path());
+        // 先存模板填充缓存。
+        link.save_template(&DesignTemplate {
+            id: "d1".into(),
+            name: "D".into(),
+            tags: vec![],
+            category: "c".into(),
+            document_json: "{}".into(),
+            created_at: 1000,
+        })
+        .unwrap();
+        assert_eq!(link.search_templates("").unwrap().len(), 1);
+        // 删除整个模板目录。
+        let kb_dir = tmp
+            .path()
+            .join(EcosystemTarget::FusionKB.ipc_dir())
+            .join("templates");
+        std::fs::remove_dir_all(&kb_dir).unwrap();
+        // 缓存应被清空，检索返回空而非陈旧的 1。
+        assert_eq!(
+            link.search_templates("").unwrap().len(),
+            0,
+            "目录删除后缓存应清空，不返回陈旧结果"
+        );
     }
 }
 
@@ -1465,8 +1106,25 @@ impl EcosystemLink {
             std::fs::create_dir_all(&kb_dir)?;
             let file = kb_dir.join(format!("{}.json", tmpl.id));
             if file.exists() {
-                tracing::debug!(id = %tmpl.id, "install_builtin_templates: 模板已存在，跳过");
-                continue;
+                // E-17/P3：旧实现仅判 file.exists() 跳过，损坏/空文件永久不可用。
+                // 先校验可解析，corrupt 则覆盖重装；有效才跳过。
+                let need_overwrite = match std::fs::read_to_string(&file) {
+                    Ok(content) => match serde_json::from_str::<DesignTemplate>(&content) {
+                        Ok(existing) => existing.id != tmpl.id,
+                        Err(e) => {
+                            tracing::warn!(id = %tmpl.id, error = %e, "install_builtin_templates: 已存在文件损坏，覆盖重装");
+                            true
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(id = %tmpl.id, error = %e, "install_builtin_templates: 已存在文件不可读，覆盖重装");
+                        true
+                    }
+                };
+                if !need_overwrite {
+                    tracing::debug!(id = %tmpl.id, "install_builtin_templates: 模板已存在且有效，跳过");
+                    continue;
+                }
             }
             let json = serde_json::to_string_pretty(&tmpl)?;
             std::fs::write(&file, json)?;
@@ -1513,6 +1171,27 @@ mod builtin_template_tests {
         assert_eq!(count1, 4);
         let count2 = link.install_builtin_templates().unwrap();
         assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn install_builtin_templates_reinstalls_corrupt_file() {
+        // E-17/P3：旧实现仅判 exists 跳过，损坏文件永久阻塞重装。
+        // 先正常安装，再写空/损坏内容到首个模板文件，重装须覆盖且 count > 0。
+        let dir = tempfile::tempdir().unwrap();
+        let link = EcosystemLink::new(dir.path());
+        link.install_builtin_templates().unwrap();
+        let templates_dir = dir
+            .path()
+            .join(EcosystemTarget::FusionKB.ipc_dir())
+            .join("templates");
+        let first_id = &builtin_scene_templates()[0].id;
+        let corrupt_file = templates_dir.join(format!("{first_id}.json"));
+        std::fs::write(&corrupt_file, "{ corrupted not json").unwrap();
+        let reinstalled = link.install_builtin_templates().unwrap();
+        assert_eq!(reinstalled, 1, "损坏文件须覆盖重装 1 个");
+        let restored = std::fs::read_to_string(&corrupt_file).unwrap();
+        let parsed: DesignTemplate = serde_json::from_str(&restored).unwrap();
+        assert_eq!(parsed.id, *first_id, "重装内容为有效内置模板");
     }
 
     #[test]

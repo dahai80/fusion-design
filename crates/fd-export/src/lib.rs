@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 
 // 渲染光栅图（PNG）时画布单边像素上限，防止恶意 .fusiondesign 触发 OOM。
 const MAX_CANVAS_DIM: u32 = 16384;
+// 渲染光栅图（PNG）时画布总像素上限（RGBA4 = 64M px × 4 B = 256 MB）。
+// 单边限制不够：16384²×4 = 1 GB 仍会 OOM。R-A16。
+const MAX_CANVAS_PIXELS: u64 = 64_000_000;
 
 /// 导出格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,7 +266,10 @@ impl Exporter {
 }
 
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    // E-20/P3：空名/全非法字符 → "" → 文件名 ".svg"（隐藏文件，同名页面互相覆盖）。
+    // 空结果回退 "page"，保非隐藏、可区分。
+    let sanitized: String = name
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -271,16 +277,23 @@ fn sanitize_filename(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if sanitized.is_empty() {
+        "page".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn render_html(page: &CanvasPage) -> String {
     let svg = render_svg(page);
+    // E-21：page.name 经 IPC/AI 可含 </title><script>…，转义防 HTML 注入（WKWebView 原生桥接=XSS=原生执行）。
+    let safe_name = xml_escape(&page.name);
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>{name}</title>\
          <style>body{{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;}}</style>\
          </head>\n<body>{svg}</body></html>",
-        name = page.name
+        name = safe_name
     )
 }
 
@@ -396,6 +409,24 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
             MAX_CANVAS_DIM
         );
     }
+    // R-A16：单边限制不够，16384²×4=1GB 仍 OOM。总像素门控。
+    let total_pixels = width as u64 * height as u64;
+    if total_pixels > MAX_CANVAS_PIXELS {
+        tracing::warn!(
+            width,
+            height,
+            total_pixels,
+            limit = MAX_CANVAS_PIXELS,
+            "画布总像素超出上限，拒绝渲染 PNG"
+        );
+        anyhow::bail!(
+            "画布总像素 {} ({}x{}) 超出上限 {}，拒绝渲染 PNG 防止 OOM",
+            total_pixels,
+            width,
+            height,
+            MAX_CANVAS_PIXELS
+        );
+    }
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("无法创建 pixmap ({}x{})", width, height))?;
     resvg::render(
@@ -409,30 +440,135 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 把 #rrggbb / #rgb 十六进制颜色字符串解析为 printpdf Color::Rgb（0..1 浮点）。
+/// 无法解析返回 None（调用方按默认色处理）。支持大写/小写/3 位/6 位。
+fn hex_to_pdf_color(hex: &str) -> Option<printpdf::Color> {
+    let h = hex.trim().strip_prefix('#')?;
+    let (r, g, b) = match h.len() {
+        6 => {
+            let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+            (r, g, b)
+        }
+        3 => {
+            let r = u8::from_str_radix(&h[0..1].repeat(2), 16).ok()?;
+            let g = u8::from_str_radix(&h[1..2].repeat(2), 16).ok()?;
+            let b = u8::from_str_radix(&h[2..3].repeat(2), 16).ok()?;
+            (r, g, b)
+        }
+        _ => return None,
+    };
+    Some(printpdf::Color::Rgb(printpdf::Rgb::new(
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        None,
+    )))
+}
+
 fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
     let width_mm = page.width * 0.264583;
     let height_mm = page.height * 0.264583;
+    // 像素→mm 转换因子（1 px = 0.264583 mm @ 96 DPI）。
+    let px_to_mm = 0.264583_f32;
 
     let mut ops = Vec::new();
+    // 先画形状（rect/circle），再画文字，保证文字在形状之上不被遮挡。
     for el in &page.elements {
-        if el.kind == "text" {
-            let text = el.text.as_deref().unwrap_or("");
-            let fs = el.font_size.unwrap_or(12.0);
-            ops.push(printpdf::ops::Op::StartTextSection);
-            ops.push(printpdf::ops::Op::SetFont {
-                font: printpdf::ops::PdfFontHandle::Builtin(printpdf::BuiltinFont::Helvetica),
-                size: printpdf::Pt(fs),
-            });
-            ops.push(printpdf::ops::Op::SetTextCursor {
-                pos: printpdf::graphics::Point::new(
-                    printpdf::Mm(el.x * 0.264583),
-                    printpdf::Mm(height_mm - el.y * 0.264583 - fs * 0.264583),
-                ),
-            });
-            ops.push(printpdf::ops::Op::ShowText {
-                items: vec![printpdf::text::TextItem::Text(text.to_string())],
-            });
-            ops.push(printpdf::ops::Op::EndTextSection);
+        match el.kind.as_str() {
+            "rect" => {
+                let fill = el.fill.as_deref().and_then(hex_to_pdf_color);
+                let stroke = el.stroke.as_deref().and_then(hex_to_pdf_color);
+                if fill.is_none() && stroke.is_none() {
+                    continue;
+                }
+                ops.push(printpdf::ops::Op::SaveGraphicsState);
+                let mode = match (&fill, &stroke) {
+                    (Some(_), Some(_)) => printpdf::graphics::PaintMode::FillStroke,
+                    (Some(_), None) => printpdf::graphics::PaintMode::Fill,
+                    (None, Some(_)) => printpdf::graphics::PaintMode::Stroke,
+                    (None, None) => printpdf::graphics::PaintMode::Fill,
+                };
+                if let Some(c) = &fill {
+                    ops.push(printpdf::ops::Op::SetFillColor { col: c.clone() });
+                }
+                if let Some(c) = &stroke {
+                    ops.push(printpdf::ops::Op::SetOutlineColor { col: c.clone() });
+                    if let Some(sw) = el.stroke_width {
+                        ops.push(printpdf::ops::Op::SetOutlineThickness {
+                            pt: printpdf::Pt(sw),
+                        });
+                    }
+                }
+                // PDF 原点左下、y 向上；画布左上、y 向下。
+                let pdf_y = height_mm - el.y * px_to_mm - el.h * px_to_mm;
+                let mut rect = printpdf::graphics::Rect::from_xywh(
+                    printpdf::Pt(el.x * px_to_mm),
+                    printpdf::Pt(pdf_y),
+                    printpdf::Pt(el.w * px_to_mm),
+                    printpdf::Pt(el.h * px_to_mm),
+                );
+                rect.mode = Some(mode);
+                ops.push(printpdf::ops::Op::DrawRectangle { rectangle: rect });
+                ops.push(printpdf::ops::Op::RestoreGraphicsState);
+            }
+            "circle" => {
+                let fill = el.fill.as_deref().and_then(hex_to_pdf_color);
+                let stroke = el.stroke.as_deref().and_then(hex_to_pdf_color);
+                if fill.is_none() && stroke.is_none() {
+                    continue;
+                }
+                let cx = el.x + el.w / 2.0;
+                let cy = el.y + el.h / 2.0;
+                let r = el.w.min(el.h) / 2.0;
+                ops.push(printpdf::ops::Op::SaveGraphicsState);
+                let mode = match (&fill, &stroke) {
+                    (Some(_), Some(_)) => printpdf::graphics::PaintMode::FillStroke,
+                    (Some(_), None) => printpdf::graphics::PaintMode::Fill,
+                    (None, Some(_)) => printpdf::graphics::PaintMode::Stroke,
+                    (None, None) => printpdf::graphics::PaintMode::Fill,
+                };
+                if let Some(c) = &fill {
+                    ops.push(printpdf::ops::Op::SetFillColor { col: c.clone() });
+                }
+                if let Some(c) = &stroke {
+                    ops.push(printpdf::ops::Op::SetOutlineColor { col: c.clone() });
+                    if let Some(sw) = el.stroke_width {
+                        ops.push(printpdf::ops::Op::SetOutlineThickness {
+                            pt: printpdf::Pt(sw),
+                        });
+                    }
+                }
+                // 圆用 4 段三次贝塞尔近似（magic number 0.5523）。PDF 坐标系 y 翻转。
+                let pdf_cy = height_mm - cy * px_to_mm;
+                let cx_pt = printpdf::Pt(cx * px_to_mm);
+                let r_pt = r * px_to_mm;
+                let k = 0.5523_f32 * r_pt;
+                let poly = circle_polygon(printpdf::Pt(pdf_cy), cx_pt, printpdf::Pt(r_pt), k, mode);
+                ops.push(printpdf::ops::Op::DrawPolygon { polygon: poly });
+                ops.push(printpdf::ops::Op::RestoreGraphicsState);
+            }
+            "text" => {
+                let text = el.text.as_deref().unwrap_or("");
+                let fs = el.font_size.unwrap_or(12.0);
+                ops.push(printpdf::ops::Op::StartTextSection);
+                ops.push(printpdf::ops::Op::SetFont {
+                    font: printpdf::ops::PdfFontHandle::Builtin(printpdf::BuiltinFont::Helvetica),
+                    size: printpdf::Pt(fs),
+                });
+                ops.push(printpdf::ops::Op::SetTextCursor {
+                    pos: printpdf::graphics::Point::new(
+                        printpdf::Mm(el.x * px_to_mm),
+                        printpdf::Mm(height_mm - el.y * px_to_mm - fs * px_to_mm),
+                    ),
+                });
+                ops.push(printpdf::ops::Op::ShowText {
+                    items: vec![printpdf::text::TextItem::Text(text.to_string())],
+                });
+                ops.push(printpdf::ops::Op::EndTextSection);
+            }
+            _ => {}
         }
     }
 
@@ -448,6 +584,128 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
     std::fs::write(file, &pdf_data)?;
     tracing::info!(?file, warnings = warnings.len(), "PDF 已导出");
     Ok(())
+}
+
+/// 用 4 段三次贝塞尔近似圆，构造 printpdf Polygon（含控制点）。
+/// 中心 (cx, cy_pt)，半径 r_pt，k 为控制点偏移（0.5523*r）。
+fn circle_polygon(
+    cy_pt: printpdf::Pt,
+    cx: printpdf::Pt,
+    r_pt: printpdf::Pt,
+    k: f32,
+    mode: printpdf::graphics::PaintMode,
+) -> printpdf::graphics::Polygon {
+    use printpdf::graphics::{LinePoint, Point};
+    // 4 个锚点：右、上、左、下（PDF y 向上）。
+    let p_right = Point {
+        x: printpdf::Pt(cx.0 + r_pt.0),
+        y: cy_pt,
+    };
+    let p_top = Point {
+        x: cx,
+        y: printpdf::Pt(cy_pt.0 + r_pt.0),
+    };
+    let p_left = Point {
+        x: printpdf::Pt(cx.0 - r_pt.0),
+        y: cy_pt,
+    };
+    let p_bottom = Point {
+        x: cx,
+        y: printpdf::Pt(cy_pt.0 - r_pt.0),
+    };
+    // 每段两个控制点（bezier=true）。
+    let c1a = Point {
+        x: printpdf::Pt(cx.0 + r_pt.0),
+        y: printpdf::Pt(cy_pt.0 + k),
+    };
+    let c1b = Point {
+        x: printpdf::Pt(cx.0 + k),
+        y: printpdf::Pt(cy_pt.0 + r_pt.0),
+    };
+    let c2a = Point {
+        x: printpdf::Pt(cx.0 - k),
+        y: printpdf::Pt(cy_pt.0 + r_pt.0),
+    };
+    let c2b = Point {
+        x: printpdf::Pt(cx.0 - r_pt.0),
+        y: printpdf::Pt(cy_pt.0 + k),
+    };
+    let c3a = Point {
+        x: printpdf::Pt(cx.0 - r_pt.0),
+        y: printpdf::Pt(cy_pt.0 - k),
+    };
+    let c3b = Point {
+        x: printpdf::Pt(cx.0 - k),
+        y: printpdf::Pt(cy_pt.0 - r_pt.0),
+    };
+    let c4a = Point {
+        x: printpdf::Pt(cx.0 + k),
+        y: printpdf::Pt(cy_pt.0 - r_pt.0),
+    };
+    let c4b = Point {
+        x: printpdf::Pt(cx.0 + r_pt.0),
+        y: printpdf::Pt(cy_pt.0 - k),
+    };
+    let points = vec![
+        LinePoint {
+            p: p_right,
+            bezier: false,
+        },
+        LinePoint {
+            p: c1a,
+            bezier: true,
+        },
+        LinePoint {
+            p: c1b,
+            bezier: true,
+        },
+        LinePoint {
+            p: p_top,
+            bezier: false,
+        },
+        LinePoint {
+            p: c2a,
+            bezier: true,
+        },
+        LinePoint {
+            p: c2b,
+            bezier: true,
+        },
+        LinePoint {
+            p: p_left,
+            bezier: false,
+        },
+        LinePoint {
+            p: c3a,
+            bezier: true,
+        },
+        LinePoint {
+            p: c3b,
+            bezier: true,
+        },
+        LinePoint {
+            p: p_bottom,
+            bezier: false,
+        },
+        LinePoint {
+            p: c4a,
+            bezier: true,
+        },
+        LinePoint {
+            p: c4b,
+            bezier: true,
+        },
+        // 闭合回起点。
+        LinePoint {
+            p: p_right,
+            bezier: false,
+        },
+    ];
+    printpdf::graphics::Polygon {
+        rings: vec![printpdf::graphics::PolygonRing { points }],
+        mode,
+        winding_order: printpdf::graphics::WindingOrder::default(),
+    }
 }
 
 #[cfg(test)]
@@ -509,6 +767,27 @@ mod tests {
         assert!(content.contains("font-size"));
     }
 
+    // E-21 回归：<title> 中 page.name 含 </title><script> 应被转义，不得执行脚本。
+    #[test]
+    fn export_html_escapes_title_xss() {
+        let tmp = tempdir().unwrap();
+        let page = CanvasPage {
+            id: "xss".into(),
+            name: "</title><script>alert(1)</script>".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![],
+        };
+        let file = Exporter::export_page(&page, ExportFormat::Html, tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !content.contains("<script>alert(1)</script>"),
+            "原始 <script> 不得残留"
+        );
+        assert!(content.contains("&lt;script&gt;"), "应被转义为实体");
+        assert!(content.contains("&lt;/title&gt;"), "</title> 应被转义");
+    }
+
     #[test]
     fn export_svg_writes_file() {
         let tmp = tempdir().unwrap();
@@ -549,6 +828,147 @@ mod tests {
         let file = Exporter::export_page(&page, ExportFormat::Pdf, tmp.path()).unwrap();
         let data = std::fs::read(&file).unwrap();
         assert!(data.starts_with(b"%PDF"), "PDF magic bytes");
+    }
+
+    // R-A15 回归：rect/circle 必须真正画入 PDF，不能只输出文字导致白纸。
+    fn pdf_content(page: &CanvasPage, dir: &Path) -> String {
+        let file = Exporter::export_page(page, ExportFormat::Pdf, dir).unwrap();
+        let data = std::fs::read(&file).unwrap();
+        String::from_utf8_lossy(&data).to_string()
+    }
+
+    #[test]
+    fn render_pdf_rect_emits_rectangle_op() {
+        let tmp = tempdir().unwrap();
+        let rect_page = CanvasPage {
+            id: "r".into(),
+            name: "R".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "rect".into(),
+                x: 10.0,
+                y: 10.0,
+                w: 40.0,
+                h: 40.0,
+                fill: Some("#ff0000".into()),
+                stroke: None,
+                stroke_width: None,
+                text: None,
+                radius: None,
+                opacity: None,
+                font_size: None,
+                font_family: None,
+                rotation: None,
+            }],
+        };
+        let empty = CanvasPage {
+            id: "e".into(),
+            name: "E".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![],
+        };
+        let with_rect = pdf_content(&rect_page, tmp.path());
+        let empty_pdf = pdf_content(&empty, tmp.path());
+        assert!(with_rect.contains(" re"), "rect 应生成 PDF re 矩形算子");
+        assert!(
+            with_rect.contains(" rg"),
+            "fill #ff0000 应生成 rg 填充色算子"
+        );
+        assert!(
+            !empty_pdf.contains(" re"),
+            "空页面不应含 re 矩形算子（对照基线）"
+        );
+    }
+
+    #[test]
+    fn render_pdf_circle_emits_fill_color_op() {
+        let tmp = tempdir().unwrap();
+        let circle_page = CanvasPage {
+            id: "c".into(),
+            name: "C".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "circle".into(),
+                x: 10.0,
+                y: 10.0,
+                w: 40.0,
+                h: 40.0,
+                fill: Some("#00ff00".into()),
+                stroke: Some("#000000".into()),
+                stroke_width: Some(1.0),
+                text: None,
+                radius: None,
+                opacity: None,
+                font_size: None,
+                font_family: None,
+                rotation: None,
+            }],
+        };
+        let with_circle = pdf_content(&circle_page, tmp.path());
+        assert!(
+            with_circle.contains(" rg"),
+            "circle fill 应生成 rg 填充色算子"
+        );
+        assert!(
+            with_circle.contains(" RG"),
+            "circle stroke 应生成 RG 描边色算子"
+        );
+    }
+
+    #[test]
+    fn render_pdf_hex_color_invalid_skipped_not_panic() {
+        let tmp = tempdir().unwrap();
+        let page = CanvasPage {
+            id: "x".into(),
+            name: "X".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "rect".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+                fill: Some("not-a-color".into()),
+                stroke: Some("#zzz".into()),
+                stroke_width: Some(2.0),
+                text: None,
+                radius: None,
+                opacity: None,
+                font_size: None,
+                font_family: None,
+                rotation: None,
+            }],
+        };
+        let content = pdf_content(&page, tmp.path());
+        assert!(
+            content.starts_with("%PDF"),
+            "非法颜色不应 panic，仍输出有效 PDF"
+        );
+    }
+
+    // R-A16 回归：总像素超限（单边不超限）应拒绝渲染，防 1GB OOM。
+    // 9000×9000=81M px > 64M，但单边 < 16384，必须由总像素门控拦下。
+    #[test]
+    fn render_png_rejects_total_pixels_over_limit() {
+        let tmp = tempdir().unwrap();
+        let huge = CanvasPage {
+            id: "h".into(),
+            name: "H".into(),
+            width: 9000.0,
+            height: 9000.0,
+            elements: vec![],
+        };
+        let res = Exporter::export_page(&huge, ExportFormat::Png, tmp.path());
+        let err = res.expect_err("9000×9000=81M px > 64M 应被总像素门控拒绝，不分配 1GB");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("总像素") || msg.contains("超出"),
+            "应报总像素超限，实际: {msg}"
+        );
     }
 
     #[test]
@@ -683,6 +1103,41 @@ mod tests {
         assert_eq!(sanitize_filename("Hello/World"), "Hello_World");
         assert_eq!(sanitize_filename("Page 1"), "Page_1");
         assert_eq!(sanitize_filename("ok-name_123"), "ok-name_123");
+    }
+
+    #[test]
+    fn sanitize_filename_empty_defaults_to_page() {
+        // E-20/P3：空名/全非法字符须回退 "page"，不得产出 ".svg" 隐藏文件。
+        assert_eq!(sanitize_filename(""), "page");
+        assert_eq!(sanitize_filename("   "), "___"); // 3 空格→3 下划线非空
+        assert_eq!(sanitize_filename("///"), "___"); // 3 斜杠→3 下划线非空
+        assert_eq!(sanitize_filename("!!!"), "___"); // 3 感叹号→3 下划线非空
+    }
+
+    #[test]
+    fn export_empty_name_page_not_hidden_file() {
+        // E-20/P3：空名页面导出文件名须为 "page.svg" 非 ".svg"（隐藏文件）。
+        let tmp = tempdir().unwrap();
+        let page = CanvasPage {
+            id: "p1".into(),
+            name: "".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![],
+        };
+        Exporter::export_batch(&[page], ExportFormat::Svg, tmp.path()).unwrap();
+        let files: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            files.iter().any(|f| f == "page.svg"),
+            "空名导出 page.svg 非 .svg: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|f| f == ".svg"),
+            "不得产出隐藏 .svg: {files:?}"
+        );
     }
 
     #[test]
