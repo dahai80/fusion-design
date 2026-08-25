@@ -141,6 +141,13 @@ pub enum HostConfigError {
 ///
 /// 在真实 Swift 宿主中，对应 `WKURLSchemeHandler` 注入；
 /// 此处提供 Rust 侧的判定逻辑，供后端服务复用。
+///
+/// H-A17 离线分工：此函数判 **URL scheme/host**（file:// 放行、javascript:/data:
+/// 拒绝、http(s) 仅 localhost），供 WKWebView 前端资源拦截；fd-ai-adapter 的
+/// `validate_localhost` 判 **MLX endpoint host**（回环+RFC1918+链路本地），供
+/// 后端 HTTP 出站。二者非重复——分守前端资源与后端推理两道离线边界。出站 HTTP
+/// 库的全局约束由 `Scripts/deny-external-http.sh` CI 门禁强制（reqwest 等仅限
+/// fd-ai-adapter）。
 pub fn is_external_url(url: &str) -> bool {
     // F2/离线强制：allowlist 判定。
     //   内部 = file://（本地资源，离线前端入口）或 http/https 且 host∈白名单。

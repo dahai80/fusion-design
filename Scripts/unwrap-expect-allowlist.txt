@@ -3,8 +3,6 @@ crates/fd-ai-adapter/src/lib.rs:.expect("DEFAULT_MLX_ENDPOINT 必为合法 local
 crates/fd-ai-adapter/src/lib.rs:let any_sel = Selector::parse("*").unwrap();
 crates/fd-ai-adapter/src/lib.rs:let body_sel = Selector::parse("body").unwrap();
 crates/fd-ai-adapter/src/lib.rs:let root_sel = Selector::parse(":root > *").unwrap_or_else(|_| Selector::parse("*").unwrap());
-crates/fd-canvas-core/src/lib.rs:.expect("VersionedDocument 至少含一个版本（构造保证）")
-crates/fd-canvas-core/src/lib.rs:self.versions.last().unwrap()
 crates/fd-host-web/src/lib.rs:.unwrap()
 crates/fd-host-web/src/lib.rs:let doc = web_sys::window().unwrap().document().unwrap();
 crates/fd-host-web/src/lib.rs:let doc2 = web_sys::window().unwrap().document().unwrap();

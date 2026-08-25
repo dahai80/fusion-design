@@ -2,7 +2,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.12 — 11 crates + vendored op-ai, 433 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制（回环+RFC1918+链路本地，拒公网）、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；死代码清理（fd-asset 整 crate、Taffy compute_layout、apply_patch、fd-ecosystem MCP+watch_async）；chat NDJSON 对齐 studio schema（delta/chat_done/error）；CI 零 panic 双门禁（deny-panic + deny-unwrap-expect，allowlist 基线）；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分/离线边界 对抗回归测试。
+**Status**: v0.1.12 — 11 crates + vendored op-ai, 419 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制（回环+RFC1918+链路本地，拒公网）、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；死代码清理（fd-asset 整 crate、Taffy compute_layout、apply_patch、fd-ecosystem MCP+watch_async、VersionedDocument/NamedVersion）；chat NDJSON 对齐 studio schema（delta/chat_done/error）；CI 三道零越界门禁（deny-panic + deny-unwrap-expect allowlist 基线 + deny-external-http 仅限 fd-ai-adapter 出站 HTTP）；P2/P3 收尾：E-14 截断文件告警、P2-3/R-A2 IPC consume 非破坏（解析失败保留文件不静默吞错）、H-A11 resolve_tokens 递归子节点 token 解析 + CLI codegen 接线、H-A17 离线分工文档化 + CI 出站 HTTP 审计门禁、TC-4 gateway 假绿真推理探针回归测试；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分/离线边界/截断文件/IPC 非破坏/假绿探针对抗回归测试。
 
 ## 📋 Overview
 
@@ -38,7 +38,8 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 9. **Full-featured CLI** — generate / export / export-batch / lint --fix / undo / redo / health / diff / theme / chat（机器可读流式 NDJSON，供 fusion-studio subprocess 取代直连 MLX，issue #17）
 10. **Design spec document generation** — AI auto-generates interaction specs / component specs / page architecture docs (SpecDocSkill)
 11. **Page flow batch generation** — AI generates multi-page layouts from flow descriptions with unified style (PageFlowSkill)
-12. **Named version management** — version snapshots / switching / renaming / deletion / adjacent diff comparison
+12. **Named version management (REMOVED)** — version snapshots / switching / renaming / deletion / adjacent diff comparison
+   > **死代码清理（H-A14/P2-4）**：`VersionedDocument`/`NamedVersion` 命名版本 API（save_version/switch_to/diff_versions 等）跨 crate 零生产消费者，`.fusiondesign` 实存裸 `PenDocument`，CLI undo/redo 走独立 `UndoRedoStack`。审计定性「260 行死代码」，save_version 同时入版本表+undo 栈致进程内双份深拷贝。已整段移除（同 H-A13 apply_patch）；随同移除 uuid_v4/now_iso/civil_from_days/VERSION_SEQ/MAX_VERSIONED_FILE_BYTES。撤销/重做能力不受影响（feature 8 的 `UndoRedoStack` 独立提供）。如未来需命名版本，按 delta-COW 设计，勿复活整快照方案。
 13. **Built-in scene templates** — 4 preset categories (mobile app / admin dashboard / marketing site / mini program), one-click install
 
 ## 🗂️ Project Structure
@@ -46,7 +47,7 @@ Fusion-Design is one of the flagship products in the Fusion-MLX "one core, nine 
 ```
 fusion-design/
 ├── crates/                     ← Fusion-Design custom Rust crates (workspace)
-│   ├── fd-canvas-core/         ← Canvas data model (PenDocument/PenNode + UndoRedo/Diff + VersionedDocument, Flex/Grid layout declarations)
+│   ├── fd-canvas-core/         ← Canvas data model (PenDocument/PenNode + UndoRedo/Diff, Flex/Grid layout declarations)
 │   ├── fd-ai-adapter/          ← op-ai → fusion-mlx adapter (SSE streaming / multimodal vision / 7 Skills)
 │   ├── fd-codegen/             ← HTML/React+Tailwind code export (layout-aware Flex/Grid CSS)
 │   ├── fd-design-system/       ← Three built-in design specs (Apple HIG / minimal dashboard / robot-sim) + Token + Light/Dark themes
@@ -77,8 +78,9 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # Full workspace compiles
-cargo test --workspace                                         # 433 tests pass (+1 ignored perf baseline)
+cargo test --workspace                                         # 419 tests pass (+1 ignored perf baseline)
 bash Scripts/deny-unwrap-expect.sh                             # 零 unwrap/expect 门禁（allowlist 基线）
+bash Scripts/deny-external-http.sh                             # 出站 HTTP 仅限 fd-ai-adapter（离线硬约束）
 cargo test --release -- --ignored perf_baseline                # 1000-node perf baseline (<500ms each)
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM build succeeds
 cargo run -p fd-cli -- --help                                  # CLI available
@@ -97,7 +99,7 @@ cargo run -p fd-cli -- --help                                  # CLI available
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|
-| fd-canvas-core | 60+ | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, version management, **安全护栏**, perf baseline |
+| fd-canvas-core | 46 | PenDocument CRUD, UndoRedo, Diff/Patch, JSON round-trip, layout, **安全护栏**, perf baseline |
 | fd-ai-adapter | 85 | Mock HTTP, SSE streaming, health check, **深度可用性探针（鉴权/模型/真推理）**, multimodal vision, SpecDoc/PageFlow, **E2E 生产路径**, endpoint 解析, **CJK SSE 跨 chunk 切分**, **H-A7 ChatProvider 增量分块** |
 | fd-design-lint | 41 | 13 lint rules, auto-fix, apply_tokens, FixResult serialization |
 | fd-design-system | 25 | Token, Theme, Registry, CSS output, 3 built-in presets (incl. robot-sim) |

@@ -73,14 +73,22 @@ def test_block_ranges(lines):
                     if c == '\\': k += 2; continue
                     if c == "'": in_char = False
                     k += 1; continue
-                # 原始字符串：r/b 后跟 N 个 # 再跟 "（r#".."# / r".." / b#".."#）
+                # 字节串/原始字符串：r/b 后跟 N 个 # 再跟 "（b".." / r".." / r#".."#）
+                # h==0：零 # 的 b".." / r".."——开口 " 后无 # 闭合符，原逻辑置 raw_hashes=0
+                # 但 `if raw_hashes:` 守卫（0=falsy）跳过闭合判定，开口 " 被吞而 in_str 未置，
+                # 串内容被当代码扫描，吞掉其中的 { 致花括号深度提前归零、test 块提前闭合，
+                # 后续测试代码 .unwrap() 被误报为生产站点（fd-export b"%PDF" 即此例）。
+                # 修：h==0 按普通字符串处理（置 in_str=True，闭合 " 走正常路径）；h>0 走原始串。
                 if c in ('r', 'b') and (nxt == '"' or nxt == '#'):
                     h = 0
                     j = k + 1
                     while j < len(text) and text[j] == '#':
                         h += 1; j += 1
                     if j < len(text) and text[j] == '"':
-                        raw_hashes = h
+                        if h == 0:
+                            in_str = True
+                        else:
+                            raw_hashes = h
                         k = j + 1; continue
                 if c == '/' and nxt == '/': in_line = True; k += 2; continue
                 if c == '/' and nxt == '*': in_block = True; k += 2; continue
