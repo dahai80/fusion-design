@@ -40,15 +40,16 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 url = "2"
 futures = "0.3"
 base64 = "0.22"
-image = "0.25"
+# image 已从 workspace.dependencies 移除（E-35：零 crate 引用 workspace=true，死声明；
+# 且 caret 0.25.x 子版本行为漂移风险因无引用而不存在）。
 
 # OpenPencil crate（path dep，vendored 子集）
 op-ai = { path = "vendor/openpencil/crates/op-ai" }
 # 以下 op-* 因依赖私有 jian-ops-schema 无法引入，已自建替身：
 #   op-editor-core → fd-canvas-core（PenDocument/PenNode 数据模型）
 #   op-codegen     → fd-codegen（HTML/React+Tailwind 生成）
-#   op-mcp         → fd-ecosystem 自建 MCP 协议层（McpServer/McpTool）
-# op-design-lint 暂未落地，后续按需自建。
+#   op-design-lint → fd-design-lint（自建 13 检测器替身）
+# op-mcp 未自建替代（H-A3/P2-2 已移除不合规的自建 MCP 层，无法被标准 MCP client 接入）。
 
 [profile.release]
 strip = true

@@ -31,13 +31,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy (all targets)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Workspace compile check
-        run: cargo check --workspace
+        run: cargo check --workspace --locked
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: WASM build (fd-host-web)
         run: cargo build -p fd-host-web --target wasm32-unknown-unknown
@@ -60,10 +60,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Workspace compile check
-        run: cargo check --workspace
+        run: cargo check --workspace --locked
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   # 依赖漏洞门禁（商用加固项 #1）。
   # 修复 E-34：原 continue-on-error: true 致已知 RUSTSEC 通告随发布上线不阻断。

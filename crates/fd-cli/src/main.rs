@@ -66,8 +66,21 @@ pub enum Command {
         #[arg(long)]
         stream: bool,
     },
-    /// 机器可读流式 chat：供 fusion-studio subprocess 调用，取代直连 MLX。
+    /// 机器可读流式 chat：CLI/脚本管道用的流式 NDJSON 推理接口。
     /// 鉴权 / X-Fusion-Route header / endpoint 解析复用 fd-ai-adapter，调用方不重实现。
+    ///
+    /// 消费方声明（issue #17 诚实回溯）：issue #17 设想此子命令为 fusion-studio
+    /// subprocess 入口取代直连 MLX，但经核实 studio 实际走 fusion-gateway TCP
+    /// NDJSON（StreamingBridge.swift，帧 schema 为 chat_event/chat_done/error +
+    /// session_id/event），**不经 fd-cli chat**。故本子命令当前无 studio 消费方，
+    /// 供 CLI 管道/脚本/测试消费。NDJSON 帧 schema（delta/chat_done/error）为
+    /// 本子命令自洽契约，非对齐 studio（studio 用 chat_event 非 delta）。
+    ///
+    /// 流式与 gateway：默认 endpoint 经 fusion-gateway(11432)。gateway 流式转发
+    /// 存在已知 502 bug（fusion-gateway#108：stream=true 时连接拒绝，非流式正常）。
+    /// 流式场景建议 `FUSION_MLX_BASE_URL=http://127.0.0.1:11434` 直连 MLX 绕过 gateway。
+    /// 默认 model 名仅为占位，实际模型随 MLX 部署而变，建议显式传 `--model` 本地
+    /// 已加载模型 id（可用 `check-mlx --endpoint ...` 探测真可用性）。
     Chat {
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
@@ -678,10 +691,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(model = %model, count = messages.len(), "chat: 流式推理开始");
 
-            // NDJSON 成帧输出：delta / chat_done / error
-            // H-A16/P1-8：done → chat_done，对齐 fusion-studio StreamingBridge.swift
-            // 既有 schema（:187,319,325 期望 delta/chat_done/error）。
-            // issue #17 落地时 studio 工程师按此契约接 fd-cli chat，零成本冻结期已对齐。
+            // NDJSON 成帧输出：delta / chat_done / error（本子命令自洽契约）。
+            // H-A16/P1-8 回溯：issue #17 设想 studio 经此契约接 fd-cli，但核实 studio
+            // 走 gateway TCP chat_event/chat_done/error，不经 fd-cli。此 schema 供
+            // CLI 管道消费，非对齐 studio。
             if stream && json {
                 let s =
                     fd_ai_adapter::chat_stream_messages(client, model, messages, max_tokens).await;
@@ -1071,8 +1084,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-// H-A16/P1-8：NDJSON 成帧函数抽出为纯函数，便于回归测试契约对齐 studio。
-// 三帧 schema：delta / chat_done / error（对齐 StreamingBridge.swift）。
+// H-A16/P1-8：NDJSON 成帧函数抽出为纯函数，便于回归测试本子命令自洽契约。
+// 三帧 schema：delta / chat_done / error。注：studio 走 gateway TCP 用 chat_event
+// 非 delta，此 schema 供 CLI 管道消费，非对齐 studio（见 Chat 子命令 doc）。
 fn ndjson_frame_delta(token: &str) -> serde_json::Value {
     serde_json::json!({"type":"delta","token":token})
 }
@@ -1248,10 +1262,11 @@ mod tests {
         }
     }
 
-    // H-A16 回归：NDJSON 三帧 schema 必须对齐 fusion-studio StreamingBridge.swift
-    // （:187,319,325 期望 delta/chat_done/error）。任一 type 字符串漂移即破坏契约。
+    // H-A16 回归：NDJSON 三帧 schema 为本子命令自洽契约（delta/chat_done/error）。
+    // 注：studio 走 gateway TCP 用 chat_event 非 delta，此测试守护 CLI 管道契约，
+    // 非对齐 studio schema。任一 type 字符串漂移即破坏 CLI 消费方。
     #[test]
-    fn ndjson_delta_frame_matches_studio_schema() {
+    fn ndjson_delta_frame_contract() {
         let frame = ndjson_frame_delta("你");
         assert_eq!(frame["type"], "delta", "delta 帧 type 必须为 delta");
         assert_eq!(frame["token"], "你", "delta 帧 token 透传原文");
@@ -1262,13 +1277,13 @@ mod tests {
         let frame = ndjson_frame_done();
         assert_eq!(
             frame["type"], "chat_done",
-            "H-A16：done 已对齐 studio 的 chat_done，回退 done 即破坏契约"
+            "done 帧 type 必须为 chat_done，回退 done 即破坏 CLI 管道契约"
         );
         assert_eq!(frame["finish_reason"], "stop");
     }
 
     #[test]
-    fn ndjson_error_frame_matches_studio_schema() {
+    fn ndjson_error_frame_contract() {
         let frame = ndjson_frame_error("连接失败");
         assert_eq!(frame["type"], "error");
         assert_eq!(frame["message"], "连接失败");
