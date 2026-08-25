@@ -113,6 +113,20 @@ jobs:
       - name: Scan for new bare .unwrap()/.expect() outside allowlist
         run: bash Scripts/deny-unwrap-expect.sh
 
+  # 离线硬约束全局审计（审计 H-A17）。
+  # CLAUDE.md 声明「100% 离线，唯一 HTTP 至 127.0.0.1」，但无全局钩子——新增 crate
+  # 引入出站 HTTP 库即静默绕过。本 job 在 CI 层强制出站 HTTP 库（reqwest/ureq/hyper
+  # 等）只允许出现在 fd-ai-adapter（唯一发 HTTP 的 crate），其余 crate 依赖声明或
+  # src 调用即失败。离线从「建议」升级为「CI 强制」。
+  deny-external-http:
+    name: deny outbound HTTP outside fd-ai-adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit outbound HTTP libs confined to fd-ai-adapter
+        run: bash Scripts/deny-external-http.sh
+
   # 发布打包：tag 触发，阻断（修复 E-34）。
   # 原 continue-on-error: true 致 tag 推送时 tarball 静默失败，CI 绿但用户无包。
   # release 是 outward-facing 交付物，失败必须红——runner 供给问题用重试/缓存解，

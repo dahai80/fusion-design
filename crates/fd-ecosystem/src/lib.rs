@@ -256,16 +256,29 @@ impl EcosystemLink {
     }
 
     /// 读取并删除一条消息（消费式）。含大小护栏，防恶意大文件 OOM。
+    ///
+    /// H-A3/P2-3：破坏性消费（读后即删），仅适用于**单消费者**场景。多消费者
+    /// 并发监听同一目录会互相吞消息且无报错——当前 fusion-design 为单进程 CLI，
+    /// 无第二消费者。如未来引入多消费者，须改为租约/ACK 或 move-to-processed，
+    /// 勿直接复用此方法。
+    /// R-A2：解析失败时**不删文件**（保留供诊断），返回 Err 含文件路径，避免
+    /// 损坏文件被静默丢弃后无从定位。调用方须显式处理 Err（见 watch_code_changes）。
     pub fn consume(&self, file: &Path) -> anyhow::Result<LinkMessage> {
-        let meta = std::fs::metadata(file)?;
+        let meta = std::fs::metadata(file)
+            .map_err(|e| anyhow::anyhow!("读取 IPC 消息元数据失败 {}: {e}", file.display()))?;
         const MAX_IPC_FILE: u64 = 8 * 1024 * 1024;
         if meta.len() > MAX_IPC_FILE {
             tracing::warn!(size = meta.len(), "IPC 消息文件超过 8MB 上限，拒绝读取");
             anyhow::bail!("IPC 消息文件 {} 超过 8MB 安全上限", file.display());
         }
-        let json = std::fs::read_to_string(file)?;
-        let msg: LinkMessage = serde_json::from_str(&json)?;
-        std::fs::remove_file(file)?;
+        let json = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("读取 IPC 消息文件失败 {}: {e}", file.display()))?;
+        let msg: LinkMessage = serde_json::from_str(&json).map_err(|e| {
+            // R-A2：解析失败不删文件，保留供诊断，显式报错路径。
+            anyhow::anyhow!("解析 IPC 消息失败 {}（文件保留未删）: {e}", file.display())
+        })?;
+        std::fs::remove_file(file)
+            .map_err(|e| anyhow::anyhow!("消费后删除 IPC 消息文件失败 {}: {e}", file.display()))?;
         Ok(msg)
     }
 
@@ -341,33 +354,45 @@ impl EcosystemLink {
         let messages = self.list(EcosystemTarget::FusionCode)?;
         let mut commands = vec![];
         for file in &messages {
-            if let Ok(msg) = self.consume(file) {
-                if msg.action == "style-change" {
-                    if let Some(arr) = msg.payload.get("mutations").and_then(|v| v.as_array()) {
-                        // E-18/P3：旧实现对 parse_mutate_command 返回 None 静默丢弃，
-                        // 解析失败的 mutation 项无任何告警，调试无从定位。统计并显式告警。
-                        let total = arr.len();
-                        let mut dropped = 0usize;
-                        for item in arr {
-                            match parse_mutate_command(item) {
-                                Some(cmd) => commands.push(cmd),
-                                None => {
-                                    dropped += 1;
-                                    tracing::warn!(
-                                        item = %item,
-                                        "watch_code_changes: mutation 解析失败被丢弃（非对象或缺 node_id）"
-                                    );
+            // R-A2/P2-3：旧实现 `if let Ok` 静默吞所有 consume Err——损坏文件既不 log
+            // 也不清理，永久滞留目录反复失败（僵尸消息），违反 fail visibly。改为
+            // 显式 match，Err 时 warn 文件路径（consume 已保留损坏文件供诊断）。
+            match self.consume(file) {
+                Ok(msg) => {
+                    if msg.action == "style-change" {
+                        if let Some(arr) = msg.payload.get("mutations").and_then(|v| v.as_array()) {
+                            // E-18/P3：旧实现对 parse_mutate_command 返回 None 静默丢弃，
+                            // 解析失败的 mutation 项无任何告警，调试无从定位。统计并显式告警。
+                            let total = arr.len();
+                            let mut dropped = 0usize;
+                            for item in arr {
+                                match parse_mutate_command(item) {
+                                    Some(cmd) => commands.push(cmd),
+                                    None => {
+                                        dropped += 1;
+                                        tracing::warn!(
+                                            item = %item,
+                                            "watch_code_changes: mutation 解析失败被丢弃（非对象或缺 node_id）"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        if dropped > 0 {
-                            tracing::warn!(
-                                total,
-                                dropped,
-                                "watch_code_changes: 本消息丢弃 {dropped}/{total} 个 mutation"
-                            );
+                            if dropped > 0 {
+                                tracing::warn!(
+                                    total,
+                                    dropped,
+                                    "watch_code_changes: 本消息丢弃 {dropped}/{total} 个 mutation"
+                                );
+                            }
                         }
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        file = %file.display(),
+                        error = %e,
+                        "watch_code_changes: 消费消息失败（文件保留未删，可能损坏/超大/并发竞争）"
+                    );
                 }
             }
         }
@@ -603,6 +628,57 @@ mod tests {
         assert_eq!(consumed.action, "export-code");
         // consume 后文件删除
         assert!(link.list(EcosystemTarget::FusionCode).unwrap().is_empty());
+    }
+
+    // R-A2：损坏文件 consume 应失败且不删文件（保留供诊断），不静默丢数据。
+    #[test]
+    fn consume_corrupt_file_preserves_and_errors() {
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        let corrupt = dir.join("corrupt.json");
+        // 半截非法 JSON（模拟 rename 被打断/磁盘满）
+        std::fs::write(&corrupt, "{ not valid json").unwrap();
+        let result = link.consume(&corrupt);
+        assert!(result.is_err(), "损坏文件应解析失败返回 Err");
+        // 关键：文件保留未删，可供诊断（非静默丢弃）
+        assert!(
+            corrupt.exists(),
+            "损坏文件应保留供诊断，不应被 consume 删除"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("保留未删"), "Err 文案应明示文件保留");
+    }
+
+    // R-A2：超大文件 consume 应拒绝且不删（保留供诊断）。
+    #[test]
+    fn consume_oversize_file_rejects_preserves() {
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.json");
+        // 写 9MB 超过 8MB 上限
+        std::fs::write(&big, "x".repeat(9 * 1024 * 1024)).unwrap();
+        let result = link.consume(&big);
+        assert!(result.is_err(), "超大文件应被拒绝");
+        assert!(big.exists(), "超大文件应保留未删");
+    }
+
+    // R-A2/P2-3：watch_code_changes 遇损坏文件不应 panic、不应静默——返回空指令
+    // 但损坏文件保留（fail visibly，由调用方日志可见）。
+    #[test]
+    fn watch_code_changes_corrupt_file_does_not_silently_swallow() {
+        let tmp = tempdir().unwrap();
+        let link = EcosystemLink::new(tmp.path());
+        let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bad.json"), "{ broken").unwrap();
+        // 应返回 Ok（空指令），不 panic；损坏文件保留供诊断。
+        let cmds = link.watch_code_changes().expect("损坏文件不应致整体失败");
+        assert!(cmds.is_empty());
+        assert!(dir.join("bad.json").exists(), "损坏文件应保留");
     }
 
     #[test]

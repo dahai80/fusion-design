@@ -23,13 +23,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 const MAX_NODE_DEPTH: usize = 64;
 const MAX_NODE_TOTAL: usize = 100_000;
 
-// H-A14/P2-4：VersionedDocument 落盘体积硬上限（字节）。
-// 命名版本各存整份快照（PenDocument deep copy），多版本下文件线性膨胀，
-// 旧实现 10000 节点×20 命名版本+50 undo 栈 = 70 深拷贝 ≈ 140-350MB，
-// WKWebView jetsam kill。undo 栈改为 session-scoped 不落盘后，
-// 命名版本数本身仍有上限——32MB 兜住 ~160 个 10000 节点版本，超限 fail visibly。
-pub const MAX_VERSIONED_FILE_BYTES: usize = 32 * 1024 * 1024;
-
 // 文件格式 schema 版本（A1：无版本号无法做向前兼容/迁移）。
 // 当前版本 1。加载时校验：缺失视作 1（兼容旧文件），高于当前视作错误。
 pub const SCHEMA_VERSION: u32 = 1;
@@ -519,9 +512,23 @@ impl PenDocument {
 
     /// 从 JSON 反序列化（anyhow 友好入口）。
     /// 安全护栏已由 `Deserialize` 实现强制（A4），此方法仅做错误类型转换。
+    ///
+    /// E-14：截断/损坏检测。`#[serde(default)]` 使被截断的文件"成功"解析成
+    /// 残缺文档（缺失 pages → 空 Vec，缺失 schema_version → 默认 1），用户打开
+    /// 看到空白画布却无任何告警，静默丢数据。此处对"原文非空但解析出全空文档"
+    /// 的可疑情形显式 warn（fail visibly），不报错以免阻断合法的新建空文档。
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
+        let trimmed = json.trim();
         let doc: PenDocument = serde_json::from_str(json)
             .map_err(|e| anyhow::anyhow!("反序列化失败（含安全护栏校验）: {e}"))?;
+        // 可疑截断：原文非空（非纯空白/空对象）但解析出零页面。提示用户文件可能损坏。
+        if !trimmed.is_empty() && trimmed != "{}" && doc.pages.is_empty() {
+            tracing::warn!(
+                input_len = json.len(),
+                pages = doc.pages.len(),
+                "from_json: 输入非空但解析出零页面，文件可能被截断/损坏（serde default 已静默补缺字段）。请检查文件完整性。"
+            );
+        }
         Ok(doc)
     }
 
@@ -1440,312 +1447,20 @@ mod tests {
     }
 }
 
-// ── 命名版本管理 ──
-
-/// 单个命名版本快照。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamedVersion {
-    pub id: String,
-    pub name: String,
-    pub snapshot: PenDocument,
-    pub created_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// 文档版本管理器，支持命名版本、切换、diff 对比。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionedDocument {
-    pub document_id: String,
-    versions: Vec<NamedVersion>,
-    active_version_id: String,
-    /// 细粒度撤销/重做栈，与命名版本互补：save_version 落地命名版本，
-    /// 同时 push 快照入栈，供频繁编辑的 undo/redo（50 层上限）。
-    // H-A14/P2-4：undo 栈 session-scoped，不落盘（旧实现序列化 50 份整快照，
-    // 致 .fusiondesign 膨胀 70× 触发 jetsam）。from_json 重置为空 + 用激活版本
-    // 重播初始快照，使加载后首次编辑仍可 undo。命名版本仍各存整快照。
-    #[serde(skip)]
-    undo_redo: UndoRedoStack,
-}
-
-impl VersionedDocument {
-    pub fn new(document_id: impl Into<String>, initial: PenDocument) -> Self {
-        let id = uuid_v4();
-        let version = NamedVersion {
-            id: id.clone(),
-            name: "初始版本".to_string(),
-            snapshot: initial.clone(),
-            created_at: now_iso(),
-            description: None,
-        };
-        let mut undo_redo = UndoRedoStack::new();
-        undo_redo.push(initial);
-        Self {
-            document_id: document_id.into(),
-            versions: vec![version],
-            active_version_id: id,
-            undo_redo,
-        }
-    }
-
-    pub fn active_version(&self) -> &NamedVersion {
-        if let Some(v) = self
-            .versions
-            .iter()
-            .find(|v| v.id == self.active_version_id)
-        {
-            v
-        } else {
-            tracing::error!(
-                active_version_id = %self.active_version_id,
-                total = self.versions.len(),
-                "active_version_id 不在版本列表，回退最后一个版本（文件损坏或手动编辑致 id 失配）"
-            );
-            self.versions
-                .last()
-                .expect("VersionedDocument 至少含一个版本（构造保证）")
-        }
-    }
-
-    pub fn active_document(&self) -> &PenDocument {
-        &self.active_version().snapshot
-    }
-
-    pub fn save_version(
-        &mut self,
-        name: impl Into<String>,
-        doc: PenDocument,
-        description: Option<String>,
-    ) -> &NamedVersion {
-        let id = uuid_v4();
-        let version = NamedVersion {
-            id: id.clone(),
-            name: name.into(),
-            snapshot: doc.clone(),
-            created_at: now_iso(),
-            description,
-        };
-        self.versions.push(version);
-        self.active_version_id = id.clone();
-        self.undo_redo.push(doc);
-        tracing::info!(version_id = %id, total = self.versions.len(), "save_version: 新版本已保存");
-        self.versions.last().unwrap()
-    }
-
-    /// 记录一次编辑快照（不入命名版本，仅进 undo 栈），用于高频编辑。
-    pub fn checkpoint(&mut self, doc: PenDocument) {
-        self.undo_redo.push(doc);
-    }
-
-    pub fn can_undo(&self) -> bool {
-        self.undo_redo.can_undo()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        self.undo_redo.can_redo()
-    }
-
-    /// 撤销：返回上一快照文档，None 表示无可撤销。
-    pub fn undo(&mut self) -> Option<PenDocument> {
-        let prev = self.undo_redo.undo();
-        if prev.is_some() {
-            tracing::info!("undo: 已回退一步");
-        }
-        prev
-    }
-
-    /// 重做：返回下一快照文档，None 表示无可重做。
-    pub fn redo(&mut self) -> Option<PenDocument> {
-        let next = self.undo_redo.redo();
-        if next.is_some() {
-            tracing::info!("redo: 已前进一步");
-        }
-        next
-    }
-
-    pub fn switch_to(&mut self, version_id: &str) -> anyhow::Result<&PenDocument> {
-        if !self.versions.iter().any(|v| v.id == version_id) {
-            anyhow::bail!("版本 {} 不存在", version_id);
-        }
-        self.active_version_id = version_id.to_string();
-        tracing::info!(version_id, "switch_to: 版本切换");
-        Ok(&self.active_version().snapshot)
-    }
-
-    pub fn switch_to_by_name(&mut self, name: &str) -> anyhow::Result<&PenDocument> {
-        let v = self
-            .versions
-            .iter()
-            .find(|v| v.name == name)
-            .ok_or_else(|| anyhow::anyhow!("版本「{}」不存在", name))?;
-        self.active_version_id = v.id.clone();
-        tracing::info!(name, "switch_to_by_name: 版本切换");
-        Ok(&self.active_version().snapshot)
-    }
-
-    pub fn list_versions(&self) -> Vec<&NamedVersion> {
-        self.versions.iter().collect()
-    }
-
-    pub fn version_count(&self) -> usize {
-        self.versions.len()
-    }
-
-    pub fn diff_versions(&self, id_a: &str, id_b: &str) -> anyhow::Result<PenDocumentDiff> {
-        let a = self
-            .versions
-            .iter()
-            .find(|v| v.id == id_a)
-            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", id_a))?;
-        let b = self
-            .versions
-            .iter()
-            .find(|v| v.id == id_b)
-            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", id_b))?;
-        Ok(a.snapshot.diff(&b.snapshot))
-    }
-
-    pub fn diff_adjacent(&self, version_id: &str) -> anyhow::Result<PenDocumentDiff> {
-        let idx = self
-            .versions
-            .iter()
-            .position(|v| v.id == version_id)
-            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
-        if idx == 0 {
-            return Ok(PenDocumentDiff::default());
-        }
-        let prev = &self.versions[idx - 1];
-        let curr = &self.versions[idx];
-        Ok(prev.snapshot.diff(&curr.snapshot))
-    }
-
-    pub fn delete_version(&mut self, version_id: &str) -> anyhow::Result<()> {
-        if self.versions.len() <= 1 {
-            anyhow::bail!("至少保留一个版本");
-        }
-        if self.active_version_id == version_id {
-            anyhow::bail!("不能删除当前激活版本");
-        }
-        let idx = self
-            .versions
-            .iter()
-            .position(|v| v.id == version_id)
-            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
-        self.versions.remove(idx);
-        tracing::info!(
-            version_id,
-            remaining = self.versions.len(),
-            "delete_version: 版本已删除"
-        );
-        Ok(())
-    }
-
-    pub fn rename_version(&mut self, version_id: &str, new_name: &str) -> anyhow::Result<()> {
-        let v = self
-            .versions
-            .iter_mut()
-            .find(|v| v.id == version_id)
-            .ok_or_else(|| anyhow::anyhow!("版本 {} 不存在", version_id))?;
-        tracing::info!(version_id, old = %v.name, new = new_name, "rename_version");
-        v.name = new_name.to_string();
-        Ok(())
-    }
-
-    pub fn to_json(&self) -> anyhow::Result<String> {
-        let json = serde_json::to_string_pretty(self)?;
-        // H-A14/P2-4：体积硬护栏。命名版本各存整快照，多版本线性膨胀，
-        // 旧实现 70 深拷贝致 jetsam。undo 栈已不落盘，仍须兜命名版本数膨胀。
-        if json.len() > MAX_VERSIONED_FILE_BYTES {
-            anyhow::bail!(
-                "VersionedDocument 序列化体积 {} 字节超安全上限 {} 字节（{} 命名版本，各存整快照）\
-                 ——删减命名版本或缩减节点规模",
-                json.len(),
-                MAX_VERSIONED_FILE_BYTES,
-                self.versions.len()
-            );
-        }
-        Ok(json)
-    }
-
-    pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        let mut vd: VersionedDocument = serde_json::from_str(json)?;
-        if vd.versions.is_empty() {
-            anyhow::bail!("VersionedDocument 版本列表为空（文件损坏或被截断）");
-        }
-        if !vd.versions.iter().any(|v| v.id == vd.active_version_id) {
-            tracing::warn!(
-                active_version_id = %vd.active_version_id,
-                total = vd.versions.len(),
-                "active_version_id 不在版本列表，回退最后一个版本"
-            );
-            let last_id = vd.versions[vd.versions.len() - 1].id.clone();
-            vd.active_version_id = last_id;
-        }
-        vd.active_document().validate_limits()?;
-        // H-A14/P2-4：undo 栈 session-scoped 不落盘，加载时为空。
-        // 用激活版本重播初始快照，使加载后首次编辑仍可 undo。
-        vd.undo_redo = UndoRedoStack::new();
-        vd.undo_redo.push(vd.active_document().clone());
-        Ok(vd)
-    }
-}
-
-// E-12：版本 id 单调计数器。同纳秒内连续调用拿递增 seq，
-// 保证进程内 id 绝对唯一（旧实现 nanos 低 16 位碰撞 → 重复 id）。
-static VERSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let seq = VERSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let pid = std::process::id();
-    // {nanos:016x}-{pid:04x}-{seq:04x}：进程内 seq 递增保唯一，
-    // 跨进程 pid 区分；非 RFC 4122 但满足版本 id 唯一性需求。
-    format!("{:016x}-{:04x}-{:04x}", ts, pid & 0xffff, seq & 0xffff)
-}
-
-fn now_iso() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // R-A12：旧实现 31536000=365 天忽略闰年、2592000=30 天忽略月份实际天数，
-    // 日期数学全错（2026 算成 2056）。改用 Howard Hinnant civil_from_days 算法
-    //（确定性天数→年月日，无闰年/月份天数近似，零依赖）。
-    let days = (secs / 86400) as i64;
-    let (year, month, day) = civil_from_days(days);
-    let tod = secs % 86400;
-    let hour = tod / 3600;
-    let minute = (tod % 3600) / 60;
-    let second = tod % 60;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, minute, second
-    )
-}
-
-/// Howard Hinnant civil_from_days：epoch 天数 → (year, month, day) 公历。
-/// 算法来自 http://howardhinnant.github.io/date_algorithms.html#civil_from_days。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
+// ── 命名版本管理（已移除）──
+// H-A14/P2-4：VersionedDocument/NamedVersion 全段已移除（死代码）。
+// 审计自判「260 行死代码占体积」：命名版本 API（save_version/switch_to/
+// diff_versions 等）跨 crate 零生产消费者——.fusiondesign 实存裸 PenDocument，
+// CLI undo/redo 走独立 UndoRedoStack（不经此类型）。save_version 同时入
+// versions Vec + undo 栈致进程内双份深拷贝，落盘虽已修（undo 栈 #[serde(skip)]），
+// 但类型本身零消费者，建 delta-COW 基础设施为空壳投入收益为零（Rule 2）。
+// 撤销/重做能力由 UndoRedoStack 独立提供（fd-cli 直用，保留）。如未来需命名
+// 版本，重新接入时按 delta-COW 设计，勿复活整快照方案。
+// 随同移除：uuid_v4/now_iso/civil_from_days/VERSION_SEQ/MAX_VERSIONED_FILE_BYTES
+//（仅 VersionedDocument + 其测试使用，无其他消费者）。
 
 #[cfg(test)]
-mod version_tests {
+mod security_tests {
     use super::*;
 
     fn sample_doc(name: &str) -> PenDocument {
@@ -1758,172 +1473,6 @@ mod version_tests {
             nodes: vec![PenNode::rect("n1", 10.0, 20.0, 100.0, 50.0)],
         });
         doc
-    }
-
-    #[test]
-    fn versioned_document_new() {
-        let doc = sample_doc("v0");
-        let vd = VersionedDocument::new("doc1", doc);
-        assert_eq!(vd.version_count(), 1);
-        assert_eq!(vd.active_version().name, "初始版本");
-    }
-
-    #[test]
-    fn versioned_undo_redo_integration() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0.clone());
-        let mut doc_v1 = sample_doc("v1");
-        doc_v1.pages[0].nodes[0].w = 300.0;
-        vd.save_version("V2", doc_v1.clone(), None);
-        assert!(vd.can_undo());
-        let undone = vd.undo().expect("应可撤销");
-        assert_eq!(undone.pages[0].nodes[0].w, 100.0);
-        assert!(vd.can_redo());
-        let redone = vd.redo().expect("应可重做");
-        assert_eq!(redone.pages[0].nodes[0].w, 300.0);
-    }
-
-    #[test]
-    fn versioned_checkpoint_undo() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let mut edit = vd.active_document().clone();
-        edit.pages[0].nodes[0].h = 999.0;
-        vd.checkpoint(edit);
-        assert!(vd.can_undo());
-        let undone = vd.undo().expect("应可撤销到初始");
-        assert_eq!(undone.pages[0].nodes[0].h, 50.0);
-    }
-
-    #[test]
-    fn save_and_switch_version() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let doc_v1 = sample_doc("v1");
-        vd.save_version("设计稿 V2", doc_v1, None);
-        assert_eq!(vd.version_count(), 2);
-        assert_eq!(vd.active_version().name, "设计稿 V2");
-
-        let first_id = vd.versions[0].id.clone();
-        vd.switch_to(&first_id).unwrap();
-        assert_eq!(vd.active_version().name, "初始版本");
-    }
-
-    #[test]
-    fn switch_by_name() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let doc_v1 = sample_doc("v1");
-        vd.save_version("设计稿 V2", doc_v1, None);
-        vd.switch_to_by_name("初始版本").unwrap();
-        assert_eq!(vd.active_version().name, "初始版本");
-    }
-
-    #[test]
-    fn diff_versions() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0.clone());
-        let mut doc_v1 = doc_v0.clone();
-        doc_v1.pages[0].nodes[0].w = 200.0;
-        vd.save_version("V2", doc_v1, None);
-        let id_a = vd.versions[0].id.clone();
-        let id_b = vd.versions[1].id.clone();
-        let diff = vd.diff_versions(&id_a, &id_b).unwrap();
-        assert!(!diff.is_empty());
-    }
-
-    #[test]
-    fn diff_adjacent_first_is_empty() {
-        let doc_v0 = sample_doc("v0");
-        let vd = VersionedDocument::new("doc1", doc_v0);
-        let diff = vd.diff_adjacent(&vd.versions[0].id).unwrap();
-        assert!(diff.is_empty());
-    }
-
-    #[test]
-    fn delete_version() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let doc_v1 = sample_doc("v1");
-        vd.save_version("V2", doc_v1, None);
-        let first_id = vd.versions[0].id.clone();
-        let second_id = vd.versions[1].id.clone();
-        vd.switch_to(&second_id).unwrap();
-        vd.delete_version(&first_id).unwrap();
-        assert_eq!(vd.version_count(), 1);
-    }
-
-    #[test]
-    fn delete_active_version_fails() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let id = vd.active_version_id.clone();
-        assert!(vd.delete_version(&id).is_err());
-    }
-
-    #[test]
-    fn delete_last_version_fails() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let id = vd.versions[0].id.clone();
-        vd.save_version("V2", sample_doc("v2"), None);
-        let second_id = vd.versions[1].id.clone();
-        vd.switch_to(&second_id).unwrap();
-        vd.delete_version(&id).unwrap();
-        let active_id = vd.active_version_id.clone();
-        assert!(vd.delete_version(&active_id).is_err());
-    }
-
-    #[test]
-    fn rename_version() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let id = vd.versions[0].id.clone();
-        vd.rename_version(&id, "V1 初稿").unwrap();
-        assert_eq!(vd.versions[0].name, "V1 初稿");
-    }
-
-    #[test]
-    fn versioned_document_json_roundtrip() {
-        let doc_v0 = sample_doc("v0");
-        let vd = VersionedDocument::new("doc1", doc_v0);
-        let json = vd.to_json().unwrap();
-        let vd2 = VersionedDocument::from_json(&json).unwrap();
-        assert_eq!(vd2.document_id, "doc1");
-        assert_eq!(vd2.version_count(), 1);
-    }
-
-    #[test]
-    fn from_json_corrupted_active_version_id_falls_back_not_panic() {
-        // E-13 回归：active_version_id 指向不存在的版本（手动编辑/文件损坏），
-        // from_json 应回退到最后一个版本而非 panic。
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        vd.save_version("V2", sample_doc("v1"), None);
-        let mut json = vd.to_json().unwrap();
-        let last_id = vd.versions.last().unwrap().id.clone();
-        json = json.replace(&last_id, "nonexistent-id-corrupted");
-        let vd2 = VersionedDocument::from_json(&json).unwrap();
-        assert!(!vd2.versions.is_empty());
-    }
-
-    #[test]
-    fn from_json_empty_versions_rejected() {
-        // E-13 回归：版本列表为空（文件被截断到只剩头部）→ 显式 Err 而非 panic。
-        // H-A14/P2-4：undo_redo 已 session-scoped 不落盘（serde skip），
-        // 测试 JSON 不再带该字段。
-        let json = r#"{"document_id":"d","versions":[],"active_version_id":"x"}"#;
-        assert!(VersionedDocument::from_json(json).is_err());
-    }
-
-    #[test]
-    fn list_versions_order() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        vd.save_version("V2", sample_doc("v1"), None);
-        vd.save_version("V3", sample_doc("v2"), None);
-        let names: Vec<&str> = vd.list_versions().iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec!["初始版本", "V2", "V3"]);
     }
 
     #[test]
@@ -2031,48 +1580,6 @@ mod version_tests {
         assert!(doc.validate_limits().is_ok(), "正常文档应通过校验");
     }
 
-    // E-12 回归：连续生成 id 必须两两不同（旧实现同纳秒低 16 位碰撞）。
-    #[test]
-    fn uuid_v4_rapid_calls_unique() {
-        let mut ids = std::collections::HashSet::new();
-        for _ in 0..1000 {
-            let id = uuid_v4();
-            assert!(ids.insert(id.clone()), "id 重复: {id}");
-        }
-        assert_eq!(ids.len(), 1000, "1000 次 uuid_v4 必须生成 1000 个不同 id");
-    }
-
-    // R-A12 回归：now_iso 输出合法 ISO 8601 且年份正确（旧实现 2026 算成 2056）。
-    #[test]
-    fn now_iso_is_valid_iso_and_year_correct() {
-        let iso = now_iso();
-        // 形如 YYYY-MM-DDTHH:MM:SSZ
-        assert_eq!(iso.len(), 20, "ISO 8601 长度应为 20: {iso}");
-        assert!(iso.ends_with('Z'), "应以 Z 结尾: {iso}");
-        assert_eq!(iso.as_bytes()[4], b'-', "第 5 位应为 -: {iso}");
-        assert_eq!(iso.as_bytes()[7], b'-', "第 8 位应为 -: {iso}");
-        assert_eq!(iso.as_bytes()[10], b'T', "第 11 位应为 T: {iso}");
-        let year: i64 = iso[0..4].parse().expect("年份可解析");
-        // 2026 年跑此测试，年份应落在 [2020, 2100] 区间，
-        // 旧实现算成 2056（year=56→"2056"）会触发此断言。
-        assert!(
-            (2020..=2100).contains(&year),
-            "年份应在合理区间，得 {year}（旧 bug 算成 2056）"
-        );
-    }
-
-    // R-A12 回归：civil_from_days 对已知日期算正确。
-    #[test]
-    fn civil_from_days_known_dates() {
-        // 1970-01-01 = epoch day 0
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // 2026-08-24：从 epoch 起第 20689 天（python date 算验证）
-        let (y, m, d) = civil_from_days(20689);
-        assert_eq!((y, m, d), (2026, 8, 24), "2026-08-24 应正确");
-        // 2000-02-29 闰日：epoch 起 11016 天
-        assert_eq!(civil_from_days(11016), (2000, 2, 29), "闰日应正确");
-    }
-
     /// 性能基线：1000 节点文档的序列化/反序列化/布局计算耗时。
     /// `#[ignore]`：不进常规 CI，经 `cargo test --release -- --ignored perf_baseline` 运行。
     /// 阈值：各操作 < 500ms（release，Apple Silicon），超阈打印但不断言失败（基线参考）。
@@ -2120,128 +1627,32 @@ mod version_tests {
         );
     }
 
-    // H-A14/P2-4 回归：undo 栈不落盘。多版本 to_json 体积内不含 undo 栈副本，
-    // 文件较旧实现（序列化 50 份整快照）显著收敛。
+    // E-14：截断/损坏文件不应静默丢数据。
     #[test]
-    fn undo_stack_not_persisted_in_json() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        // 制造 undo 栈深度：连续 save_version + checkpoint 共 30 份快照入栈。
-        for i in 1..=30 {
-            let mut doc = vd.active_document().clone();
-            doc.pages[0].nodes[0].w = 10.0 * i as f32;
-            vd.save_version(format!("V{i}"), doc, None);
-        }
-        let json = vd.to_json().unwrap();
-        // undo_redo 字段已 skip：JSON 不应出现该键名。
-        assert!(
-            !json.contains("\"undo_redo\""),
-            "undo 栈不应落盘（H-A14），但 JSON 含 undo_redo 键"
-        );
-        assert!(
-            !json.contains("\"undo_stack\""),
-            "undo 栈内部结构不应落盘（H-A14）"
-        );
+    fn from_json_warns_on_suspected_truncated_file() {
+        // 非空输入但 pages 字段缺失 → serde default 补空 Vec，解析"成功"但疑似截断。
+        // from_json 不应报错（避免阻断合法空文档），但应识别可疑情形（此处通过返回 Ok
+        // + 内部 warn 体现；行为断言：不 panic、返回空 pages 文档）。
+        let truncated = r#"{"schema_version":1,"variables":null}"#;
+        let doc = PenDocument::from_json(truncated).expect("截断文件应解析成功不报错");
+        assert!(doc.pages.is_empty(), "截断文件 pages 应为空");
+        assert_eq!(doc.schema_version, 1);
     }
 
-    // H-A14/P2-4 回归：50 命名版本文件体积受限，远小于 50× 单文档。
-    // 旧实现：50 版本各存整快照 + 50 undo 副本 = 100 深拷贝。
-    // 新实现：50 命名版本各存整快照（undo 不落盘）= 50 深拷贝，
-    // 体积应约为旧实现的一半；且绝对值低于 32MB 硬上限。
     #[test]
-    fn fifty_versions_file_size_bounded() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        for i in 1..50 {
-            let mut doc = vd.active_document().clone();
-            doc.pages[0].nodes[0].w = 10.0 * i as f32;
-            vd.save_version(format!("V{i}"), doc, None);
-        }
-        assert_eq!(vd.version_count(), 50);
-        let json = vd.to_json().unwrap();
-        let bytes = json.len();
-        // 50 版本 × 单页单节点快照，绝对值远低于 32MB 上限。
-        assert!(
-            bytes < MAX_VERSIONED_FILE_BYTES,
-            "50 命名版本体积 {bytes} 字节超 {MAX_VERSIONED_FILE_BYTES} 上限（H-A14 护栏失效）"
-        );
-        // 单文档体积基线：1 版本。
-        let single = VersionedDocument::new("doc1", sample_doc("v0"))
-            .to_json()
-            .unwrap()
-            .len();
-        // 50 版本体积不应超过单版本的 60×（旧实现会达 ~100×，含 undo 栈）。
-        // 留余量给版本元数据（id/name/created_at ×50）。
-        assert!(
-            bytes < single * 60,
-            "50 命名版本体积 {bytes} > 60× 单版本 {single}（= {bound}），\
-             undo 栈可能仍落盘（H-A14 未生效）",
-            bound = single * 60
-        );
+    fn from_json_silent_on_legit_empty_object() {
+        // 合法空文档 "{}"：serde 全 default，不应触发截断告警分支（trim == "{}" 排除）。
+        let doc = PenDocument::from_json("{}").expect("空对象应解析成功");
+        assert!(doc.pages.is_empty());
+        assert_eq!(doc.schema_version, 1);
     }
 
-    // H-A14/P2-4 回归：加载后 undo 栈 session-scoped 重置，
-    // 用激活版本重播初始快照，使首次编辑仍可 undo。
     #[test]
-    fn from_json_reseeds_undo_with_active_version() {
-        let doc_v0 = sample_doc("v0");
-        let mut vd = VersionedDocument::new("doc1", doc_v0);
-        let mut doc_v1 = sample_doc("v1");
-        doc_v1.pages[0].nodes[0].w = 300.0;
-        vd.save_version("V2", doc_v1, None);
-        let json = vd.to_json().unwrap();
-
-        let mut vd2 = VersionedDocument::from_json(&json).unwrap();
-        // 加载后 undo 栈重播激活版本（V2，w=300）。
-        // 首次编辑应可 undo 回激活版本本身——can_undo 为真（栈含 ≥1 快照）。
-        assert!(vd2.can_undo(), "加载后应可 undo（栈已重播激活版本）");
-        // 但栈仅 1 快照（激活版本），undo 应返回 None（需 ≥2 才能 undo）。
-        // 故先 checkpoint 一次新编辑，再 undo 应回到激活版本。
-        let mut edit = vd2.active_document().clone();
-        edit.pages[0].nodes[0].w = 999.0;
-        vd2.checkpoint(edit);
-        let undone = vd2.undo().expect("checkpoint 后应可 undo");
-        assert_eq!(
-            undone.pages[0].nodes[0].w, 300.0,
-            "undo 应回到加载时的激活版本（V2 w=300）"
-        );
-    }
-
-    // H-A14/P2-4 回归：超量命名版本致体积超 32MB 硬上限 → fail visibly。
-    // 构造大文档（~2000 节点/版本）× 足量版本逼近上限，to_json 应 Err。
-    #[test]
-    fn to_json_rejects_oversized_versioned_file() {
-        let make_big = |name: &str| {
-            let mut doc = PenDocument::new();
-            let mut nodes = Vec::new();
-            for i in 0..2000u32 {
-                nodes.push(PenNode::rect(format!("n{i}"), i as f32, 0.0, 100.0, 50.0));
-            }
-            doc.add_page(Page {
-                id: "p1".into(),
-                name: name.into(),
-                width: 8000.0,
-                height: 6000.0,
-                nodes,
-            });
-            doc
-        };
-        let mut vd = VersionedDocument::new("big", make_big("v0"));
-        // 单大版本约 ~150KB；堆 220 版本逼近 32MB。每版本仅微调一节点使内容非全同。
-        for i in 1..220 {
-            let mut doc = make_big(&format!("v{i}"));
-            doc.pages[0].nodes[0].w = 10.0 + i as f32;
-            vd.save_version(format!("V{i}"), doc, None);
-        }
-        let result = vd.to_json();
-        assert!(
-            result.is_err(),
-            "超 32MB 上限的 VersionedDocument 应 fail visibly（H-A14 护栏）"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("超安全上限"),
-            "错误文案应点名体积护栏，得: {err}"
-        );
+    fn from_json_silent_on_normal_doc() {
+        // 正常文档不应触发截断告警。
+        let doc = sample_doc("normal");
+        let json = doc.to_json().unwrap();
+        let back = PenDocument::from_json(&json).unwrap();
+        assert_eq!(back.pages.len(), 1);
     }
 }

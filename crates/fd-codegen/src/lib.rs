@@ -852,7 +852,8 @@ fn grid_css(g: &fd_canvas_core::GridParams) -> Vec<String> {
 
 /// 按 design system 解析 token 引用（如 `color.bg` → 实际 hex）。
 ///
-/// MVP 简化：节点 style 中若出现 `token:color.bg` 形式，查 registry 替换。
+/// H-A11：递归遍历 children——旧实现只处理 page.nodes 顶层，嵌套节点的 token
+/// 引用未被解析，codegen 输出残留 `token:xxx` 浏览器不认 / SwiftUI 未定义符号。
 pub fn resolve_tokens(doc: &PenDocument, reg: &DesignSystemRegistry) -> PenDocument {
     let mut resolved = doc.clone();
     let resolve = |v: &Option<String>| -> Option<String> {
@@ -868,11 +869,21 @@ pub fn resolve_tokens(doc: &PenDocument, reg: &DesignSystemRegistry) -> PenDocum
     };
     for page in &mut resolved.pages {
         for node in &mut page.nodes {
-            node.style.fill = resolve(&node.style.fill);
-            node.style.stroke = resolve(&node.style.stroke);
+            resolve_tokens_recursive(node, &resolve);
         }
     }
     resolved
+}
+
+fn resolve_tokens_recursive(
+    node: &mut PenNode,
+    resolve: &impl Fn(&Option<String>) -> Option<String>,
+) {
+    node.style.fill = resolve(&node.style.fill);
+    node.style.stroke = resolve(&node.style.stroke);
+    for child in &mut node.children {
+        resolve_tokens_recursive(child, resolve);
+    }
 }
 
 #[cfg(test)]
@@ -1131,6 +1142,34 @@ mod tests {
         assert_eq!(
             resolved.pages[0].nodes[0].style.fill.as_deref(),
             Some("#ABC")
+        );
+    }
+
+    // H-A11：resolve_tokens 须递归 children——旧实现只处理顶层，嵌套 token 残留。
+    #[test]
+    fn resolve_tokens_recurses_children() {
+        use fd_design_system::DesignSystemRegistry;
+        let mut reg = DesignSystemRegistry::new();
+        reg.register_builtin();
+        reg.activate("apple-hig").unwrap();
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        // 顶层节点带嵌套子节点，子节点 fill 用 token 引用
+        let mut child = PenNode::rect("child", 0.0, 0.0, 5.0, 5.0);
+        child.style.fill = Some("token:color.accent".into());
+        let mut parent = PenNode::group("parent", 0.0, 0.0, vec![child]);
+        parent.style.fill = Some("token:color.accent".into());
+        page.add(parent);
+        doc.add_page(page);
+        let resolved = resolve_tokens(&doc, &reg);
+        let p = &resolved.pages[0].nodes[0];
+        // 顶层解析
+        assert_eq!(p.style.fill.as_deref(), Some("#007AFF"));
+        // 嵌套 children 也解析（H-A11 修复前此处残留 token:color.accent）
+        assert_eq!(
+            p.children[0].style.fill.as_deref(),
+            Some("#007AFF"),
+            "嵌套子节点的 token 引用应被递归解析"
         );
     }
 

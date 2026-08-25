@@ -934,6 +934,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 None => read_stdin_capped()?,
             };
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
+            // H-A11：codegen 前解析 token 引用（token:color.accent → 实际 hex）。
+            // 旧实现直接把 PenDocument 传 codegen，token:xxx 原样输出——浏览器不认，
+            // SwiftUI 侧 DesignTokens.xxx 未定义编译失败。按文档声明的
+            // active_design_system 构建注册表并解析，递归覆盖嵌套 children。
+            let reg = build_registry(&doc);
+            let doc = fd_codegen::resolve_tokens(&doc, &reg);
             let code = match target {
                 CodegenTargetArg::Html => {
                     use fd_codegen::Codegen;

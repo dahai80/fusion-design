@@ -2,7 +2,7 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：V0.2 — 11 个 crate + vendored op-ai，321 个测试通过，WASM 构建验证通过。
+**状态**：V0.2 — 11 个 crate + vendored op-ai，419 个测试通过，WASM 构建验证通过。
 
 ## 📋 概览
 
@@ -39,7 +39,8 @@ Fusion-Design 是 Fusion-MLX「一核九端」产品矩阵的旗舰主力之一�
 10. **素材库管理** — 素材分类/标签/标注/颜色提取/设计系统 Token 绑定
 11. **设计规范文档生成** — AI 自动生成交互规范/组件规范/页面架构文档（SpecDocSkill）
 12. **页面流程批量生成** — AI 按流程描述批量生成多页面，统一风格（PageFlowSkill）
-13. **命名版本管理** — 版本快照/切换/重命名/删除/相邻 diff 对比
+13. **命名版本管理（已移除）** — 版本快照/切换/重命名/删除/相邻 diff 对比
+    > **死代码清理（H-A14/P2-4）**：`VersionedDocument`/`NamedVersion` 命名版本 API（save_version/switch_to/diff_versions 等）跨 crate 零生产消费者，`.fusiondesign` 实存裸 `PenDocument`，CLI undo/redo 走独立 `UndoRedoStack`。审计定性「260 行死代码」，save_version 同时入版本表+undo 栈致进程内双份深拷贝。已整段移除（同 H-A13 apply_patch）；随同移除 uuid_v4/now_iso/civil_from_days/VERSION_SEQ/MAX_VERSIONED_FILE_BYTES。撤销/重做能力不受影响（由 `UndoRedoStack` 独立提供）。如未来需命名版本，按 delta-COW 设计，勿复活整快照方案。
 14. **内置场景模板** — 4 类预设（移动端/B 端后台/营销网站/小程序），一键安装
 
 ## 🗂️ 项目结构
@@ -47,7 +48,7 @@ Fusion-Design 是 Fusion-MLX「一核九端」产品矩阵的旗舰主力之一�
 ```
 fusion-design/
 ├── crates/                     ← Fusion-Design 自研 Rust crate（workspace）
-│   ├── fd-canvas-core/         ← 画布数据模型（PenDocument/PenNode + UndoRedo/Diff + VersionedDocument，Flex/Grid 布局声明）
+│   ├── fd-canvas-core/         ← 画布数据模型（PenDocument/PenNode + UndoRedo/Diff，Flex/Grid 布局声明）
 │   ├── fd-ai-adapter/          ← op-ai → fusion-mlx 适配层（SSE 流式/多模态视觉/7 个 Skill）
 │   ├── fd-codegen/             ← HTML/React+Tailwind 代码导出（layout-aware Flex/Grid CSS）
 │   ├── fd-design-system/       ← 两套内置设计规范 + Token + Light/Dark 主题
@@ -78,14 +79,14 @@ fusion-design/
 
 ```bash
 cargo check --workspace                                        # 全套编译通过
-cargo test --workspace                                         # 321 个测试全通过
+cargo test --workspace                                         # 419 个测试全通过
 cargo build -p fd-host-web --target wasm32-unknown-unknown    # WASM 编译通过
 cargo run -p fd-cli -- --help                                  # CLI 可用
 ```
 
 | Crate | 测试数 | 覆盖范围 |
 |-------|--------|----------|
-| fd-canvas-core | 53+ | PenDocument CRUD、UndoRedo、Diff/Patch、JSON 往返、布局、版本管理 |
+| fd-canvas-core | 46 | PenDocument CRUD、UndoRedo、Diff/Patch、JSON 往返、布局、安全护栏 |
 | fd-ai-adapter | 60+ | Mock HTTP、SSE 流、健康检查、多模态视觉、SpecDoc/PageFlow |
 | fd-design-lint | 41 | 13 条 Lint 规则、auto_fix、apply_tokens、FixResult 序列化 |
 | fd-design-system | 10+ | Token、Theme、Registry、CSS 输出 |

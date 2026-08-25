@@ -4175,6 +4175,77 @@ mod mlx_integration {
         );
     }
 
+    // ── TC-4：gateway 假绿回归（真推理探针识破 /v1/models 谎报）──
+
+    /// 路径感知 mock：/v1/models → 200 + 模型列表（假绿），/v1/chat/completions → 502。
+    /// 模拟 gateway 列了云端/本地模型名但 MLX 未加载的「假绿」终局。
+    async fn spawn_false_green_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
+                    .await
+                    .unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                // 解析请求行首行：METHOD PATH HTTP/1.1
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("");
+                let (status, reason, body) = if path.contains("/v1/models") {
+                    // 假绿：200 + 模型列表，看似一切正常
+                    (
+                        200u16,
+                        "OK",
+                        r#"{"object":"list","data":[{"id":"qwen3.5-4b-4bit","object":"model"}]}"#
+                            .to_string(),
+                    )
+                } else {
+                    // /v1/chat/completions：MLX 未加载 → 502
+                    (
+                        502,
+                        "Bad Gateway",
+                        r#"{"error":{"message":"Chat failed","type":"server_error"}}"#.to_string(),
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// TC-4：gateway /v1/models 假绿——列了模型名但 generate 实返 502。
+    /// check_generate 须以真推理探针识破，不据 /v1/models 判可用。
+    #[tokio::test]
+    async fn check_generate_sees_through_gateway_false_green() {
+        let url = spawn_false_green_server().await;
+        let client = mock_client(&url);
+        // /v1/models 假绿 200，但 check_generate 走真 chat 探针 → 502 → model_loaded=false
+        let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
+        assert!(
+            !p.available,
+            "gateway 假绿：/v1/models 200 但 generate 502，不应 available"
+        );
+        assert!(!p.model_loaded, "真推理探针须识破假绿，model_loaded=false");
+        assert_eq!(p.http_code, Some(502));
+        assert!(
+            p.status.as_deref().unwrap().contains("未加载"),
+            "须点出模型未加载（破假绿）：{:?}",
+            p.status
+        );
+    }
+
     // ── M-5：502/503 指数退避重试回归 ──
 
     /// is_transient_status 仅 502/503 判瞬时，其余（含 200/401/403/404/500）判永久。
