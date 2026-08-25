@@ -79,8 +79,9 @@ pub enum Command {
     /// 流式与 gateway：默认 endpoint 经 fusion-gateway(11432)。gateway 流式转发
     /// 存在已知 502 bug（fusion-gateway#108：stream=true 时连接拒绝，非流式正常）。
     /// 流式场景建议 `FUSION_MLX_BASE_URL=http://127.0.0.1:11434` 直连 MLX 绕过 gateway。
-    /// 默认 model 名仅为占位，实际模型随 MLX 部署而变，建议显式传 `--model` 本地
-    /// 已加载模型 id（可用 `check-mlx --endpoint ...` 探测真可用性）。
+    /// 默认 model `Qwen3.5-9B-4bit` 为内置 MLX 常用文本模型（真推理验证通过），
+    /// 但 MLX 部署模型列表随环境变，建议显式传 `--model` 本地已加载模型 id
+    /// （可用 `check-mlx --endpoint ...` 探测真可用性）以跨部署稳健。
     Chat {
         #[arg(long, default_value = "Qwen3.5-9B-4bit")]
         model: String,
