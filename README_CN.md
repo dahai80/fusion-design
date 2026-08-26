@@ -99,7 +99,7 @@ cargo run -p fd-cli -- --help                                  # CLI 可用
 
 **M-5 重试退避**：`fd-ai-adapter` 三处 HTTP 路径（`blocking_post` / `chat_stream_messages` / `check_generate`）对 502/503 瞬时错误指数退避重试（500ms→1s→2s→4s→8s 封顶，默认 4 次），等模型加载完成即成功；4xx 永久错误直接失败。`FUSION_MLX_RETRY_MAX` 调最大尝试次数（设 1 关闭）。流式仅覆盖建连阶段，中途断流不重试。
 
-**流式与 gateway 已知限制**：默认 endpoint 经 fusion-gateway(11432)，但 gateway 流式转发存在已知 502 bug（fusion-gateway#108：`stream=true` 时连接拒绝，非流式正常）。流式场景（如 `chat --stream`）建议 `FUSION_MLX_BASE_URL=http://127.0.0.1:11434` 直连 MLX 绕过 gateway。属上游问题，已提 issue，非本仓可修。
+**流式与 gateway**：默认 endpoint 经 fusion-gateway(11432)。gateway 流式 502 bug（fusion-gateway#108：`stream=true` 连接拒绝）已于 2026-08-25 修复（PR #111 local-first ordering），真流式探针通过（SSE delta 正常）。若遇上游回退，可 `FUSION_MLX_BASE_URL=http://127.0.0.1:11434` 直连 MLX 绕过 gateway。
 
 **fd-cli chat 消费方声明（issue #17 诚实回溯）**：issue #17 设想 `chat` 子命令为 fusion-studio subprocess 入口取代直连 MLX，但经核实 fusion-studio 实际走 fusion-gateway TCP NDJSON（`StreamingBridge.swift`，帧 schema 为 `chat_event`/`chat_done`/`error` + `session_id`/`event`），**不经 fd-cli chat**。故本子命令无 studio 消费方，NDJSON 帧 schema（`delta`/`chat_done`/`error`）为本子命令自洽契约，供 CLI 管道/脚本/测试消费，非对齐 studio。
 
