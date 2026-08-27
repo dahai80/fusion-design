@@ -80,6 +80,13 @@ fusion-design/
 | 通信 | 本地私有 HTTP (127.0.0.1) + WKWebView Bridge |
 | 异步 | tokio + notify（文件监听）+ futures（SSE 流） |
 
+## 📖 使用指南
+
+场景化上手 + 排障（双语）：
+
+- **[使用指南](docs/USER_GUIDE_CN.md)** / **[Usage Guide](docs/USER_GUIDE.md)** — 9 个场景：首次文生 UI、导出交付件、Lint+修复、图生 UI、多方案对比、批量+规范文档、Codegen、流式管道、设计规范切换。附 22 子命令速查表。
+- **[排障手册](docs/TROUBLESHOOTING_CN.md)** / **[Troubleshooting](docs/TROUBLESHOOTING.md)** — 12 类现象 → 根因 → 解决：MLX 不通、502/503 加载中、假绿模型、鉴权 401、流式断/CJK 乱码、反序列化超限、IPC/路径遍历、Token 颜色未解析、wasm/studio 同步、模型漂移、lint 规则、XSS 护栏。
+
 ## 🧪 验证
 
 ```bash
