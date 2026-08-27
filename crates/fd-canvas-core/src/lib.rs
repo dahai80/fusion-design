@@ -18,6 +18,10 @@ use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+// A-5：CSS 安全工具下沉到 fd-css-utils 叶子 crate，此处 re-export 保持
+// 下游调用方 `fd_canvas_core::parse_hex_color` / `sanitize_css_value` 不变。
+pub use fd_css_utils::{parse_hex_color, sanitize_css_value};
+
 // 反序列化安全护栏：限制恶意/损坏 .fusiondesign 的嵌套深度与节点总数，
 // 防止深度嵌套导致栈溢出或海量节点导致 OOM。
 const MAX_NODE_DEPTH: usize = 64;
@@ -88,8 +92,8 @@ impl<'de> Deserialize<'de> for PenDocument {
 pub struct Page {
     pub id: String,
     pub name: String,
-    pub width: f32,
-    pub height: f32,
+    pub width: f64,
+    pub height: f64,
     pub nodes: Vec<PenNode>,
 }
 
@@ -99,10 +103,10 @@ pub struct PenNode {
     pub id: String,
     pub kind: NodeKind,
     pub name: String,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
     #[serde(default)]
     pub style: NodeStyle,
     #[serde(default)]
@@ -110,7 +114,7 @@ pub struct PenNode {
     #[serde(default)]
     pub children: Vec<PenNode>,
     #[serde(default)]
-    pub rotation: f32,
+    pub rotation: f64,
     #[serde(default)]
     pub z_index: i32,
 }
@@ -145,7 +149,7 @@ pub struct FlexParams {
     pub align_items: AlignItems,
     pub justify_content: JustifyContent,
     pub wrap: FlexWrap,
-    pub gap: f32,
+    pub gap: f64,
     pub padding: SideOffsets,
 }
 
@@ -201,14 +205,14 @@ pub enum FlexWrap {
 /// 四边偏移量（padding/margin）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct SideOffsets {
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
-    pub left: f32,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+    pub left: f64,
 }
 
 impl SideOffsets {
-    pub fn uniform(v: f32) -> Self {
+    pub fn uniform(v: f64) -> Self {
         Self {
             top: v,
             right: v,
@@ -223,7 +227,7 @@ impl SideOffsets {
 pub struct GridParams {
     pub columns: Vec<TrackSizing>,
     pub rows: Vec<TrackSizing>,
-    pub gap: (f32, f32),
+    pub gap: (f64, f64),
     pub areas: Vec<GridArea>,
 }
 
@@ -241,10 +245,10 @@ impl Default for GridParams {
 /// Grid 轨道尺寸。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TrackSizing {
-    Fixed(f32),
+    Fixed(f64),
     Auto,
-    Flex(f32),
-    Percent(f32),
+    Flex(f64),
+    Percent(f64),
 }
 
 /// Grid 区域命名。
@@ -321,7 +325,7 @@ fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::V
             }
             "radius" => {
                 if let Some(f) = val.as_f64() {
-                    node.style.radius = Some(f as f32);
+                    node.style.radius = Some(f);
                 }
             }
             "text" => {
@@ -331,12 +335,12 @@ fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::V
             }
             "w" => {
                 if let Some(f) = val.as_f64() {
-                    node.w = f as f32;
+                    node.w = f;
                 }
             }
             "h" => {
                 if let Some(f) = val.as_f64() {
-                    node.h = f as f32;
+                    node.h = f;
                 }
             }
             _ => {
@@ -374,15 +378,15 @@ pub struct NodeStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stroke: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stroke_width: Option<f32>,
+    pub stroke_width: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub radius: Option<f32>,
+    pub radius: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub font_size: Option<f32>,
+    pub font_size: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub opacity: Option<f32>,
+    pub opacity: Option<f64>,
     #[serde(default)]
     pub layout: LayoutMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -560,7 +564,7 @@ impl PenDocument {
 // LayoutMode/FlexParams/GridParams 等 NodeStyle 声明类型保留（codegen/渲染器消费）。
 
 impl Page {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, w: f32, h: f32) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, w: f64, h: f64) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -578,7 +582,7 @@ impl Page {
 
 impl PenNode {
     /// 创建 rect 节点。
-    pub fn rect(id: impl Into<String>, x: f32, y: f32, w: f32, h: f32) -> Self {
+    pub fn rect(id: impl Into<String>, x: f64, y: f64, w: f64, h: f64) -> Self {
         Self {
             id: id.into(),
             kind: NodeKind::Rect,
@@ -596,7 +600,7 @@ impl PenNode {
     }
 
     /// 创建 text 节点。
-    pub fn text(id: impl Into<String>, x: f32, y: f32, content: impl Into<String>) -> Self {
+    pub fn text(id: impl Into<String>, x: f64, y: f64, content: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             kind: NodeKind::Text,
@@ -614,7 +618,7 @@ impl PenNode {
     }
 
     /// 创建 group 节点。
-    pub fn group(id: impl Into<String>, x: f32, y: f32, children: Vec<PenNode>) -> Self {
+    pub fn group(id: impl Into<String>, x: f64, y: f64, children: Vec<PenNode>) -> Self {
         Self {
             id: id.into(),
             kind: NodeKind::Group,
@@ -676,6 +680,16 @@ pub enum CanvasError {
     NodeNotFound(String),
     #[error("页面 {0} 未找到")]
     PageNotFound(String),
+    // A-4：库 crate 错误细化（替 anyhow 字符串），fd-cli report_error 按 downcast 变体 match。
+    #[error("文档解析失败: {0}")]
+    ParseError(String),
+    #[error("节点嵌套深度 {depth} 超过安全上限 {limit}")]
+    DepthExceeded { depth: usize, limit: usize },
+    #[error("节点总数 {total} 超过安全上限 {limit}")]
+    NodeTotalExceeded { total: usize, limit: usize },
+    // A-7：schema 迁移框架——文件版本高于当前 SCHEMA_VERSION 时上报。
+    #[error("文档 schema 版本 {0} 不支持")]
+    SchemaVersion(u32),
 }
 
 // ── 撤销/重做栈 ──
@@ -1593,7 +1607,7 @@ mod security_tests {
                 id: format!("n{i}"),
                 kind: NodeKind::Rect,
                 name: format!("node{i}"),
-                x: i as f32,
+                x: i as f64,
                 y: 0.0,
                 w: 100.0,
                 h: 50.0,

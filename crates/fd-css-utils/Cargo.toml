@@ -1,0 +1,17 @@
+[package]
+name = "fd-css-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fusion-Design CSS 安全工具 — 颜色解析 + 值净化（叶子 crate，无 fd-* 依赖）"
+
+[lib]
+name = "fd_css_utils"
+path = "src/lib.rs"
+
+# A-5：安全工具下沉。parse_hex_color/sanitize_css_value 从 fd-canvas-core 迁入，
+# fd-canvas-core re-export 保持调用方 `fd_canvas_core::parse_hex_color` 不变。
+[dependencies]
+tracing = { workspace = true }

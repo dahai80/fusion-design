@@ -13,7 +13,7 @@ use std::sync::{LazyLock, Mutex};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-use fd_canvas_core::PenDocument;
+use fd_canvas_core::{sanitize_css_value, PenDocument};
 
 fn css_escape_attr_value(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -27,20 +27,80 @@ fn node_selector(node_id: &str) -> String {
 
 static SHELL: LazyLock<Mutex<Option<WebShellInner>>> = LazyLock::new(|| Mutex::new(None));
 
-// 容器级监听器是否已安装（幂等保护）。
-// 修复 P0-1：render_dom 每次 DOM 渲染都重新 setup_* + forget，
-// 导致监听器单调累积、同事件被 N 次处理 -> 卡死。置位后跳过重复注册。
-static LISTENERS_INSTALLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// 原子置位并返回旧值；首次调用返回 false，后续返回 true。
-fn mark_listeners_installed() -> bool {
-    LISTENERS_INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst)
+// R-1：拖拽/平移/框选/resize 的 on_move Closure 暂存（替代 forget 泄漏）。
+// 旧实现 .forget() 导致每次拖拽泄漏一个 FnMut Closure，长会话线性内存增长。
+// mousedown 存入，mouseup take() + remove_event_listener → Closure drop 回收内存。
+// thread_local 规避 Send 约束（Closure<dyn FnMut> 非 Send，wasm 单线程安全）。
+type DragMoveClosure = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>;
+thread_local! {
+    static ACTIVE_DRAG_MOVE: std::cell::RefCell<Option<DragMoveClosure>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// 容错获取 SHELL 锁：即使中毒也取出数据，避免 panic 传播致整个渲染层永久卡死（P1-1）。
+// R-1 余 14 处 forget 的审计裁定回溯：
+// 剩余 .forget() 站点分两类，均非长会话泄漏根因，故保留 forget + 文档化（不做 stored-Vec 转换）：
+//   (1) setup_delegated_* / setup_* 的容器级委托监听器（click/mousedown/wheel/message）——
+//       mount 一次即应用生命周期常驻，经 mark_listeners_installed 幂等保护防重复 attach。
+//       事件委托模式下非逐节点绑定，节点增删不新增监听器。常驻监听器 forget 是 web_sys 惯例，
+//       不随会话长度增长，无线性内存泄漏。
+//   (2) Closure::once 的 on_mouseup/on_up —— 触发一次后 wasm-bindgen 自清理（P0-2 注释），
+//       forget 仅持有至触发点，非持续泄漏。
+// 真正的会话级泄漏（拖拽 on_move 每次新增）已由 ACTIVE_DRAG_MOVE 修复。
+// 若未来需 unmount 全量回收，可在此 thread_local 旁加 Vec<Closure> + unmount() drop——
+// 当前无 unmount 调用方，stored-Vec 增复杂度不解决现存泄漏，按 Rule 2 不引入。
+
+// 容器级监听器幂等保护。
+// L-15：旧实现用进程级全局 AtomicBool，容器重建（新 mount）后标志仍 true →
+// 新容器无监听器，事件失效。改为 per-container 属性标记，每次渲染查当前容器。
+#[cfg(target_arch = "wasm32")]
+const LISTENERS_ATTR: &str = "data-fd-listeners";
+
+/// 检查当前容器是否已装监听器；未装则标记并返回 false（需安装），已装返回 true。
+fn mark_listeners_installed(container_id: &str) -> bool {
+    // L-15：非 wasm 目标无 DOM，返回 true（跳过安装，幂等安全）。
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = container_id;
+        true
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return true, // 无 window 无法装，按已装跳过避免反复尝试
+        };
+        let document = match window.document() {
+            Some(d) => d,
+            None => return true,
+        };
+        if let Some(container) = document.get_element_by_id(container_id) {
+            if container.get_attribute(LISTENERS_ATTR).is_some() {
+                return true;
+            }
+            let _ = container.set_attribute(LISTENERS_ATTR, "1");
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// 容错获取 SHELL 锁。R-15：锁中毒（持锁线程 panic）时**丢弃中毒脏数据**，
+/// 重置为 None 而非读半更新状态——下次 mount 重新初始化，避免渲染层基于脏数据
+/// 产出不一致画面。旧实现 `into_inner()` 取脏数据是伪容错：脏数据可能半更新，
+/// 继续渲染出错误 DOM/canvas。
 fn shell_lock() -> std::sync::MutexGuard<'static, Option<WebShellInner>> {
-    SHELL.lock().unwrap_or_else(|e| e.into_inner())
+    match SHELL.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            web_sys::console::error_1(
+                &"fd-host-web: SHELL 锁中毒（持锁线程 panic），丢弃脏数据重置为 None，下次 mount 重新初始化".into(),
+            );
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        }
+    }
 }
 
 // ── WebShell ──
@@ -59,6 +119,13 @@ struct WebShellInner {
     // C11：缓存最近一次 render_dom 的 PenDocument JSON，替代 DOM 属性存储。
     // viewport_cull_update 从这里读取，避免每帧从 data-fd-doc 重新解析整文档。
     cached_doc_json: Option<String>,
+    // P-7：当前选中节点 id。select_node 只清上一个选中元素 + handles，
+    // 免全局 [data-fd-selected] 扫描。None = 无选中。
+    selected_id: Option<String>,
+    // R-17：Shift 多选集合。toggle_node_selection 增删此集合，
+    // select_node 清空集合后插入单选。与 selected_id 并存——
+    // selected_id 是"主选中"（handles 锚点），selected_ids 是全量多选态。
+    selected_ids: std::collections::HashSet<String>,
 }
 
 /// 初始化 Web 宿主。
@@ -86,6 +153,8 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
         canvas_id: canvas_id.to_string(),
         ready: true,
         cached_doc_json: None,
+        selected_id: None,
+        selected_ids: std::collections::HashSet::new(),
     };
 
     // 注册消息监听器
@@ -96,6 +165,8 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
         canvas_id: canvas_id.to_string(),
         ready: true,
         cached_doc_json: None,
+        selected_id: None,
+        selected_ids: std::collections::HashSet::new(),
     });
 
     Ok(shell)
@@ -131,6 +202,25 @@ fn handle_host_message(json: &str) {
         .get("kind")
         .and_then(|k| k.as_str())
         .unwrap_or("unknown");
+
+    // L-16：协议版本护栏——schema_version 超过本端支持版本则拒绝处理，
+    // 回传错误事件，避免静默按旧语义误解析新协议消息。
+    const HOST_PROTOCOL_VERSION: u64 = 1;
+    if let Some(v) = msg.get("schema_version").and_then(|x| x.as_u64()) {
+        if v > HOST_PROTOCOL_VERSION {
+            web_sys::console::warn_1(
+                &format!(
+                    "fd-host-web: 消息 schema_version={v} 超过本端支持版本 {HOST_PROTOCOL_VERSION}，拒绝处理"
+                )
+                .into(),
+            );
+            send_to_host(
+                "error",
+                &serde_json::json!({ "reason": "unsupported schema_version", "version": v }),
+            );
+            return;
+        }
+    }
 
     match kind {
         "page.render" => {
@@ -302,7 +392,7 @@ fn dispatch_to_host(json: &str, kind: &str) {
         return;
     };
     // 主路径：webkit.messageHandlers.<handler>.postMessage（WKWebView 标准）。
-    let handlers = js_sys::Reflect::get(&w, &JsValue::from_str("webkit")).ok();
+    let handlers = js_sys::Reflect::get(w, &JsValue::from_str("webkit")).ok();
     if let Some(webkit) = handlers {
         let mh = js_sys::Reflect::get(&webkit, &JsValue::from_str("messageHandlers")).ok();
         if let Some(mh) = mh {
@@ -500,13 +590,13 @@ pub fn fusion_bridge_send_command(command_json: &str) -> Result<(), JsValue> {
 // ── DOM 渲染管线（性能优化版）──
 
 /// 视口剔除边距（px），略大于屏幕确保边缘节点可见。
-const VIEWPORT_MARGIN: f32 = 200.0;
+const VIEWPORT_MARGIN: f64 = 200.0;
 
 // E-38/P2-5：节点尺寸/视口坐标硬上限，防恶意 .fusiondesign 用 f32::MAX
 // 触发算术溢出/NaN/Inf 致渲染崩溃或 OOM。画布坐标单边 ≤ 100k px 足够任何合法设计稿。
-const MAX_NODE_DIM_PX: f32 = 100_000.0;
-const MAX_VIEWPORT_DIM_PX: f32 = 100_000.0;
-const MAX_ZOOM: f32 = 1000.0;
+const MAX_NODE_DIM_PX: f64 = 100_000.0;
+const MAX_VIEWPORT_DIM_PX: f64 = 100_000.0;
+const MAX_ZOOM: f64 = 1000.0;
 // E-38/P2-5：单节点子节点数渲染上限。深度有 MAX_RENDER_DEPTH=64 上限，但
 // 单层 children 数量无界——10 万扁平子节点深度=1 过深度检查，render_dom 串行
 // 创建 10 万 DOM 致 WKWebView OOM。canvas-core 已有 MAX_NODE_TOTAL=100k 总数
@@ -579,6 +669,9 @@ fn render_dom(doc_json: &str) {
         let mut guard = shell_lock();
         if let Some(inner) = guard.as_mut() {
             inner.cached_doc_json = Some(doc_json.to_string());
+            // P-7/R-17：全量重渲替换 DOM，旧选中元素已消失，清空选中记录避免悬空。
+            inner.selected_id = None;
+            inner.selected_ids.clear();
         }
     }
     web_sys::console::log_1(&"fd-host-web: data-fd-doc 属性缓存已移除，改用内存缓存（C11）".into());
@@ -604,22 +697,22 @@ fn render_dom(doc_json: &str) {
         &format!("fd-host-web: DOM 渲染完成, {node_count} 节点（视口剔除后）").into(),
     );
 
-    // 事件委托：容器级监听器仅安装一次，避免重复 forget 累积泄漏（P0-1）。
-    if !mark_listeners_installed() {
+    // 事件委托：容器级监听器 per-container 仅装一次（L-15）。
+    if !mark_listeners_installed("fusion-dom-root") {
         setup_delegated_click_listener("fusion-dom-root");
         setup_delegated_mousedown_listener("fusion-dom-root");
         setup_canvas_click_listener("fusion-dom-root");
         setup_canvas_zoom_listener("fusion-dom-root");
         setup_canvas_pan_listener("fusion-dom-root");
         setup_marquee_listener("fusion-dom-root");
-        web_sys::console::log_1(&"fd-host-web: 容器级监听器已安装（一次性）".into());
+        web_sys::console::log_1(&"fd-host-web: 容器级监听器已安装（per-container）".into());
     }
 }
 
 /// E-38/P2-5：节点几何护栏（纯函数，无 DOM 依赖，可单测）。
 /// 非有限或超 MAX_NODE_DIM_PX 的尺寸视作无效，避免恶意 .fusiondesign
 /// 用 f32::MAX/NaN 触发算术溢出/Inf 渲染崩溃。zoom 同理限 [>0, MAX_ZOOM]。
-fn is_node_geom_valid(node: &fd_canvas_core::PenNode, zoom: f32) -> bool {
+fn is_node_geom_valid(node: &fd_canvas_core::PenNode, zoom: f64) -> bool {
     if !node.x.is_finite() || !node.y.is_finite() || !node.w.is_finite() || !node.h.is_finite() {
         return false;
     }
@@ -639,7 +732,7 @@ fn is_node_geom_valid(node: &fd_canvas_core::PenNode, zoom: f32) -> bool {
 fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Element) -> bool {
     // E-38/P2-5：节点尺寸/坐标护栏。非有限或超 MAX_NODE_DIM_PX 的节点视作不可见，
     // 避免恶意 .fusiondesign 用 f32::MAX/NaN 触发算术溢出/Inf 渲染崩溃。
-    let zoom: f32 = container
+    let zoom: f64 = container
         .get_attribute("data-fd-zoom")
         .unwrap_or_default()
         .parse()
@@ -647,12 +740,12 @@ fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Elem
     if !is_node_geom_valid(node, zoom) {
         return false;
     }
-    let pan_x: f32 = container
+    let pan_x: f64 = container
         .get_attribute("data-fd-pan-x")
         .unwrap_or_default()
         .parse()
         .unwrap_or(0.0);
-    let pan_y: f32 = container
+    let pan_y: f64 = container
         .get_attribute("data-fd-pan-y")
         .unwrap_or_default()
         .parse()
@@ -669,12 +762,12 @@ fn is_node_in_viewport(node: &fd_canvas_core::PenNode, container: &web_sys::Elem
         .inner_width()
         .unwrap_or_default()
         .as_f64()
-        .unwrap_or(1920.0) as f32;
+        .unwrap_or(1920.0);
     let vp_h = window
         .inner_height()
         .unwrap_or_default()
         .as_f64()
-        .unwrap_or(1080.0) as f32;
+        .unwrap_or(1080.0);
     // E-38/P2-5：视口尺寸护栏，防异常 inner_width/height（部分嵌入式 WebView 返回 0/超值）。
     let vp_w = if vp_w.is_finite() && vp_w > 0.0 && vp_w <= MAX_VIEWPORT_DIM_PX {
         vp_w
@@ -894,12 +987,14 @@ fn render_node_to_dom(
 
     // 填充色
     if let Some(fill) = &node.style.fill {
+        let fill = sanitize_css_value(fill, "transparent");
         style.push_str(&format!("background-color:{};", fill));
     }
 
     // 描边
     if let Some(stroke) = &node.style.stroke {
         let width = node.style.stroke_width.unwrap_or(1.0);
+        let stroke = sanitize_css_value(stroke, "transparent");
         style.push_str(&format!("border:{}px solid {};", width, stroke));
     }
 
@@ -912,6 +1007,7 @@ fn render_node_to_dom(
     if node.kind == fd_canvas_core::NodeKind::Text {
         let font_size = node.style.font_size.unwrap_or(16.0);
         let font_family = node.style.font_family.as_deref().unwrap_or("system-ui");
+        let font_family = sanitize_css_value(font_family, "");
         style.push_str(&format!(
             "font-size:{}px;font-family:{};",
             font_size, font_family
@@ -992,11 +1088,18 @@ fn render_node_to_dom(
     // Design token CSS 变量引用
     for (key, value) in &node.style.design_token_refs {
         let css_var = key.replace('.', "-");
+        let value = sanitize_css_value(value, "transparent");
         style.push_str(&format!("--{}:{};", css_var, value));
     }
 
     el.set_attribute("style", &style).ok()?;
     el.set_attribute("data-node-id", &node.id).ok()?;
+    // P-6：缓存几何到 data-* 属性，吸附收集免 querySelectorAll 全扫后逐元素解析 style 串。
+    // 拖拽时 update_node_position 同步刷新 data-fd-x/y；mutate_node 改尺寸时刷新 w/h。
+    el.set_attribute("data-fd-x", &format!("{}", node.x)).ok();
+    el.set_attribute("data-fd-y", &format!("{}", node.y)).ok();
+    el.set_attribute("data-fd-w", &format!("{}", node.w)).ok();
+    el.set_attribute("data-fd-h", &format!("{}", node.h)).ok();
 
     // 渲染子节点（子节点同样使用事件委托模式）。深度上限防栈溢出（P2-1），
     // 扇出上限防 OOM（E-38/P2-5）。
@@ -1050,6 +1153,7 @@ const MIN_MARQUEE_SIZE: f32 = 5.0;
 
 /// 收集画布中所有节点的吸附候选线（边缘 + 中心）。
 /// 返回 (x_lines, y_lines)，即垂直吸附线 X 坐标集合和水平吸附线 Y 坐标集合。
+/// P-6：几何优先读 data-fd-* 缓存属性（O(1) 属性读），缺则回退 style 串解析。
 fn collect_snap_candidates(exclude_id: &str) -> (Vec<f32>, Vec<f32>) {
     let mut x_lines: Vec<f32> = Vec::new();
     let mut y_lines: Vec<f32> = Vec::new();
@@ -1084,6 +1188,11 @@ fn collect_snap_candidates(exclude_id: &str) -> (Vec<f32>, Vec<f32>) {
         }
     }
     (x_lines, y_lines)
+}
+
+/// P-6：从 data-* 属性读 f32，缺/非法时 None。
+fn read_attr_f32(el: &web_sys::Element, attr: &str) -> Option<f32> {
+    el.get_attribute(attr).and_then(|s| s.parse().ok())
 }
 
 /// 对单轴查找最近吸附偏移。返回 (吸附偏移, 是否吸附, 吸附线坐标)。
@@ -1182,7 +1291,8 @@ static RAF_SCHEDULED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// 修复 P0-3：rAF 注册失败或回调 panic 时标志永久卡 true -> 渲染停摆。
 /// - window 不可用：立即复位标志，允许下次重试。
 /// - rAF 注册失败：立即复位。
-/// - 回调内先复位再执行，panic 也不阻塞后续调度。
+/// - 回调内先复位再执行；R-16：catch_unwind 兜底，回调 panic 落 console.error
+///   并复位标志，不让 panic 传播成 wasm trap 致 rAF 循环永久停摆。
 fn schedule_raf<F>(callback: F)
 where
     F: FnOnce() + 'static,
@@ -1194,7 +1304,19 @@ where
     let cb = Closure::once(Box::new(move || {
         // 先复位标志，再执行回调；即使回调 panic 也不致永久阻塞。
         RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
-        callback();
+        // R-16：catch_unwind 兜底——回调 panic 不传播成 trap 致 rAF 停摆。
+        // web_sys 捕获非 UnwindSafe，用 AssertUnwindSafe 包裹（回调内不跨 unwind 持锁）。
+        let f = std::panic::AssertUnwindSafe(callback);
+        if let Err(e) = std::panic::catch_unwind(f) {
+            let msg = if let Some(s) = e.downcast_ref::<&'static str>() {
+                format!("schedule_raf 回调 panic: {s}")
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("schedule_raf 回调 panic: {s}")
+            } else {
+                "schedule_raf 回调 panic（非字符串 payload）".to_string()
+            };
+            web_sys::console::error_1(&msg.into());
+        }
     }) as Box<dyn FnOnce()>);
     let window = match web_sys::window() {
         Some(w) => w,
@@ -1450,6 +1572,8 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             .as_ref()
             .unchecked_ref::<js_sys::Function>()
             .into();
+        // R-1：存 on_mousemove 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_mousemove));
         let on_mouseup = Closure::once(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
@@ -1457,6 +1581,8 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // R-1：移除监听后 take + drop on_mousemove Closure，回收线性内存。
+            ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
             // self-remove：Closure::once 触发后由 wasm-bindgen 清理，无需 forget（P0-2）。
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (raw_dx, raw_dy) = match mm {
@@ -1512,7 +1638,7 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             .add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref())
             .ok();
         on_mouseup.forget();
-        on_mousemove.forget();
+        // R-1：on_mousemove 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
 
         event.stop_propagation();
         event.prevent_default();
@@ -1527,17 +1653,27 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
 /// 为节点 DOM 元素绑定 click / drag / resize 事件（逐节点模式，事件委托模式下不使用）。
 /// 从 DOM 元素的 style 中读取 left/top 位置。
 fn read_node_position(el: &web_sys::Element) -> (f32, f32) {
-    let style = el.get_attribute("style").unwrap_or_default();
-    let x = extract_css_px(&style, "left").unwrap_or(0.0);
-    let y = extract_css_px(&style, "top").unwrap_or(0.0);
+    // P-6：优先读 data-fd-x/y 缓存，缺则回退 style 串解析（兼容旧节点/无缓存渲染路径）。
+    let x = read_attr_f32(el, "data-fd-x").unwrap_or_else(|| {
+        extract_css_px(&el.get_attribute("style").unwrap_or_default(), "left").unwrap_or(0.0)
+    });
+    let y = read_attr_f32(el, "data-fd-y").unwrap_or_else(|| {
+        extract_css_px(&el.get_attribute("style").unwrap_or_default(), "top").unwrap_or(0.0)
+    });
     (x, y)
 }
 
 /// 从 DOM 元素的 style 中读取 width/height。
 fn read_node_size(el: &web_sys::Element) -> (f32, f32) {
-    let style = el.get_attribute("style").unwrap_or_default();
-    let w = extract_css_px(&style, "width").unwrap_or(DEFAULT_NODE_WIDTH);
-    let h = extract_css_px(&style, "height").unwrap_or(DEFAULT_NODE_HEIGHT);
+    // P-6：优先读 data-fd-w/h 缓存，缺则回退 style 串解析。
+    let w = read_attr_f32(el, "data-fd-w").unwrap_or_else(|| {
+        extract_css_px(&el.get_attribute("style").unwrap_or_default(), "width")
+            .unwrap_or(DEFAULT_NODE_WIDTH)
+    });
+    let h = read_attr_f32(el, "data-fd-h").unwrap_or_else(|| {
+        extract_css_px(&el.get_attribute("style").unwrap_or_default(), "height")
+            .unwrap_or(DEFAULT_NODE_HEIGHT)
+    });
     (w, h)
 }
 
@@ -1560,6 +1696,9 @@ fn update_node_position(el: &web_sys::Element, x: f32, y: f32) {
     let new_style = replace_css_prop(&style, "left", &format!("{}px", x));
     let new_style = replace_css_prop(&new_style, "top", &format!("{}px", y));
     el.set_attribute("style", &new_style).ok();
+    // P-6：同步刷新几何缓存，吸附收集读缓存免 style 串解析。
+    el.set_attribute("data-fd-x", &format!("{}", x)).ok();
+    el.set_attribute("data-fd-y", &format!("{}", y)).ok();
 }
 
 /// 替换 CSS style 字符串中指定属性值，不存在则追加。
@@ -1723,6 +1862,8 @@ fn setup_canvas_pan_listener(container_id: &str) {
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
+        // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
         let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
@@ -1730,6 +1871,8 @@ fn setup_canvas_pan_listener(container_id: &str) {
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
+            ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
             // Closure::once 触发后自清理，无需 forget（P0-2）。
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
@@ -1741,7 +1884,7 @@ fn setup_canvas_pan_listener(container_id: &str) {
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
         on_up.forget();
-        on_move.forget();
+        // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
 
         event.prevent_default();
         event.stop_propagation();
@@ -1858,6 +2001,8 @@ fn setup_marquee_listener(container_id: &str) {
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
+        // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
         let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
@@ -1865,6 +2010,8 @@ fn setup_marquee_listener(container_id: &str) {
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
+            ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
             // Closure::once 触发后自清理（P0-2）。
 
             // 移除选框 DOM
@@ -1901,7 +2048,7 @@ fn setup_marquee_listener(container_id: &str) {
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
         on_up.forget();
-        on_move.forget();
+        // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
     }) as Box<dyn FnMut(web_sys::Event)>);
 
     container
@@ -2011,16 +2158,25 @@ fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
             None => return,
         };
         if let Some(container) = document.get_element_by_id("fusion-dom-root") {
-            let style = format!(
-                "position:relative;width:100%;height:100%;overflow:hidden;transform:scale({}) translate({}px,{}px);transform-origin:0 0;",
-                new_scale, pan_x / new_scale, pan_y / new_scale
-            );
-            container.set_attribute("style", &style).ok();
+            // L-14：仅设 transform 相关属性，不整体覆盖 style（保留容器其他 CSS）。
+            let style = container.dyn_into::<web_sys::HtmlElement>().ok();
+            if let Some(el) = style {
+                let _ = el.style().set_property(
+                    "transform",
+                    &format!(
+                        "scale({}) translate({}px,{}px)",
+                        new_scale,
+                        pan_x / new_scale,
+                        pan_y / new_scale
+                    ),
+                );
+                let _ = el.style().set_property("transform-origin", "0 0");
+            }
         }
-        // 延迟触发视口剔除（缩放后可能需要加载/卸载节点）
-        schedule_raf(|| {
-            viewport_cull_update();
-        });
+        // R-16：缩放后视口剔除——直接同步调用，不嵌套 schedule_raf。
+        // 旧实现嵌套 rAF 把 cull 推到下一帧，且复用同一 RAF_SCHEDULED 标志，
+        // 导致 transform 帧与 cull 帧竞态。同帧内 transform 先设再 cull，无嵌套。
+        viewport_cull_update();
     });
 }
 
@@ -2077,16 +2233,22 @@ fn apply_canvas_pan(dx: f32, dy: f32) {
             None => return,
         };
         if let Some(container) = document.get_element_by_id("fusion-dom-root") {
-            let style = format!(
-                "position:relative;width:100%;height:100%;overflow:hidden;transform:scale({}) translate({}px,{}px);transform-origin:0 0;",
-                zoom, new_x / zoom, new_y / zoom
-            );
-            container.set_attribute("style", &style).ok();
+            // L-14：仅设 transform 相关属性，不整体覆盖 style。
+            if let Ok(el) = container.dyn_into::<web_sys::HtmlElement>() {
+                let _ = el.style().set_property(
+                    "transform",
+                    &format!(
+                        "scale({}) translate({}px,{}px)",
+                        zoom,
+                        new_x / zoom,
+                        new_y / zoom
+                    ),
+                );
+                let _ = el.style().set_property("transform-origin", "0 0");
+            }
         }
-        // 延迟触发视口剔除（平移后可能需要加载/卸载节点）
-        schedule_raf(|| {
-            viewport_cull_update();
-        });
+        // R-16：平移后视口剔除——直接同步调用，不嵌套 schedule_raf（同上）。
+        viewport_cull_update();
     });
 }
 
@@ -2112,12 +2274,26 @@ fn toggle_node_selection(node_id: &str) {
             let clean = strip_css_prop(&style, "box-shadow");
             el.set_attribute("style", &clean).ok();
             el.remove_attribute("data-fd-selected").ok();
+            // R-17：同步从多选集合移除，selected_id 一致性见下方。
+            if let Some(inner) = shell_lock().as_mut() {
+                inner.selected_ids.remove(node_id);
+                if inner.selected_id.as_deref() == Some(node_id) {
+                    inner.selected_id = inner.selected_ids.iter().next().cloned();
+                }
+            }
         } else {
             el.set_attribute("data-fd-selected", "true").ok();
             // L4：用 box-shadow 做选中高亮，保留节点自身 outline 不被覆盖。
             let style = el.get_attribute("style").unwrap_or_default();
             el.set_attribute("style", &format!("{};box-shadow:0 0 0 2px #007AFF;", style))
                 .ok();
+            // R-17：加入多选集合。无主选中时设为主选中（handles 锚点）。
+            if let Some(inner) = shell_lock().as_mut() {
+                inner.selected_ids.insert(node_id.to_string());
+                if inner.selected_id.is_none() {
+                    inner.selected_id = Some(node_id.to_string());
+                }
+            }
         }
     }
 }
@@ -2257,30 +2433,67 @@ fn select_node(node_id: &str) {
         None => return,
     };
 
-    // 移除之前的选中状态 + resize handles
-    if let Ok(selected) = document.query_selector_all("[data-fd-selected]") {
-        for i in 0..selected.length() {
-            if let Some(node) = selected.item(i) {
-                if let Ok(el) = node.dyn_into::<web_sys::Element>() {
-                    // L4：取消选中只移除我们注入的 box-shadow，不触碰用户 outline。
-                    let style = el.get_attribute("style").unwrap_or_default();
-                    let clean = strip_css_prop(&style, "box-shadow");
-                    el.set_attribute("style", &clean).ok();
-                    el.remove_attribute("data-fd-selected").ok();
+    // P-7：从 SHELL 取上一个选中 id。命中则只清该元素，免全局 [data-fd-selected] 扫描。
+    // 未命中（冷启动/状态丢失）仍走全扫兜底，保证残留选中必被清。
+    let prev_id: Option<String> = shell_lock().as_ref().and_then(|i| i.selected_id.clone());
+    let same_selection = prev_id.as_deref() == Some(node_id);
+
+    if same_selection {
+        // 重复选中同一节点：状态与高亮已就位，直接返回免重建 handles。
+        return;
+    }
+
+    // 清上一个选中元素：仅该一个，不再 querySelectorAll 全扫。
+    let clear_prev = |document: &web_sys::Document| {
+        let clear_el = |el: &web_sys::Element| {
+            // L4：取消选中只移除我们注入的 box-shadow，不触碰用户 outline。
+            let style = el.get_attribute("style").unwrap_or_default();
+            let clean = strip_css_prop(&style, "box-shadow");
+            el.set_attribute("style", &clean).ok();
+            el.remove_attribute("data-fd-selected").ok();
+        };
+        match &prev_id {
+            Some(pid) => {
+                if let Some(el) = document.query_selector(&node_selector(pid)).unwrap_or(None) {
+                    clear_el(&el);
+                } else {
+                    // 上一个元素已不在 DOM（被删/重渲）：全扫兜底清残留选中态。
+                    if let Ok(selected) = document.query_selector_all("[data-fd-selected]") {
+                        for i in 0..selected.length() {
+                            if let Some(node) = selected.item(i) {
+                                if let Ok(el) = node.dyn_into::<web_sys::Element>() {
+                                    clear_el(&el);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                // 无记录：全扫兜底（首选/状态丢失后）。
+                if let Ok(selected) = document.query_selector_all("[data-fd-selected]") {
+                    for i in 0..selected.length() {
+                        if let Some(node) = selected.item(i) {
+                            if let Ok(el) = node.dyn_into::<web_sys::Element>() {
+                                clear_el(&el);
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
-    // 移除旧的 resize handles
-    if let Ok(handles) = document.query_selector_all(".fd-resize-handle") {
-        for i in 0..handles.length() {
-            if let Some(h) = handles.item(i) {
-                if let Ok(el) = h.dyn_into::<web_sys::Element>() {
-                    el.remove();
+        // 移除旧 resize handles（选中变化才重建，same_selection 已早返回）。
+        if let Ok(handles) = document.query_selector_all(".fd-resize-handle") {
+            for i in 0..handles.length() {
+                if let Some(h) = handles.item(i) {
+                    if let Ok(el) = h.dyn_into::<web_sys::Element>() {
+                        el.remove();
+                    }
                 }
             }
         }
-    }
+    };
+    clear_prev(&document);
 
     // 设置新选中
     if let Some(el) = document
@@ -2315,6 +2528,18 @@ fn select_node(node_id: &str) {
                     body.append_child(&handle).ok();
                 }
             }
+        }
+        // P-7/R-17：记录新选中 id。select_node 是单选语义——清空多选集合后只插这一个。
+        if let Some(inner) = shell_lock().as_mut() {
+            inner.selected_ids.clear();
+            inner.selected_ids.insert(node_id.to_string());
+            inner.selected_id = Some(node_id.to_string());
+        }
+    } else {
+        // 选中目标不存在：清空记录。
+        if let Some(inner) = shell_lock().as_mut() {
+            inner.selected_ids.clear();
+            inner.selected_id = None;
         }
     }
 }
@@ -2410,6 +2635,8 @@ fn create_resize_handle(
         let rid = nid.clone();
         let rdir = dir_str.clone();
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
+        // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
         let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
@@ -2417,6 +2644,8 @@ fn create_resize_handle(
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
+            // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
+            ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
             // Closure::once 触发后自清理（P0-2）。
 
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
@@ -2443,7 +2672,7 @@ fn create_resize_handle(
             .add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
         on_up.forget();
-        on_move.forget();
+        // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
 
         event.stop_propagation();
         event.prevent_default();
@@ -2514,6 +2743,9 @@ fn update_node_size(el: &web_sys::Element, w: f32, h: f32) {
     let new_style = replace_css_prop(&style, "width", &format!("{}px", w));
     let new_style = replace_css_prop(&new_style, "height", &format!("{}px", h));
     el.set_attribute("style", &new_style).ok();
+    // P-6：同步刷新尺寸缓存。
+    el.set_attribute("data-fd-w", &format!("{}", w)).ok();
+    el.set_attribute("data-fd-h", &format!("{}", h)).ok();
 }
 
 /// MutateNode 命令处理：更新节点位置/尺寸/样式。
@@ -2563,6 +2795,8 @@ fn mutate_node(
                 &replace_css_prop(&style, "left", &format!("{}px", nx)),
             )
             .ok();
+            // P-6：刷新 x 缓存。
+            el.set_attribute("data-fd-x", &format!("{}", nx)).ok();
         }
         if let Some(ny) = y {
             let style = el.get_attribute("style").unwrap_or_default();
@@ -2571,6 +2805,8 @@ fn mutate_node(
                 &replace_css_prop(&style, "top", &format!("{}px", ny)),
             )
             .ok();
+            // P-6：刷新 y 缓存。
+            el.set_attribute("data-fd-y", &format!("{}", ny)).ok();
         }
     }
     if let (Some(nw), Some(nh)) = (w, h) {
@@ -2583,6 +2819,8 @@ fn mutate_node(
                 &replace_css_prop(&style, "width", &format!("{}px", nw)),
             )
             .ok();
+            // P-6：刷新 w 缓存。
+            el.set_attribute("data-fd-w", &format!("{}", nw)).ok();
         }
         if let Some(nh) = h {
             let style = el.get_attribute("style").unwrap_or_default();
@@ -2591,6 +2829,8 @@ fn mutate_node(
                 &replace_css_prop(&style, "height", &format!("{}px", nh)),
             )
             .ok();
+            // P-6：刷新 h 缓存。
+            el.set_attribute("data-fd-h", &format!("{}", nh)).ok();
         }
     }
 
@@ -2637,7 +2877,8 @@ fn mutate_node(
     }
     if let Some(ff) = font_family {
         let style = el.get_attribute("style").unwrap_or_default();
-        el.set_attribute("style", &replace_css_prop(&style, "font-family", ff))
+        let ff = sanitize_css_value(ff, "");
+        el.set_attribute("style", &replace_css_prop(&style, "font-family", &ff))
             .ok();
     }
     if let Some(o) = opacity {
@@ -2745,13 +2986,26 @@ fn reorder_node(node_id: &str, new_index: usize) {
         // L1：先把被移动节点从父容器剥离，再以剩余子节点为基准定位插入点。
         // 否则被移动节点本身仍占用一个槽位，导致目标 index 偏移一位、错位。
         node.remove_child(&el).ok();
+        // L-17：插入点只在带 data-node-id 的子元素中算，忽略 resize handle/
+        // snap overlay/plan preview 等辅助 DOM，否则 index 与节点序列错位。
         let child_nodes = node.child_nodes();
-        let count = child_nodes.length() as usize;
+        let len = child_nodes.length();
+        let mut node_children: Vec<web_sys::Element> = Vec::new();
+        for i in 0..len {
+            if let Some(c) = child_nodes.item(i) {
+                if let Ok(el_child) = c.dyn_into::<web_sys::Element>() {
+                    if el_child.get_attribute("data-node-id").is_some() {
+                        node_children.push(el_child);
+                    }
+                }
+            }
+        }
+        let count = node_children.len();
         // L1：clamp 到有效区间，防止 new_index 越界静默丢弃。
         let target = new_index.min(count);
         if target < count {
-            if let Some(ref_child) = child_nodes.get(target as u32) {
-                node.insert_before(&el, Some(&ref_child)).ok();
+            if let Some(ref_child) = node_children.get(target) {
+                node.insert_before(&el, Some(ref_child)).ok();
             } else {
                 node.append_child(&el).ok();
             }
@@ -2778,9 +3032,13 @@ fn reset_canvas_view() {
         container.set_attribute("data-fd-zoom", "1.0").ok();
         container.set_attribute("data-fd-pan-x", "0.0").ok();
         container.set_attribute("data-fd-pan-y", "0.0").ok();
-        container.set_attribute("style",
-            "position:relative;width:100%;height:100%;overflow:hidden;transform:scale(1) translate(0px,0px);transform-origin:0 0;"
-        ).ok();
+        // L-14：仅重置 transform，不整体覆盖 style。
+        if let Ok(el) = container.dyn_into::<web_sys::HtmlElement>() {
+            let _ = el
+                .style()
+                .set_property("transform", "scale(1) translate(0px,0px)");
+            let _ = el.style().set_property("transform-origin", "0 0");
+        }
     }
     web_sys::console::log_1(&"fd-host-web: canvas view reset".into());
 }
@@ -2920,6 +3178,18 @@ fn render_page(doc_json: &str) {
         }
     };
 
+    // L-18：canvas 渲染路径也写 cached_doc_json，
+    // 使 viewport_cull_update 两路径（DOM/canvas）都有最新文档，避免陈旧/None。
+    {
+        let mut guard = shell_lock();
+        if let Some(inner) = guard.as_mut() {
+            inner.cached_doc_json = Some(doc_json.to_string());
+            // P-7/R-17：canvas 重渲同 DOM 重渲，清空选中记录。
+            inner.selected_id = None;
+            inner.selected_ids.clear();
+        }
+    }
+
     // 仅持锁取 canvas_id 后立即释放，避免大文档重绘期间阻塞消息处理（P1-2）。
     let canvas_id = {
         let guard = shell_lock();
@@ -2952,6 +3222,16 @@ fn render_page(doc_json: &str) {
     // 清空画布
     ctx.clear_rect(0.0, 0.0, canvas.width() as f64, canvas.height() as f64);
 
+    // A-11：canvas 路径清空 DOM 容器，消除 render_dom 残留的 DOM 重影。
+    // 双轨不一致：若先 render_dom（DOM 节点）再 render_page（canvas），
+    // 旧 DOM 节点仍叠在 canvas 上方，与 canvas 画面重影。与 render_dom 清空对齐。
+    if let Some(container) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("fusion-dom-root"))
+    {
+        container.set_inner_html("");
+    }
+
     // 渲染每个页面
     for page in &doc.pages {
         render_page_to_canvas(page, &ctx);
@@ -2982,17 +3262,17 @@ fn render_node(
     // 设置描边
     if let Some(stroke) = &node.style.stroke {
         ctx.set_stroke_style_str(stroke);
-        ctx.set_line_width(node.style.stroke_width.unwrap_or(1.0) as f64);
+        ctx.set_line_width(node.style.stroke_width.unwrap_or(1.0));
     }
 
-    let x = node.x as f64;
-    let y = node.y as f64;
-    let w = node.w as f64;
-    let h = node.h as f64;
+    let x = node.x;
+    let y = node.y;
+    let w = node.w;
+    let h = node.h;
 
     match node.kind {
         fd_canvas_core::NodeKind::Rect => {
-            let r = node.style.radius.unwrap_or(0.0) as f64;
+            let r = node.style.radius.unwrap_or(0.0);
             if r > 0.0 {
                 round_rect(ctx, x, y, w, h, r);
             } else {
@@ -3015,7 +3295,7 @@ fn render_node(
                     node.style.font_size.unwrap_or(16.0) as u32,
                     node.style.font_family.as_deref().unwrap_or("system-ui"),
                 ));
-                ctx.fill_text(text, x, y + (node.style.font_size.unwrap_or(16.0) as f64))
+                ctx.fill_text(text, x, y + node.style.font_size.unwrap_or(16.0))
                     .ok();
             }
         }
@@ -3233,6 +3513,8 @@ mod tests {
                 canvas_id: "canvas".into(),
                 ready: true,
                 cached_doc_json: None,
+                selected_id: None,
+                selected_ids: std::collections::HashSet::new(),
             },
         };
     }
@@ -3565,23 +3847,23 @@ mod tests {
     // E-38/P2-5 回归：节点几何护栏拒绝非有限/超限尺寸，防渲染崩溃/OOM。
     #[test]
     fn node_geom_guard_rejects_nonfinite() {
-        let mk = |x: f32, y: f32, w: f32, h: f32| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
+        let mk = |x: f64, y: f64, w: f64, h: f64| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
         // NaN/Inf 任一坐标 → 拒绝
-        assert!(!is_node_geom_valid(&mk(f32::NAN, 0.0, 10.0, 10.0), 1.0));
+        assert!(!is_node_geom_valid(&mk(f64::NAN, 0.0, 10.0, 10.0), 1.0));
         assert!(!is_node_geom_valid(
-            &mk(0.0, f32::INFINITY, 10.0, 10.0),
+            &mk(0.0, f64::INFINITY, 10.0, 10.0),
             1.0
         ));
-        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f32::NAN, 10.0), 1.0));
+        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f64::NAN, 10.0), 1.0));
         assert!(!is_node_geom_valid(
-            &mk(0.0, 0.0, 10.0, f32::NEG_INFINITY),
+            &mk(0.0, 0.0, 10.0, f64::NEG_INFINITY),
             1.0
         ));
         // 负尺寸 → 拒绝
         assert!(!is_node_geom_valid(&mk(0.0, 0.0, -1.0, 10.0), 1.0));
         assert!(!is_node_geom_valid(&mk(0.0, 0.0, 10.0, -1.0), 1.0));
-        // 超大尺寸（f32::MAX / 超 MAX_NODE_DIM_PX）→ 拒绝
-        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f32::MAX, 10.0), 1.0));
+        // 超大尺寸（f64::MAX / 超 MAX_NODE_DIM_PX）→ 拒绝
+        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f64::MAX, 10.0), 1.0));
         assert!(!is_node_geom_valid(
             &mk(0.0, 0.0, 10.0, MAX_NODE_DIM_PX + 1.0),
             1.0
@@ -3595,7 +3877,7 @@ mod tests {
         assert!(is_node_geom_valid(&node, 1.0), "正常 zoom 应通过");
         assert!(!is_node_geom_valid(&node, 0.0), "zoom=0 应拒绝");
         assert!(!is_node_geom_valid(&node, -2.0), "负 zoom 应拒绝");
-        assert!(!is_node_geom_valid(&node, f32::NAN), "NaN zoom 应拒绝");
+        assert!(!is_node_geom_valid(&node, f64::NAN), "NaN zoom 应拒绝");
         assert!(
             !is_node_geom_valid(&node, MAX_ZOOM + 1.0),
             "超 MAX_ZOOM 应拒绝"
@@ -3606,7 +3888,7 @@ mod tests {
     // E-38/P2-5 回归：合法节点（正常尺寸 + 边界值）通过护栏。
     #[test]
     fn node_geom_guard_accepts_valid_nodes() {
-        let mk = |x: f32, y: f32, w: f32, h: f32| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
+        let mk = |x: f64, y: f64, w: f64, h: f64| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
         assert!(is_node_geom_valid(&mk(0.0, 0.0, 10.0, 10.0), 1.0));
         assert!(
             is_node_geom_valid(&mk(1e6, 1e6, 100.0, 100.0), 1.0),
@@ -3660,8 +3942,8 @@ mod tests {
         let mut doc = PenDocument::new();
         let mut page = fd_canvas_core::Page::new("p1", "Stress", 2000.0, 2000.0);
         for i in 0..100 {
-            let x = (i % 10) as f32 * 200.0;
-            let y = (i / 10) as f32 * 100.0;
+            let x = (i % 10) as f64 * 200.0;
+            let y = (i / 10) as f64 * 100.0;
             page.add(fd_canvas_core::PenNode::rect(
                 format!("n{i}"),
                 x,
@@ -3686,14 +3968,17 @@ mod tests {
     }
 
     #[test]
-    fn listeners_installed_flag_is_idempotent() {
-        // P0-1：mark_listeners_installed 首次返回 false，后续均 true，
-        // 保证容器级监听器只注册一次，不随渲染次数累积泄漏。
-        LISTENERS_INSTALLED.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(!mark_listeners_installed(), "首次应返回 false");
-        assert!(mark_listeners_installed(), "第二次应返回 true");
-        assert!(mark_listeners_installed(), "第三次应返回 true");
-        LISTENERS_INSTALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    fn listeners_installed_no_dom_is_safe() {
+        // L-15：无 window/DOM 时 mark_listeners_installed 返回 true（跳过安装），
+        // 避免反复尝试安装失败。幂等安全：多次调用一致返回 true。
+        assert!(
+            mark_listeners_installed("fusion-dom-root"),
+            "无 DOM 环境应跳过安装（返回 true）"
+        );
+        assert!(
+            mark_listeners_installed("fusion-dom-root"),
+            "重复调用应一致返回 true"
+        );
     }
 
     #[test]

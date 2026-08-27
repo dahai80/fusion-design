@@ -112,6 +112,8 @@ out = []
 files = sorted(glob.glob('crates/*/src/lib.rs'))
 if os.path.exists('crates/fd-cli/src/main.rs'):
     files.append('crates/fd-cli/src/main.rs')
+# 含嵌套子目录：补扫 src/**/*.rs（修复 E-1 glob 盲区，对齐 deny-panic.sh）。
+files += sorted(glob.glob('crates/*/src/**/*.rs'))
 for f in files:
     with open(f, errors='replace') as fh:
         lines = fh.read().split('\n')
@@ -152,3 +154,11 @@ fi
 
 COUNT=$(wc -l < "$TMP_CURRENT" | tr -d ' ')
 echo "生产代码 unwrap/expect 站点数: ${COUNT}（全部在 allowlist，无新增）"
+
+# 逆向校验（E-4）：allowlist 条目在当前代码中已不存在 → 死条目，提示清理。
+# 不阻断 CI（死条目只让代码更安全），但提示避免静默积累。
+DEAD=$(comm -13 "$TMP_CURRENT" "$TMP_ALLOW" || true)
+if [ -n "$DEAD" ]; then
+    echo "::warning::allowlist 含死条目（代码已删除/重构，条目失效），建议清理："
+    echo "$DEAD" | sed 's/^/  /'
+fi

@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+# A-5：CSS 安全工具下沉为独立叶子 crate，此处 re-export 保持下游调用方不变。
+fd-css-utils = { path = "../fd-css-utils" }
 # H-A10/P1-5：taffy 已移除（compute_layout 死代码删除后无 Rust 侧布局计算）。
 # Flex/Grid 声明类型 LayoutMode/FlexParams/GridParams 保留在 src/lib.rs，
 # 由 fd-codegen（layout-aware CSS 生成）+ fd-host-web（DOM 渲染）消费。

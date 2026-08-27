@@ -1,11 +1,7 @@
 crates/fd-ai-adapter/src/lib.rs:.expect("blocking tokio runtime 创建失败")
 crates/fd-ai-adapter/src/lib.rs:.expect("DEFAULT_MLX_ENDPOINT 必为合法 localhost（编译期保证）")
-crates/fd-ai-adapter/src/lib.rs:let any_sel = Selector::parse("*").unwrap();
-crates/fd-ai-adapter/src/lib.rs:let body_sel = Selector::parse("body").unwrap();
-crates/fd-ai-adapter/src/lib.rs:let root_sel = Selector::parse(":root > *").unwrap_or_else(|_| Selector::parse("*").unwrap());
-crates/fd-host-web/src/lib.rs:.unwrap()
-crates/fd-host-web/src/lib.rs:let doc = web_sys::window().unwrap().document().unwrap();
-crates/fd-host-web/src/lib.rs:let doc2 = web_sys::window().unwrap().document().unwrap();
-crates/fd-host-web/src/lib.rs:let w = web_sys::window().unwrap();
-crates/fd-host-web/src/lib.rs:let win = web_sys::window().unwrap();
-crates/fd-host-web/src/lib.rs:let window = web_sys::window().unwrap();
+# A-2：html_to_pen_document 拆到 fd-html-parser 叶子 crate，3 处 Selector::parse
+# 为静态合法 CSS 选择器字面量（"body"/"*"/":root > *"），scraper 编译期常量解析不失败。
+crates/fd-html-parser/src/lib.rs:let any_sel = Selector::parse("*").unwrap();
+crates/fd-html-parser/src/lib.rs:let body_sel = Selector::parse("body").unwrap();
+crates/fd-html-parser/src/lib.rs:let root_sel = Selector::parse(":root > *").unwrap_or_else(|_| Selector::parse("*").unwrap());

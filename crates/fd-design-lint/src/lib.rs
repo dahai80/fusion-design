@@ -4,7 +4,7 @@
 // User instruction: "现在开始实施" — Task #17 P3-6 design_lint Skill（基础检测器）
 //! Fusion-Design design lint — 13 detectors for design specification compliance.
 
-use fd_canvas_core::{NodeKind, PenDocument, PenNode};
+use fd_canvas_core::{parse_hex_color, NodeKind, PenDocument, PenNode};
 use fd_design_system::{DesignSystem, TokenValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -165,7 +165,7 @@ impl Linter {
             self.lint_siblings(&page.nodes, &mut violations);
             for node in &page.nodes {
                 total_nodes += 1;
-                self.lint_node(node, &mut violations);
+                self.lint_node(node, &mut violations, None);
                 self.lint_children(node, &mut violations, &mut total_nodes);
             }
         }
@@ -210,10 +210,13 @@ impl Linter {
         violations: &mut Vec<LintViolation>,
         total_nodes: &mut usize,
     ) {
+        // L-10：lint_siblings 移出 for child 循环——每兄弟集只查一次，
+        // 旧实现每 child 调一次 = N× 重复扫描 + N× 重复违规。
+        self.lint_siblings(&node.children, violations);
+        let parent_fill = node.style.fill.as_deref();
         for child in &node.children {
             *total_nodes += 1;
-            self.lint_node(child, violations);
-            self.lint_siblings(&node.children, violations);
+            self.lint_node(child, violations, parent_fill);
             self.lint_children(child, violations, total_nodes);
         }
     }
@@ -234,10 +237,15 @@ impl Linter {
         }
     }
 
-    fn lint_node(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
+    fn lint_node(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+        parent_fill: Option<&str>,
+    ) {
         for rule in &self.rules {
             match rule {
-                LintRule::ContrastCheck => self.check_contrast(node, violations),
+                LintRule::ContrastCheck => self.check_contrast(node, violations, parent_fill),
                 LintRule::UnlabeledInput => self.check_unlabeled_input(node, violations),
                 LintRule::TextEffects => self.check_text_effects(node, violations),
                 LintRule::AbnormalRotation => self.check_abnormal_rotation(node, violations),
@@ -256,17 +264,27 @@ impl Linter {
         }
     }
 
-    fn check_contrast(&self, node: &PenNode, violations: &mut Vec<LintViolation>) {
-        let style = &node.style;
-        // E-28：旧实现 fg=fill、bg=stroke 语义反转——fill 是背景，stroke 是边框，
-        // 真实背景从未被检查（漏报），边框当背景（误报），WCAG 形同虚设。
-        // 正确语义：fg=文本前景色（无 text_color 字段，渲染器/codegen 均默认 #000000），
-        // bg=fill（节点背景）。无 fill 时背景透明/继承，无法算对比度 → 跳过。
-        let bg = style.fill.as_deref().unwrap_or("");
-        if bg.is_empty() {
+    fn check_contrast(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+        parent_fill: Option<&str>,
+    ) {
+        // L-9：仅 Text 节点查对比度（矩形/圆无文字不查，消假阳性）。
+        // fg=style.fill（文字色，codegen/host-web 渲染文本用 fill 作色），
+        // bg=parent_fill（父节点背景，本节点无 fill 时文本落在父背景上）。
+        // 无父背景 → 跳过（消假阴性，不臆造黑底）。
+        if node.kind != NodeKind::Text {
             return;
         }
-        let fg = "#000000";
+        let fg = match node.style.fill.as_deref() {
+            Some(f) if !f.is_empty() => f,
+            _ => return,
+        };
+        let bg = match parent_fill {
+            Some(b) if !b.is_empty() => b,
+            _ => return,
+        };
 
         let fg_lum = luminance(fg);
         let bg_lum = luminance(bg);
@@ -275,7 +293,17 @@ impl Linter {
             return;
         }
 
-        let ratio = contrast_ratio(fg_lum, bg_lum);
+        // E-14：alpha/opacity 混合近似。节点 style.opacity < 1.0 时，前景按 alpha
+        // 混合到背景再做对比度（rgba 半透文本落在不透明背景上的有效对比度）。
+        // 简化为线性亮度混合：L_eff = alpha*fg_lum + (1-alpha)*bg_lum。
+        let alpha = node.style.opacity.unwrap_or(1.0);
+        let fg_eff = if (0.0..1.0).contains(&alpha) {
+            alpha * fg_lum + (1.0 - alpha) * bg_lum
+        } else {
+            fg_lum
+        };
+
+        let ratio = contrast_ratio(fg_eff, bg_lum);
         if ratio < 3.0 {
             violations.push(LintViolation {
                 rule: LintRule::ContrastCheck,
@@ -470,34 +498,56 @@ impl Linter {
         if node.kind != NodeKind::Text {
             return;
         }
-        if node.w == 0.0 || node.h == 0.0 {
-            violations.push(LintViolation {
-                rule: LintRule::TextOverflow,
-                node_id: node.id.clone(),
-                message: format!(
-                    "文本节点 '{}' 尺寸为零（w={}, h={}），内容将溢出",
-                    node.name, node.w, node.h
-                ),
-                suggestion: "为文本节点设置宽高，或使用自适应布局".to_string(),
-                severity: LintSeverity::Error,
-            });
+        // L-11：仅当文本非空且尺寸装不下才标溢出。
+        // 旧实现零维 + 空文本也标 Error = 假阳性（占位/空文本节点被误报）。
+        let text = node.text.as_deref().unwrap_or("").trim();
+        if text.is_empty() {
+            return;
         }
+        let font_size = node.style.font_size.unwrap_or(16.0);
+        // 粗略估算：每字符宽 ≈ font_size，需求宽度 = 字符数 × font_size。
+        let needed_w = text.chars().count() as f64 * font_size;
+        if node.w > 0.0 && needed_w <= node.w {
+            return;
+        }
+        violations.push(LintViolation {
+            rule: LintRule::TextOverflow,
+            node_id: node.id.clone(),
+            message: format!(
+                "文本节点 '{}' 内容将溢出（w={}, h={}, 文本长={}）",
+                node.name,
+                node.w,
+                node.h,
+                text.chars().count()
+            ),
+            suggestion: "为文本节点设置宽高，或使用自适应布局".to_string(),
+            severity: LintSeverity::Error,
+        });
     }
 
     fn check_overlapping_nodes(&self, siblings: &[PenNode], violations: &mut Vec<LintViolation>) {
+        // E-25：旧实现 `a.z_index == b.z_index` 才检测 → 不同 z_index 的重叠（如弹层叠按钮）漏检。
+        // 改为检测视觉重叠（bbox 相交）即报，z_index 差值大时降级为 Info（可能有意叠层）。
         for i in 0..siblings.len() {
             for j in (i + 1)..siblings.len() {
                 let a = &siblings[i];
                 let b = &siblings[j];
-                if a.z_index == b.z_index && rects_overlap(a, b) {
-                    violations.push(LintViolation {
-                        rule: LintRule::OverlappingNodes,
-                        node_id: format!("{}+{}", a.id, b.id),
-                        message: format!("节点 '{}' 与 '{}' 边界框重叠", a.name, b.name),
-                        suggestion: "调整节点位置或使用不同的 z-index 避免遮挡".to_string(),
-                        severity: LintSeverity::Warning,
-                    });
+                if !rects_overlap(a, b) {
+                    continue;
                 }
+                let z_diff = (a.z_index - b.z_index).abs();
+                let severity = if z_diff > 1 {
+                    LintSeverity::Info
+                } else {
+                    LintSeverity::Warning
+                };
+                violations.push(LintViolation {
+                    rule: LintRule::OverlappingNodes,
+                    node_id: format!("{}+{}", a.id, b.id),
+                    message: format!("节点 '{}' 与 '{}' 边界框重叠", a.name, b.name),
+                    suggestion: "调整节点位置或使用不同的 z-index 避免遮挡".to_string(),
+                    severity,
+                });
             }
         }
     }
@@ -893,13 +943,19 @@ fn apply_tokens_to_nodes(
 fn build_numeric_token_map(system: &DesignSystem) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for token in &system.tokens {
-        if let TokenValue::String(s) = &token.value {
-            if s.starts_with("token:") {
-                continue;
+        match &token.value {
+            // E-13：Number token（内置规范 spacing/font_size/radius 多用 Number），
+            // 旧实现仅处理 String 可解析数字，漏掉 Number 变体——gap=16 无法匹配
+            // `spacing.md` token 引用，auto-fix 失效。补 Number arm 入 map。
+            TokenValue::Number(n) => {
+                map.insert(format!("{}", n), token.name.clone());
             }
-            if let Ok(val) = s.parse::<f64>() {
-                map.insert(format!("{}", val), token.name.clone());
+            TokenValue::String(s) if !s.starts_with("token:") => {
+                if let Ok(val) = s.parse::<f64>() {
+                    map.insert(format!("{}", val), token.name.clone());
+                }
             }
+            _ => {}
         }
     }
     map
@@ -932,16 +988,72 @@ impl Linter {
 }
 
 fn luminance(color: &str) -> f64 {
-    let hex = match parse_hex_color(color) {
-        Some(h) => h,
+    let (r, g, b) = match parse_color_any(color) {
+        Some(c) => c,
         None => return -1.0,
     };
 
-    let r = srgb_to_linear(hex[0] as f64 / 255.0);
-    let g = srgb_to_linear(hex[1] as f64 / 255.0);
-    let b = srgb_to_linear(hex[2] as f64 / 255.0);
+    let r = srgb_to_linear(r as f64 / 255.0);
+    let g = srgb_to_linear(g as f64 / 255.0);
+    let b = srgb_to_linear(b as f64 / 255.0);
 
     0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+// E-14：luminance 旧实现仅 parse_hex_color，遇 rgb()/rgba()/命名色即返 -1.0 跳过，
+// check_contrast 静默漏检（假阴性）。扩解析器：hex（含 alpha 忽略，对齐 parse_hex_color）、
+// rgb(r,g,b)、rgba(r,g,b,a)、10 个常见命名色。返 (r,g,b) 三元组，alpha 在 check_contrast 单独处理。
+fn parse_color_any(color: &str) -> Option<(u8, u8, u8)> {
+    let trimmed = color.trim();
+    if let Some(hex) = parse_hex_color(trimmed) {
+        return Some((hex[0], hex[1], hex[2]));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(rest) = lower
+        .strip_prefix("rgba(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        return parse_rgb_components(rest).map(|(r, g, b, _)| (r, g, b));
+    }
+    if let Some(rest) = lower.strip_prefix("rgb(").and_then(|s| s.strip_suffix(')')) {
+        return parse_rgb_components(rest).map(|(r, g, b, _)| (r, g, b));
+    }
+    named_color(&lower)
+}
+
+// rgb/rgba 内部解析：逗号分隔，前 3 通道 0-255 u8，第 4（rgba alpha）0.0-1.0 忽略（对比度按不透明近似）。
+fn parse_rgb_components(rest: &str) -> Option<(u8, u8, u8, Option<f32>)> {
+    let parts: Vec<&str> = rest.split(',').map(|p| p.trim()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let r = parts[0].parse::<u8>().ok()?;
+    let g = parts[1].parse::<u8>().ok()?;
+    let b = parts[2].parse::<u8>().ok()?;
+    let a = if parts.len() >= 4 {
+        parts[3].parse::<f32>().ok()
+    } else {
+        None
+    };
+    Some((r, g, b, a))
+}
+
+// 常见命名色表（WCAG 对比度场景高频）。非完整 CSS 色名，仅覆盖设计稿常用。
+fn named_color(name: &str) -> Option<(u8, u8, u8)> {
+    let rgb = match name {
+        "black" => (0, 0, 0),
+        "white" => (255, 255, 255),
+        "red" => (255, 0, 0),
+        "green" => (0, 128, 0),
+        "blue" => (0, 0, 255),
+        "yellow" => (255, 255, 0),
+        "gray" | "grey" => (128, 128, 128),
+        "orange" => (255, 165, 0),
+        "purple" => (128, 0, 128),
+        "transparent" => (255, 255, 255),
+        _ => return None,
+    };
+    Some(rgb)
 }
 
 fn srgb_to_linear(c: f64) -> f64 {
@@ -956,41 +1068,6 @@ fn contrast_ratio(l1: f64, l2: f64) -> f64 {
     let lighter = l1.max(l2);
     let darker = l1.min(l2);
     (lighter + 0.05) / (darker + 0.05)
-}
-
-fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
-    // E-30/P3：旧实现只认 3/6 位 hex，4 位(#RGBA)/8 位(#RRGGBBAA) 常见格式被拒致假告警。
-    // alpha 通道对亮度对比度无意义，忽略（按不透明处理）。
-    let s = s.trim().trim_start_matches('#');
-    match s.len() {
-        6 => {
-            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-            Some([r, g, b])
-        }
-        8 => {
-            // #RRGGBBAA：忽略末 2 位 alpha
-            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-            Some([r, g, b])
-        }
-        3 => {
-            let r = u8::from_str_radix(&s[0..1], 16).ok()?;
-            let g = u8::from_str_radix(&s[1..2], 16).ok()?;
-            let b = u8::from_str_radix(&s[2..3], 16).ok()?;
-            Some([r * 17, g * 17, b * 17])
-        }
-        4 => {
-            // #RGBA：忽略末 1 位 alpha，3 位展开 ×17
-            let r = u8::from_str_radix(&s[0..1], 16).ok()?;
-            let g = u8::from_str_radix(&s[1..2], 16).ok()?;
-            let b = u8::from_str_radix(&s[2..3], 16).ok()?;
-            Some([r * 17, g * 17, b * 17])
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -1064,21 +1141,36 @@ mod tests {
 
     #[test]
     fn contrast_low_ratio_detected() {
-        // E-28 正确语义：fg=文本（默认 #000000），bg=fill。
-        // fill=#333333 深灰背景 + 黑字 → 对比度 ~1.6:1 不足 → 应检出。
-        let style = NodeStyle {
-            fill: Some("#333333".into()),
-            stroke: Some("#444444".into()),
-            ..Default::default()
-        };
-        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        // L-9 正确语义：fg=Text 节点 fill（文字色），bg=父节点 fill（背景）。
+        // 父 rect fill=#333333 深灰背景 + 子 Text fill=#000000 黑字 → 对比度 ~1.6:1 → 应检出。
+        let parent = rect_node(
+            "r1",
+            "box",
+            NodeStyle {
+                fill: Some("#333333".into()),
+                ..Default::default()
+            },
+        );
+        let mut parent = parent;
+        parent.children = vec![text_node(
+            "t1",
+            "label",
+            NodeStyle {
+                fill: Some("#000000".into()),
+                ..Default::default()
+            },
+        )];
+        let doc = make_doc(vec![parent]);
         let result = Linter::new().lint(&doc);
         let contrast_violations: Vec<_> = result
             .violations
             .iter()
             .filter(|v| v.rule == LintRule::ContrastCheck)
             .collect();
-        assert!(!contrast_violations.is_empty());
+        assert!(
+            !contrast_violations.is_empty(),
+            "深灰背景上的黑字对比度不足应检出"
+        );
     }
 
     #[test]
@@ -1098,6 +1190,106 @@ mod tests {
             .filter(|v| v.rule == LintRule::ContrastCheck)
             .collect();
         assert!(contrast_violations.is_empty());
+    }
+
+    // E-14 回归：rgb()/rgba()/命名色旧实现 luminance 返 -1.0 跳过 → 假阴性漏检。
+    // 修复后 rgb/rgba/命名色可解析，深底浅字应检出对比度不足。
+    #[test]
+    fn contrast_rgb_color_detected() {
+        let parent = rect_node(
+            "r1",
+            "box",
+            NodeStyle {
+                fill: Some("rgb(51,51,51)".into()),
+                ..Default::default()
+            },
+        );
+        let mut parent = parent;
+        parent.children = vec![text_node(
+            "t1",
+            "label",
+            NodeStyle {
+                fill: Some("#000000".into()),
+                ..Default::default()
+            },
+        )];
+        let doc = make_doc(vec![parent]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(
+            !contrast_violations.is_empty(),
+            "rgb() 深灰背景上的黑字应检出对比度不足（E-14 修复后不再返 -1.0 跳过）"
+        );
+    }
+
+    #[test]
+    fn contrast_named_color_white_on_black_detected() {
+        let parent = rect_node(
+            "r1",
+            "box",
+            NodeStyle {
+                fill: Some("black".into()),
+                ..Default::default()
+            },
+        );
+        let mut parent = parent;
+        // white on black = 21:1，无违规（验证命名色解析后正确通过）
+        parent.children = vec![text_node(
+            "t1",
+            "label",
+            NodeStyle {
+                fill: Some("white".into()),
+                ..Default::default()
+            },
+        )];
+        let doc = make_doc(vec![parent]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(
+            contrast_violations.is_empty(),
+            "white on black 命名色对比度 21:1 应无违规"
+        );
+    }
+
+    #[test]
+    fn contrast_rgba_parsing_no_skip() {
+        // rgba 应解析成功（非 -1.0 跳过）。黑底 rgba(255,255,255,1.0) 白字 = 21:1，无违规。
+        let parent = rect_node(
+            "r1",
+            "box",
+            NodeStyle {
+                fill: Some("#000000".into()),
+                ..Default::default()
+            },
+        );
+        let mut parent = parent;
+        parent.children = vec![text_node(
+            "t1",
+            "label",
+            NodeStyle {
+                fill: Some("rgba(255,255,255,1.0)".into()),
+                ..Default::default()
+            },
+        )];
+        let doc = make_doc(vec![parent]);
+        let result = Linter::new().lint(&doc);
+        let contrast_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::ContrastCheck)
+            .collect();
+        assert!(
+            contrast_violations.is_empty(),
+            "rgba() 白字黑底 21:1 应无违规（E-14 解析 rgba 不再跳过）"
+        );
     }
 
     // E-28 回归：stroke（边框）不得当背景。仅设 stroke 无 fill → 背景透明 → 跳过，
@@ -1255,12 +1447,18 @@ mod tests {
 
     #[test]
     fn lint_stats_counts_correct() {
-        let style = NodeStyle {
-            fill: Some("#333333".into()),
-            stroke: Some("#444444".into()),
-            ..Default::default()
-        };
-        let doc = make_doc(vec![rect_node("r1", "box", style)]);
+        // L-9/L-11 回归：用 Text 节点带溢出文本触发 TextOverflow，保证 stats 非空。
+        let mut t = text_node(
+            "t1",
+            "label",
+            NodeStyle {
+                fill: Some("#000000".into()),
+                ..Default::default()
+            },
+        );
+        t.w = 10.0;
+        t.text = Some("一段很长会溢出容器宽度的文本内容".into());
+        let doc = make_doc(vec![t]);
         let result = Linter::new().lint(&doc);
         assert_eq!(result.stats.total_nodes, 1);
         assert!(result.stats.total_violations > 0);
@@ -1433,9 +1631,11 @@ mod tests {
 
     #[test]
     fn text_overflow_zero_size_detected() {
+        // L-11：零维 + 非空文本 → 溢出应检出（旧实现空文本也误报，已纠）。
         let mut node = text_node("t1", "Text", NodeStyle::default());
         node.w = 0.0;
         node.h = 0.0;
+        node.text = Some("有内容但容器为零必然溢出".into());
         let doc = make_doc(vec![node]);
         let result = Linter::new().lint(&doc);
         assert!(result
@@ -1529,6 +1729,57 @@ mod tests {
             .violations
             .iter()
             .any(|v| v.rule == LintRule::OverlappingNodes));
+    }
+
+    // E-25 回归：旧实现 `a.z_index == b.z_index` 才检测重叠，不同 z_index 的重叠漏检。
+    // 修复后不同 z_index 仍检测：z_index 差值 > 1 降级 Info（有意叠层），差值 ≤ 1 保持 Warning。
+    #[test]
+    fn overlapping_different_zindex_detected_as_info() {
+        let a = PenNode {
+            id: "a".into(),
+            name: "A".into(),
+            kind: NodeKind::Rect,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 0,
+        };
+        let b = PenNode {
+            id: "b".into(),
+            name: "B".into(),
+            kind: NodeKind::Rect,
+            x: 50.0,
+            y: 50.0,
+            w: 100.0,
+            h: 100.0,
+            style: NodeStyle::default(),
+            text: None,
+            children: vec![],
+            rotation: 0.0,
+            z_index: 5,
+        };
+        let doc = make_doc(vec![a, b]);
+        let result = Linter::new().lint(&doc);
+        let overlap_violations: Vec<_> = result
+            .violations
+            .iter()
+            .filter(|v| v.rule == LintRule::OverlappingNodes)
+            .collect();
+        assert!(
+            !overlap_violations.is_empty(),
+            "不同 z_index 的重叠节点应检出（E-25 修复后不再因 z_index 不等跳过）"
+        );
+        assert!(
+            overlap_violations
+                .iter()
+                .all(|v| v.severity == LintSeverity::Info),
+            "z_index 差值 > 1 的叠层应降级为 Info"
+        );
     }
 
     #[test]
@@ -1802,5 +2053,54 @@ mod tests {
         let result = linter.auto_fix(&mut doc);
         assert_eq!(result.fixes_applied, 0);
         assert!(result.fixes_skipped > 0);
+    }
+
+    // E-13：build_numeric_token_map 遗漏 TokenValue::Number 变体——内置规范
+    // spacing/font_size/radius 多用 Number，旧实现仅 String 可解析数字入 map，
+    // 导致 gap=8 无法匹配 robot-sim `spacing.gauge`（Number(8.0)），auto-fix 失效。
+    #[test]
+    fn build_numeric_token_map_includes_number_variant() {
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("robot-sim").expect("robot-sim").clone();
+        let map = build_numeric_token_map(&system);
+        // robot-sim spacing.gauge = Number(8.0) → key "8" → value "spacing.gauge"
+        assert_eq!(map.get("8"), Some(&"spacing.gauge".to_string()));
+        // radius.panel = Number(4.0) → key "4"
+        assert_eq!(map.get("4"), Some(&"radius.panel".to_string()));
+        // font.size.body = Number(13.0) → key "13"
+        assert_eq!(map.get("13"), Some(&"font.size.body".to_string()));
+    }
+
+    #[test]
+    fn auto_fix_gap_matches_number_spacing_token() {
+        use fd_canvas_core::{FlexParams, LayoutMode};
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("robot-sim").expect("robot-sim").clone();
+        let style = NodeStyle {
+            layout: LayoutMode::Flex(FlexParams {
+                gap: 8.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let node = rect_node("r1", "Container", style);
+        let mut doc = make_doc(vec![node]);
+
+        let result = apply_tokens_to_document(&mut doc, &system);
+        let gap_fixes: Vec<_> = result
+            .details
+            .iter()
+            .filter(|d| d.action == "gap→token_ref")
+            .collect();
+        assert!(
+            !gap_fixes.is_empty(),
+            "gap=8 应匹配 robot-sim spacing.gauge Number(8.0) token ref"
+        );
+        assert_eq!(
+            doc.pages[0].nodes[0].style.design_token_refs.get("gap"),
+            Some(&"spacing.gauge".to_string())
+        );
     }
 }

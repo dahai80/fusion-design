@@ -1,0 +1,21 @@
+[package]
+name = "fd-html-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fusion-Design HTML → PenDocument 解析器（叶子 crate，仅依赖 fd-canvas-core + scraper）"
+
+[lib]
+name = "fd_html_parser"
+path = "src/lib.rs"
+
+# A-2：从 fd-ai-adapter 5040 行单文件拆出。html_to_pen_document 及其辅助函数
+# 与 adapter 内部（FusionMlxClient/SkillRegistry）零耦合，独立成叶子 crate。
+# fd-ai-adapter re-export html_to_pen_document 保持调用方 fd_cli 不变。
+[dependencies]
+fd-canvas-core = { path = "../fd-canvas-core" }
+scraper = "0.22"
+anyhow = { workspace = true }
+tracing = { workspace = true }
