@@ -76,6 +76,13 @@ fusion-design/
 | Communication | Local private HTTP (127.0.0.1) + WKWebView Bridge |
 | Async | tokio + notify (file watching) + futures (SSE streaming) |
 
+## 📖 User Guide
+
+Scenario-based usage + troubleshooting (bilingual):
+
+- **[Usage Guide](docs/USER_GUIDE.md)** / **[使用指南](docs/USER_GUIDE_CN.md)** — 9 scenarios: first text-to-UI, export, lint+fix, image-to-ui, multi-variant, batch+spec-doc, codegen, streaming pipeline, design-system switch. Plus a 22-subcommand quick reference.
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)** / **[排障手册](docs/TROUBLESHOOTING_CN.md)** — 12 symptoms → root cause → fix: MLX unreachable, 502/503 loading, false-green models, auth 401, stream break/CJK garble, deserialize over-limit, IPC/path-traversal, Token color unresolved, wasm/studio sync, model drift, lint rules, XSS guardrail.
+
 ## 🧪 Verification
 
 ```bash
