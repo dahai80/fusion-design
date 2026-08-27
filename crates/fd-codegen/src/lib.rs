@@ -10,7 +10,10 @@
 //! 设计参照 OpenPencil `op-codegen` 的 `Codegen` trait 形状，
 //! 但消费自研的 `PenDocument`（非 jian-ops-schema），零外部依赖。
 
-use fd_canvas_core::{FlexDirection, LayoutMode, NodeKind, Page, PenDocument, PenNode};
+use fd_canvas_core::{
+    parse_hex_color, sanitize_css_value, FlexDirection, LayoutMode, NodeKind, Page, PenDocument,
+    PenNode,
+};
 use fd_design_system::DesignSystemRegistry;
 use std::collections::HashMap;
 
@@ -182,13 +185,18 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
         ));
     }
     if let Some(fill) = &node.style.fill {
-        mods.push(format!(".background(swift_ui_color(\"{}\"))", fill));
+        // R-6：fill 入 swift_ui_color("...") 的 Swift 字面量，须转义防注入。
+        mods.push(format!(
+            ".background(swift_ui_color(\"{}\"))",
+            escape_swift_string(fill)
+        ));
     }
     if let Some(stroke) = &node.style.stroke {
         // E-8：stroke_width 而非硬编码 lineWidth:1（对齐 HTML/Tailwind 路径）。
+        // R-6：stroke 同入 Swift 字面量，转义。
         let sw = node.style.stroke_width.unwrap_or(1.0);
         mods.push(format!(".overlay(RoundedRectangle(cornerRadius: {}).stroke(swift_ui_color(\"{}\"), lineWidth: {}))",
-            node.style.radius.unwrap_or(0.0) as i32, stroke, sw as i32));
+            node.style.radius.unwrap_or(0.0) as i32, escape_swift_string(stroke), sw as i32));
     }
     if let Some(r) = node.style.radius {
         if r > 0.0 {
@@ -196,7 +204,7 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
         }
     }
     if let Some(op) = node.style.opacity {
-        if (op - 1.0).abs() > f32::EPSILON {
+        if (op - 1.0).abs() > f64::EPSILON {
             mods.push(format!(".opacity({})", op));
         }
     }
@@ -213,12 +221,20 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
     }
     if let Some(fs) = node.style.font_size {
         if let Some(ff) = &node.style.font_family {
-            mods.push(format!(".font(.custom(\"{}\", size: {}))", ff, fs as i32));
+            // R-6：font_family 入字面量，转义防注入
+            mods.push(format!(
+                ".font(.custom(\"{}\", size: {}))",
+                escape_swift_string(ff),
+                fs as i32
+            ));
         } else {
             mods.push(format!(".font(.system(size: {}))", fs as i32));
         }
     } else if let Some(ff) = &node.style.font_family {
-        mods.push(format!(".font(.custom(\"{}\", size: 16))", ff));
+        mods.push(format!(
+            ".font(.custom(\"{}\", size: 16))",
+            escape_swift_string(ff)
+        ));
     }
 
     let mod_str = if mods.is_empty() {
@@ -313,26 +329,26 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
 
 fn swift_ui_color(color: &str) -> String {
     if let Some(rest) = color.strip_prefix("token:") {
-        format!("DesignTokens.{}", rest.replace('.', "_"))
-    } else if let Some(hex) = color.strip_prefix('#') {
-        match hex.len() {
-            6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-                let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-                let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-                format!("Color(red: {}/255, green: {}/255, blue: {}/255)", r, g, b)
-            }
-            3 => {
-                let r = u8::from_str_radix(&hex[0..1], 16).unwrap_or(0) * 17;
-                let g = u8::from_str_radix(&hex[1..2], 16).unwrap_or(0) * 17;
-                let b = u8::from_str_radix(&hex[2..3], 16).unwrap_or(0) * 17;
-                format!("Color(red: {}/255, green: {}/255, blue: {}/255)", r, g, b)
-            }
-            _ => format!("Color(\"{}\")", color),
-        }
-    } else {
-        format!("Color(\"{}\")", color)
+        return format!("DesignTokens.{}", rest.replace('.', "_"));
     }
+    // C-2/A-2：经共享 parse_hex_color（ASCII 门控，CJK/emoji 返 None 不 panic）。
+    if let Some([r, g, b]) = parse_hex_color(color) {
+        format!("Color(red: {}/255, green: {}/255, blue: {}/255)", r, g, b)
+    } else {
+        // R-6：非 hex/token 的颜色名（如 CSS 命名色）入 Color("...") 字符串字面量，
+        // 须转义引号/反斜杠/换行，防 `red"); evil(); /*` 注入可执行 Swift。
+        format!("Color(\"{}\")", escape_swift_string(color))
+    }
+}
+
+/// R-6：Swift 字符串字面量转义。注入面：fill/stroke/font_family/color 经 format!
+/// 塞入 `"...""` 字面量，未转义的 `"`/`\`/换行可闭合字面量注入可执行代码。
+/// 转义顺序：先 `\`（避免二次转义后续插入的反斜杠），再 `"`，再换行符。
+fn escape_swift_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 #[derive(Debug, Clone)]
@@ -428,14 +444,8 @@ fn escape_html(s: &str) -> String {
 // （如 `red;} * {position:fixed;background:url(http://evil)` 破离线约束）。
 // 拒绝 url()（离线硬约束 + 外网探测），剔除可逃逸属性边界的 `;{}`，保留 hex/命名色/rgb()。
 fn sanitize_css_color(raw: &str) -> String {
-    let lower = raw.to_lowercase();
-    if lower.contains("url(") || lower.contains("expression(") || lower.contains("@import") {
-        tracing::warn!(raw = raw, "codegen CSS 颜色含危险函数，降级 transparent");
-        return "transparent".to_string();
-    }
-    raw.chars()
-        .filter(|&c| !matches!(c, ';' | '{' | '}' | '<' | '>'))
-        .collect()
+    // C-6/A-3：共享 sanitize_css_value，比旧实现多剥 `"`（Tailwind 任意值 bg-[{v}] 逃逸点）。
+    sanitize_css_value(raw, "transparent")
 }
 
 // E-10：node.id 经 escape_html 转义后安全用于属性值（转 " 防 `data-id="a" onclick=…` 注入）。
@@ -881,6 +891,9 @@ fn resolve_tokens_recursive(
 ) {
     node.style.fill = resolve(&node.style.fill);
     node.style.stroke = resolve(&node.style.stroke);
+    // E-16：font_family 旧实现未经 resolve，token:font.mono 引用无法解析为实际字体栈。
+    // robot-sim font.mono=String("SF Mono, Menlo, monospace")，经 resolve 闭包的 String arm 解析。
+    node.style.font_family = resolve(&node.style.font_family);
     for child in &mut node.children {
         resolve_tokens_recursive(child, resolve);
     }
@@ -1170,6 +1183,29 @@ mod tests {
             p.children[0].style.fill.as_deref(),
             Some("#007AFF"),
             "嵌套子节点的 token 引用应被递归解析"
+        );
+    }
+
+    // E-16 回归：resolve_tokens_recursive 旧实现仅处理 fill/stroke，font_family
+    // 的 `token:font.mono` 引用无法解析为实际字体栈，codegen 输出残留 token 字面量。
+    // 修复后 font_family 经 resolve 闭包的 String arm 解析。
+    #[test]
+    fn resolve_tokens_resolves_font_family_token_ref() {
+        use fd_design_system::DesignSystemRegistry;
+        let mut reg = DesignSystemRegistry::new();
+        reg.register_builtin();
+        reg.activate("robot-sim").unwrap();
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p", "P", 100.0, 100.0);
+        let mut n = PenNode::text("n", 0.0, 0.0, "hi");
+        n.style.font_family = Some("token:font.mono".into());
+        page.add(n);
+        doc.add_page(page);
+        let resolved = resolve_tokens(&doc, &reg);
+        assert_eq!(
+            resolved.pages[0].nodes[0].style.font_family.as_deref(),
+            Some("SF Mono, Menlo, monospace"),
+            "font_family token 引用应解析为实际字体栈（E-16）"
         );
     }
 
@@ -1477,6 +1513,78 @@ mod tests {
             out.contains(".font(.custom(\"Menlo\", size: 16))"),
             "font_family 无 size 应回退 16: {}",
             out
+        );
+    }
+
+    #[test]
+    fn escape_swift_string_escapes_injection_chars() {
+        // R-6：反斜杠/引号/换行须转义
+        assert_eq!(escape_swift_string("red"), "red");
+        assert_eq!(
+            escape_swift_string(r#"red"); evil(); /*"#),
+            r#"red\"); evil(); /*"#
+        );
+        assert_eq!(escape_swift_string("a\nb"), r"a\nb");
+        assert_eq!(escape_swift_string("back\\slash"), r"back\\slash");
+    }
+
+    #[test]
+    fn swift_ui_color_escapes_named_color_injection() {
+        // R-6：非 hex 命名色入 Color("...") 字面量。转义后每个 " 前必有 \。
+        // 危险模式 = 裸 "（未被 \ 转义）闭合字面量。检查：恶意输入含 "，
+        // 输出中所有 " 必须紧跟在 \ 之后（即 \" 形态），无裸 "。
+        let evil = r#"red"); evil(); /*"#;
+        let out = swift_ui_color(evil);
+        assert!(
+            out.contains("\\\""),
+            "quote must be escaped to backslash-quote: {out}"
+        );
+        // 输出含 \" 表示已转义；进一步校验不存在未被转义的裸引号闭合注入：
+        // 去掉所有 \" 后，剩余的 " 必为字面量定界符（恰好 2 个：Color(" 和 ")）。
+        let stripped = out.replace("\\\"", "");
+        let bare_quotes = stripped.matches('"').count();
+        assert_eq!(
+            bare_quotes, 2,
+            "after removing escaped quotes, only 2 literal delimiters should remain: {out} -> {stripped}"
+        );
+    }
+
+    #[test]
+    fn swiftui_font_family_injection_blocked() {
+        // R-6 端到端：font_family 注入面经 escape_swift_string 拦截。
+        // 校验逻辑同上：去 \" 后仅余字面量定界引号。
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p1", "P", 100.0, 100.0);
+        let mut n = PenNode::rect("n1", 0.0, 0.0, 50.0, 30.0);
+        n.style.font_family = Some(r#"Menlo"); evil(); /*"#.into());
+        page.add(n);
+        doc.add_page(page);
+        let gen = SwiftUiCodegen {
+            view_name: "V".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(
+            out.contains(r#"Menlo\"); evil(); /*"#),
+            "font_family quote must be escaped to backslash-quote: {out}"
+        );
+    }
+
+    #[test]
+    fn swiftui_fill_injection_blocked() {
+        // R-6 端到端：非 hex fill 经 swift_ui_color 转义。
+        let mut doc = PenDocument::new();
+        let mut page = Page::new("p1", "P", 100.0, 100.0);
+        let mut n = PenNode::rect("n1", 0.0, 0.0, 50.0, 30.0);
+        n.style.fill = Some(r#"red"); evil(); /*"#.into());
+        page.add(n);
+        doc.add_page(page);
+        let gen = SwiftUiCodegen {
+            view_name: "V".into(),
+        };
+        let out = gen.generate(&doc);
+        assert!(
+            out.contains(r#"red\"); evil(); /*"#),
+            "fill quote must be escaped to backslash-quote: {out}"
         );
     }
 }

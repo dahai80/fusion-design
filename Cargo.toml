@@ -1,8 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    # A-5：CSS 安全工具叶子 crate（无 fd-* 依赖），fd-canvas-core re-export。
+    "crates/fd-css-utils",
     "crates/fd-canvas-core",
     "crates/fd-codegen",
+    # A-2：html_to_pen_document 拆出叶子 crate（仅 fd-canvas-core + scraper 依赖）。
+    "crates/fd-html-parser",
     "crates/fd-ai-adapter",
     "crates/fd-design-system",
     "crates/fd-ecosystem",
@@ -23,7 +27,7 @@ exclude = ["vendor/openpencil"]
 [workspace.package]
 version = "0.1.12"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.94"
 license = "Apache-2.0"
 authors = ["Fusion-MLX Team"]
 repository = "https://github.com/dahai80/fusion-design"
@@ -36,7 +40,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "io-util"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# E-5：default-features=false 砍掉 native-tls/openssl-sys 系统依赖，纯 Rust TLS
+# 后端 rustls-tls。离线约束下避免链接系统 OpenSSL（macOS/Linux 差异 + CI 镜像缺 libssl）。
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 url = "2"
 futures = "0.3"
 base64 = "0.22"

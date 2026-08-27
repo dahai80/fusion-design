@@ -16,4 +16,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# A-3：CSS 值净化共享真相源（to_css_value/to_css_custom_properties）。
+fd-canvas-core = { path = "../fd-canvas-core" }
 # op-design-lint = { workspace = true }  # subtree 激活后启用

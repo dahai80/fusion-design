@@ -39,8 +39,10 @@ if [ -n "$violating_tomls" ]; then
 fi
 
 # 2. src 中 HTTP 库的 use/路径调用（fd-ai-adapter 除外）。
+# find 递归覆盖 src 嵌套子目录（修复 E-1 glob 盲区：crates/*/src/*.rs 只扫直层，
+# 嵌套模块文件漏扫）。对齐 deny-panic.sh / deny-unwrap-expect.sh 的嵌套覆盖。
 violating_srcs=$(
-    for src in crates/*/src/*.rs; do
+    while IFS= read -r src; do
         crate=$(basename "$(dirname "$(dirname "$src")")")
         if [ "$crate" = "fd-ai-adapter" ]; then
             continue
@@ -49,7 +51,7 @@ violating_srcs=$(
         if grep -qE "(use[[:space:]]+(${HTTP_LIBS})(::|[[:space:]])|(${HTTP_LIBS})::)" "$src"; then
             echo "$src"
         fi
-    done
+    done < <(find crates -type f -name '*.rs' -path '*/src/*' | sort)
 )
 if [ -n "$violating_srcs" ]; then
     echo "::error::非 fd-ai-adapter crate 的 src 中出现出站 HTTP 库调用，违反离线硬约束（H-A17）"

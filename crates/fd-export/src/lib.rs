@@ -13,8 +13,27 @@
 
 use std::path::{Path, PathBuf};
 
+use fd_canvas_core::parse_hex_color;
 use fd_design_system::DesignSystemRegistry;
 use serde::{Deserialize, Serialize};
+
+// A-4：库 crate 显式错误枚举，替代 anyhow bail。下游（fd-cli report_error）
+// 可 downcast 按变体 match 做差异化提示（修 E-9）。io/serde 是直接依赖类型用 #[from]；
+// usvg/png/printpdf 错误经 RenderFailed(String) 收口，避免把这俩错误类型暴露到公共 API
+// （png/printpdf 非本 crate 直接依赖，跨 crate 暴露会增加下游耦合）。
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    #[error("IO 错误: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("序列化错误: {0}")]
+    Serialize(#[from] serde_json::Error),
+    #[error("渲染失败: {0}")]
+    RenderFailed(String),
+    #[error("不支持的导出格式: {0:?}")]
+    UnsupportedFormat(ExportFormat),
+    #[error("批量导出存在 {count} 项失败:\n{detail}")]
+    BatchPartial { count: usize, detail: String },
+}
 
 // 渲染光栅图（PNG）时画布单边像素上限，防止恶意 .fusiondesign 触发 OOM。
 const MAX_CANVAS_DIM: u32 = 16384;
@@ -59,8 +78,8 @@ impl ExportFormat {
 pub struct CanvasPage {
     pub id: String,
     pub name: String,
-    pub width: f32,
-    pub height: f32,
+    pub width: f64,
+    pub height: f64,
     pub elements: Vec<CanvasElement>,
 }
 
@@ -68,10 +87,10 @@ pub struct CanvasPage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasElement {
     pub kind: String,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
@@ -79,17 +98,17 @@ pub struct CanvasElement {
     #[serde(default)]
     pub stroke: Option<String>,
     #[serde(default)]
-    pub stroke_width: Option<f32>,
+    pub stroke_width: Option<f64>,
     #[serde(default)]
-    pub radius: Option<f32>,
+    pub radius: Option<f64>,
     #[serde(default)]
-    pub opacity: Option<f32>,
+    pub opacity: Option<f64>,
     #[serde(default)]
-    pub font_size: Option<f32>,
+    pub font_size: Option<f64>,
     #[serde(default)]
     pub font_family: Option<String>,
     #[serde(default)]
-    pub rotation: Option<f32>,
+    pub rotation: Option<f64>,
 }
 
 impl CanvasPage {
@@ -154,11 +173,23 @@ fn resolve_color_var(value: &Option<String>, reg: &DesignSystemRegistry) -> Opti
         .map(|rest| rest.trim())
         .or_else(|| trimmed.strip_prefix("token:").map(|rest| rest.trim()));
     if let Some(name) = token_name {
-        // 先按原名（dot 命名）查；再把 dash 归一化为 dot 重查
+        // L-13：解析 token 链——旧实现只认 TokenValue::Color，链引用（String→token:xxx）漏。
+        // 经 DesignSystem::resolve_reference 递归解析（带环检测），再取颜色。
         let normalized = name.replace('-', ".");
         for candidate in [name, normalized.as_str()] {
-            if let Some(fd_design_system::TokenValue::Color(c)) = reg.lookup(candidate) {
-                return Some(c.clone());
+            if let Some(tv) = reg.lookup(candidate) {
+                if let Some(system) = reg.active() {
+                    let mut visited = std::collections::HashSet::new();
+                    let resolved = system.resolve_reference(tv, &mut visited);
+                    // resolve_reference 对非 Color 返回 css 值；颜色直接用，
+                    // 非颜色（如 Number/Shadow）回退保留原 var 以免污染 fill。
+                    if let fd_design_system::TokenValue::Color(c) = tv {
+                        return Some(c.clone());
+                    }
+                    if !resolved.is_empty() && !resolved.starts_with("var(") {
+                        return Some(resolved);
+                    }
+                }
             }
         }
         tracing::warn!(var = %name, "Token 颜色变量未能在当前设计规范中解析，保留原值");
@@ -183,7 +214,7 @@ impl Exporter {
         doc: &fd_canvas_core::PenDocument,
         format: ExportFormat,
         out_dir: &Path,
-    ) -> anyhow::Result<Vec<PathBuf>> {
+    ) -> Result<Vec<PathBuf>, ExportError> {
         let pages: Vec<CanvasPage> = doc.pages.iter().map(CanvasPage::from_page).collect();
         Self::export_batch(&pages, format, out_dir)
     }
@@ -195,7 +226,7 @@ impl Exporter {
         format: ExportFormat,
         out_dir: &Path,
         reg: &DesignSystemRegistry,
-    ) -> anyhow::Result<Vec<PathBuf>> {
+    ) -> Result<Vec<PathBuf>, ExportError> {
         let mut pages: Vec<CanvasPage> = doc.pages.iter().map(CanvasPage::from_page).collect();
         for page in &mut pages {
             resolve_page_token_vars(page, reg);
@@ -208,7 +239,7 @@ impl Exporter {
         page: &CanvasPage,
         format: ExportFormat,
         out_dir: &Path,
-    ) -> anyhow::Result<PathBuf> {
+    ) -> Result<PathBuf, ExportError> {
         std::fs::create_dir_all(out_dir)?;
         let filename = format!("{}.{}", sanitize_filename(&page.name), format.extension());
         let file = out_dir.join(&filename);
@@ -222,7 +253,7 @@ impl Exporter {
                     ExportFormat::Json => serde_json::to_string_pretty(page)?,
                     other => {
                         tracing::error!(format = ?other, "export_page 不支持的导出格式");
-                        anyhow::bail!("不支持的导出格式: {:?}", other);
+                        return Err(ExportError::UnsupportedFormat(other));
                     }
                 };
                 std::fs::write(&file, content)?;
@@ -237,10 +268,24 @@ impl Exporter {
         pages: &[CanvasPage],
         format: ExportFormat,
         out_dir: &Path,
-    ) -> anyhow::Result<Vec<PathBuf>> {
+    ) -> Result<Vec<PathBuf>, ExportError> {
+        // L-12：批导出非原子——旧实现逐页 `?`，中途失败已导出部分页且无汇总。
+        // 改为全部尝试，收集错误，任一失败则 fail visibly 汇总（已导出文件保留，
+        // 调用方据 errors 决定重试/清理）。
         let mut files = Vec::with_capacity(pages.len());
+        let mut errors: Vec<String> = Vec::new();
         for page in pages {
-            files.push(Self::export_page(page, format, out_dir)?);
+            match Self::export_page(page, format, out_dir) {
+                Ok(f) => files.push(f),
+                Err(e) => errors.push(format!("页面 '{}' 导出失败: {e}", page.name)),
+            }
+        }
+        if !errors.is_empty() {
+            tracing::error!(count = errors.len(), "export_batch: 部分页面导出失败");
+            return Err(ExportError::BatchPartial {
+                count: errors.len(),
+                detail: errors.join("\n"),
+            });
         }
         Ok(files)
     }
@@ -250,9 +295,10 @@ impl Exporter {
         pages: Vec<CanvasPage>,
         format: ExportFormat,
         out_dir: PathBuf,
-    ) -> anyhow::Result<Vec<PathBuf>> {
+    ) -> Result<Vec<PathBuf>, ExportError> {
         tokio::task::spawn_blocking(move || Exporter::export_batch(&pages, format, &out_dir))
-            .await?
+            .await
+            .map_err(|e| ExportError::RenderFailed(format!("阻塞任务失败: {e}")))?
     }
 
     /// 异步从 PenDocument 导出。
@@ -260,8 +306,10 @@ impl Exporter {
         doc: fd_canvas_core::PenDocument,
         format: ExportFormat,
         out_dir: PathBuf,
-    ) -> anyhow::Result<Vec<PathBuf>> {
-        tokio::task::spawn_blocking(move || Self::from_pen_document(&doc, format, &out_dir)).await?
+    ) -> Result<Vec<PathBuf>, ExportError> {
+        tokio::task::spawn_blocking(move || Self::from_pen_document(&doc, format, &out_dir))
+            .await
+            .map_err(|e| ExportError::RenderFailed(format!("阻塞任务失败: {e}")))?
     }
 }
 
@@ -370,10 +418,10 @@ fn render_element_svg(el: &CanvasElement) -> String {
             el.y,
             el.w,
             el.h,
-            xml_escape(el.text.as_deref().unwrap_or(""))
+            xml_escape(&sanitize_image_url(el.text.as_deref().unwrap_or("")))
         ),
         "group" => "<!-- group -->\n".to_string(),
-        other => format!("<!-- 未知元素类型 {other} -->\n"),
+        other => format!("<!-- 未知元素类型 {} -->\n", xml_escape(other)),
     }
 }
 
@@ -384,15 +432,54 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
+/// R-5：SVG `<image href>` 协议白名单。SVG 可被嵌入 HTML/直接打开，`<image href>`
+/// 是 XSS/SSRF 注入面——`javascript:`/`data:text/html` 可执行脚本，`http(s)://`
+/// 触发出站请求（违反离线约束）。仅放行：
+///   - `data:image/*`（合法内嵌位图/SVG，离线自包含）
+///   - 相对/无协议路径（本地资源，不出网）
+///
+/// 非白名单一律返空串（omit href，渲染空图框而非执行注入）。
+fn sanitize_image_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // 协议判断：取冒号前部分（小写）。无冒号视为相对路径，放行。
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("data:") {
+        // 仅放行 data:image/*，拒 data:text/html 等
+        if lower.starts_with("data:image/") {
+            return trimmed.to_string();
+        }
+        tracing::warn!(url = %trimmed, "SVG image href 拒绝非 image data URI");
+        return String::new();
+    }
+    if lower.starts_with("javascript:")
+        || lower.starts_with("vbscript:")
+        || lower.starts_with("http:")
+        || lower.starts_with("https:")
+        || lower.starts_with("ftp:")
+        || lower.starts_with("file:")
+    {
+        tracing::warn!(url = %trimmed, "SVG image href 拒绝出网/可执行协议");
+        return String::new();
+    }
+    // 无协议前缀：相对路径或纯文件名，放行（本地资源，不出网）
+    trimmed.to_string()
+}
+
+fn render_png(page: &CanvasPage, file: &Path) -> Result<(), ExportError> {
     let svg_str = render_svg(page);
     let opt = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_str(&svg_str, &opt)?;
+    let tree = resvg::usvg::Tree::from_str(&svg_str, &opt)
+        .map_err(|e| ExportError::RenderFailed(format!("SVG 解析失败: {e}")))?;
     let pixmap_size = tree.size();
     let width = pixmap_size.width() as u32;
     let height = pixmap_size.height() as u32;
     if width == 0 || height == 0 {
-        anyhow::bail!("页面尺寸为零，无法渲染 PNG");
+        return Err(ExportError::RenderFailed(
+            "页面尺寸为零，无法渲染 PNG".into(),
+        ));
     }
     if width > MAX_CANVAS_DIM || height > MAX_CANVAS_DIM {
         tracing::warn!(
@@ -401,13 +488,9 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
             limit = MAX_CANVAS_DIM,
             "画布尺寸超出光栅化上限，拒绝渲染 PNG"
         );
-        anyhow::bail!(
-            "画布尺寸 {}x{} 超出光栅化上限 {}x{}，拒绝渲染 PNG 防止 OOM",
-            width,
-            height,
-            MAX_CANVAS_DIM,
-            MAX_CANVAS_DIM
-        );
+        return Err(ExportError::RenderFailed(format!(
+            "画布尺寸 {width}x{height} 超出光栅化上限 {MAX_CANVAS_DIM}x{MAX_CANVAS_DIM}，拒绝渲染 PNG 防止 OOM"
+        )));
     }
     // R-A16：单边限制不够，16384²×4=1GB 仍 OOM。总像素门控。
     let total_pixels = width as u64 * height as u64;
@@ -419,22 +502,20 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
             limit = MAX_CANVAS_PIXELS,
             "画布总像素超出上限，拒绝渲染 PNG"
         );
-        anyhow::bail!(
-            "画布总像素 {} ({}x{}) 超出上限 {}，拒绝渲染 PNG 防止 OOM",
-            total_pixels,
-            width,
-            height,
-            MAX_CANVAS_PIXELS
-        );
+        return Err(ExportError::RenderFailed(format!(
+            "画布总像素 {total_pixels} ({width}x{height}) 超出上限 {MAX_CANVAS_PIXELS}，拒绝渲染 PNG 防止 OOM"
+        )));
     }
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| anyhow::anyhow!("无法创建 pixmap ({}x{})", width, height))?;
+        .ok_or_else(|| ExportError::RenderFailed(format!("无法创建 pixmap ({width}x{height})")))?;
     resvg::render(
         &tree,
         resvg::tiny_skia::Transform::identity(),
         &mut pixmap.as_mut(),
     );
-    let png_data = pixmap.encode_png()?;
+    let png_data = pixmap
+        .encode_png()
+        .map_err(|e| ExportError::RenderFailed(format!("PNG 编码失败: {e}")))?;
     std::fs::write(file, &png_data)?;
     tracing::info!(?file, "PNG 已导出");
     Ok(())
@@ -442,23 +523,9 @@ fn render_png(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
 
 /// 把 #rrggbb / #rgb 十六进制颜色字符串解析为 printpdf Color::Rgb（0..1 浮点）。
 /// 无法解析返回 None（调用方按默认色处理）。支持大写/小写/3 位/6 位。
+/// C-3：经 fd_canvas_core::parse_hex_color ASCII 门控，CJK 字节切片 panic 根治。
 fn hex_to_pdf_color(hex: &str) -> Option<printpdf::Color> {
-    let h = hex.trim().strip_prefix('#')?;
-    let (r, g, b) = match h.len() {
-        6 => {
-            let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-            (r, g, b)
-        }
-        3 => {
-            let r = u8::from_str_radix(&h[0..1].repeat(2), 16).ok()?;
-            let g = u8::from_str_radix(&h[1..2].repeat(2), 16).ok()?;
-            let b = u8::from_str_radix(&h[2..3].repeat(2), 16).ok()?;
-            (r, g, b)
-        }
-        _ => return None,
-    };
+    let [r, g, b] = parse_hex_color(hex)?;
     Some(printpdf::Color::Rgb(printpdf::Rgb::new(
         r as f32 / 255.0,
         g as f32 / 255.0,
@@ -467,13 +534,94 @@ fn hex_to_pdf_color(hex: &str) -> Option<printpdf::Color> {
     )))
 }
 
-fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
+/// 判定字符串是否含 CJK 字符（中日韩统一表意文字 + 兼容表意文字）。
+/// BuiltinFont::Helvetica 是 WinAnsi 编码，CJK 字符会丢成 .notdef（R-10）。
+/// 含 CJK 时需切换到内嵌 TTF 字体（PingFang）才能正确出字。
+fn text_has_cjk(s: &str) -> bool {
+    s.chars().any(|c| {
+        let cp = c as u32;
+        (0x4E00..=0x9FFF).contains(&cp)      // CJK 统一表意文字
+            || (0x3400..=0x4DBF).contains(&cp) // CJK 扩展 A
+            || (0xF900..=0xFAFF).contains(&cp) // CJK 兼容表意文字
+            || (0x3000..=0x303F).contains(&cp) // CJK 标点
+            || (0xFF00..=0xFFEF).contains(&cp) // 全角字符
+    })
+}
+
+/// 页面是否含 CJK 文本元素（决定是否需要内嵌中文字体）。
+fn page_has_cjk_text(page: &CanvasPage) -> bool {
+    page.elements
+        .iter()
+        .any(|el| el.kind == "text" && el.text.as_deref().is_some_and(text_has_cjk))
+}
+
+/// macOS 系统中文字体候选路径。PingFang.ttc 是 macOS 14+ 默认中文字体。
+/// 离线约束下不打包字体（版权 + 体积），运行时检测系统字体。
+/// R-10：PDF 导出 CJK 文本需内嵌 TTF/OTF/TTC，Helvetica(WinAnsi) 不支持中文。
+fn cjk_font_paths() -> &'static [&'static str] {
+    &[
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ]
+}
+
+/// 加载系统中文字体字节。返回 (bytes, font_index)——TTC 需指定 face index。
+/// 找不到系统字体返回 None（调用方降级 Helvetica + loud warn）。
+fn load_cjk_font() -> Option<(Vec<u8>, usize)> {
+    for path in cjk_font_paths() {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                tracing::info!(font = %path, bytes = bytes.len(), "PDF CJK 字体已加载");
+                return Some((bytes, 0));
+            }
+            Err(e) => {
+                tracing::debug!(font = %path, err = %e, "CJK 字体候选不存在，尝试下一个");
+            }
+        }
+    }
+    None
+}
+
+fn render_pdf(page: &CanvasPage, file: &Path) -> Result<(), ExportError> {
     let width_mm = page.width * 0.264583;
     let height_mm = page.height * 0.264583;
     // 像素→mm 转换因子（1 px = 0.264583 mm @ 96 DPI）。
-    let px_to_mm = 0.264583_f32;
+    let px_to_mm = 0.264583_f64;
+
+    let mut doc = printpdf::PdfDocument::new(&page.name);
+
+    // R-10：含 CJK 文本时内嵌系统中文字体（PingFang），否则 CJK 字符在
+    // Helvetica(WinAnsi) 下丢成 .notdef 不可见。无系统字体则 loud warn 降级。
+    let cjk_font_id: Option<printpdf::FontId> = if page_has_cjk_text(page) {
+        match load_cjk_font() {
+            Some((bytes, idx)) => {
+                let mut warns = Vec::new();
+                match printpdf::font::ParsedFont::from_bytes(&bytes, idx, &mut warns) {
+                    Some(parsed) => Some(doc.add_font(&parsed)),
+                    None => {
+                        tracing::warn!(
+                            "PDF CJK 字体解析失败，CJK 文本将无法显示（降级 Helvetica）"
+                        );
+                        None
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "未找到系统中文字体（PingFang.ttc 等），PDF CJK 文本将无法显示。\
+                     请在 macOS 安装中文字体后重试。"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut ops = Vec::new();
+    // R-11：聚合跳过的元素类型，供调用方 fail visibly 打印跳过清单。
+    let mut skipped_kinds: Vec<String> = Vec::new();
     // 先画形状（rect/circle），再画文字，保证文字在形状之上不被遮挡。
     for el in &page.elements {
         match el.kind.as_str() {
@@ -497,17 +645,17 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
                     ops.push(printpdf::ops::Op::SetOutlineColor { col: c.clone() });
                     if let Some(sw) = el.stroke_width {
                         ops.push(printpdf::ops::Op::SetOutlineThickness {
-                            pt: printpdf::Pt(sw),
+                            pt: printpdf::Pt(sw as f32),
                         });
                     }
                 }
                 // PDF 原点左下、y 向上；画布左上、y 向下。
                 let pdf_y = height_mm - el.y * px_to_mm - el.h * px_to_mm;
                 let mut rect = printpdf::graphics::Rect::from_xywh(
-                    printpdf::Pt(el.x * px_to_mm),
-                    printpdf::Pt(pdf_y),
-                    printpdf::Pt(el.w * px_to_mm),
-                    printpdf::Pt(el.h * px_to_mm),
+                    printpdf::Pt((el.x * px_to_mm) as f32),
+                    printpdf::Pt(pdf_y as f32),
+                    printpdf::Pt((el.w * px_to_mm) as f32),
+                    printpdf::Pt((el.h * px_to_mm) as f32),
                 );
                 rect.mode = Some(mode);
                 ops.push(printpdf::ops::Op::DrawRectangle { rectangle: rect });
@@ -536,16 +684,22 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
                     ops.push(printpdf::ops::Op::SetOutlineColor { col: c.clone() });
                     if let Some(sw) = el.stroke_width {
                         ops.push(printpdf::ops::Op::SetOutlineThickness {
-                            pt: printpdf::Pt(sw),
+                            pt: printpdf::Pt(sw as f32),
                         });
                     }
                 }
                 // 圆用 4 段三次贝塞尔近似（magic number 0.5523）。PDF 坐标系 y 翻转。
                 let pdf_cy = height_mm - cy * px_to_mm;
-                let cx_pt = printpdf::Pt(cx * px_to_mm);
-                let r_pt = r * px_to_mm;
+                let cx_pt = printpdf::Pt((cx * px_to_mm) as f32);
+                let r_pt = (r * px_to_mm) as f32;
                 let k = 0.5523_f32 * r_pt;
-                let poly = circle_polygon(printpdf::Pt(pdf_cy), cx_pt, printpdf::Pt(r_pt), k, mode);
+                let poly = circle_polygon(
+                    printpdf::Pt(pdf_cy as f32),
+                    cx_pt,
+                    printpdf::Pt(r_pt),
+                    k,
+                    mode,
+                );
                 ops.push(printpdf::ops::Op::DrawPolygon { polygon: poly });
                 ops.push(printpdf::ops::Op::RestoreGraphicsState);
             }
@@ -553,14 +707,19 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
                 let text = el.text.as_deref().unwrap_or("");
                 let fs = el.font_size.unwrap_or(12.0);
                 ops.push(printpdf::ops::Op::StartTextSection);
+                // R-10：CJK 文本用内嵌中文字体；纯 ASCII/Latin 仍用 Helvetica（无嵌入开销）。
+                let font_handle = match (&cjk_font_id, text_has_cjk(text)) {
+                    (Some(fid), true) => printpdf::ops::PdfFontHandle::External(fid.clone()),
+                    _ => printpdf::ops::PdfFontHandle::Builtin(printpdf::BuiltinFont::Helvetica),
+                };
                 ops.push(printpdf::ops::Op::SetFont {
-                    font: printpdf::ops::PdfFontHandle::Builtin(printpdf::BuiltinFont::Helvetica),
-                    size: printpdf::Pt(fs),
+                    font: font_handle,
+                    size: printpdf::Pt(fs as f32),
                 });
                 ops.push(printpdf::ops::Op::SetTextCursor {
                     pos: printpdf::graphics::Point::new(
-                        printpdf::Mm(el.x * px_to_mm),
-                        printpdf::Mm(height_mm - el.y * px_to_mm - fs * px_to_mm),
+                        printpdf::Mm((el.x * px_to_mm) as f32),
+                        printpdf::Mm((height_mm - el.y * px_to_mm - fs * px_to_mm) as f32),
                     ),
                 });
                 ops.push(printpdf::ops::Op::ShowText {
@@ -568,20 +727,36 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> anyhow::Result<()> {
                 });
                 ops.push(printpdf::ops::Op::EndTextSection);
             }
-            _ => {}
+            // L-12/R-11：不支持此元素类型不再静默丢弃——聚合到 skipped_kinds 供调用方打印。
+            // rotation：printpdf 0.12 Op 枚举无易用的 per-shape transform，
+            // 非 0 旋转的 shape 暂按未旋转输出并告警（TODO：后续接 printpdf Transform）。
+            other => {
+                if !skipped_kinds.iter().any(|k| k == other) {
+                    skipped_kinds.push(other.to_string());
+                }
+                tracing::warn!(kind = %other, "PDF 导出不支持此元素类型，已跳过");
+            }
         }
     }
 
-    let pdf_page =
-        printpdf::ops::PdfPage::new(printpdf::Mm(width_mm), printpdf::Mm(height_mm), ops);
-
-    let mut doc = printpdf::PdfDocument::new(&page.name);
+    let pdf_page = printpdf::ops::PdfPage::new(
+        printpdf::Mm(width_mm as f32),
+        printpdf::Mm(height_mm as f32),
+        ops,
+    );
     doc.with_pages(vec![pdf_page]);
 
     let mut warnings = Vec::new();
     let opts = printpdf::serialize::PdfSaveOptions::default();
     let pdf_data = doc.save(&opts, &mut warnings);
     std::fs::write(file, &pdf_data)?;
+    // R-11：跳过的元素类型 fail visibly——已导出但不完整，聚合打印供调用方/用户感知。
+    if !skipped_kinds.is_empty() {
+        tracing::warn!(
+            skipped = ?skipped_kinds,
+            "PDF 导出跳过部分不支持元素类型（输出可能不完整）"
+        );
+    }
     tracing::info!(?file, warnings = warnings.len(), "PDF 已导出");
     Ok(())
 }
@@ -950,6 +1125,153 @@ mod tests {
         );
     }
 
+    // R-10：CJK 文本检测。
+    #[test]
+    fn text_has_cjk_detects_chinese() {
+        assert!(text_has_cjk("登录页面"));
+        assert!(text_has_cjk("hello 世界"));
+        assert!(text_has_cjk("全角　空格"));
+        assert!(!text_has_cjk("plain ascii"));
+        assert!(!text_has_cjk(""));
+        assert!(!text_has_cjk("café résumé"));
+    }
+
+    // R-10：含 CJK 文本页面需内嵌字体；纯 Latin 不嵌入（避免无谓开销）。
+    #[test]
+    fn page_has_cjk_text_detection() {
+        let cjk_page = CanvasPage {
+            id: "c".into(),
+            name: "C".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "text".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 20.0,
+                fill: None,
+                stroke: None,
+                stroke_width: None,
+                text: Some("你好".into()),
+                radius: None,
+                opacity: None,
+                font_size: Some(12.0),
+                font_family: None,
+                rotation: None,
+            }],
+        };
+        assert!(page_has_cjk_text(&cjk_page));
+
+        let latin_only = CanvasPage {
+            id: "l".into(),
+            name: "L".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "text".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 20.0,
+                fill: None,
+                stroke: None,
+                stroke_width: None,
+                text: Some("login".into()),
+                radius: None,
+                opacity: None,
+                font_size: Some(12.0),
+                font_family: None,
+                rotation: None,
+            }],
+        };
+        assert!(!page_has_cjk_text(&latin_only));
+    }
+
+    // R-10：CJK 文本 PDF 仍有效（真机有 PingFang 时嵌入，无时降级但不 panic）。
+    // 不强断言字形可见（依赖真机字体），只验证不崩且产出合法 PDF。
+    #[test]
+    fn render_pdf_cjk_text_produces_valid_pdf() {
+        let tmp = tempdir().unwrap();
+        let page = CanvasPage {
+            id: "cjk".into(),
+            name: "中文页".into(),
+            width: 200.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "text".into(),
+                x: 10.0,
+                y: 10.0,
+                w: 180.0,
+                h: 20.0,
+                fill: None,
+                stroke: None,
+                stroke_width: None,
+                text: Some("登录页面".into()),
+                radius: None,
+                opacity: None,
+                font_size: Some(14.0),
+                font_family: None,
+                rotation: None,
+            }],
+        };
+        let content = pdf_content(&page, tmp.path());
+        assert!(content.starts_with("%PDF"), "CJK 文本应产出合法 PDF");
+    }
+
+    // R-11：跳过的不支持元素类型不再静默——PDF 仍生成但该元素缺失。
+    // 验证未知类型不 panic 且产出合法 PDF（跳过清单经 tracing warn 打印）。
+    #[test]
+    fn render_pdf_skips_unsupported_kind_safely() {
+        let tmp = tempdir().unwrap();
+        let page = CanvasPage {
+            id: "s".into(),
+            name: "S".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![
+                CanvasElement {
+                    kind: "image".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                    fill: None,
+                    stroke: None,
+                    stroke_width: None,
+                    text: None,
+                    radius: None,
+                    opacity: None,
+                    font_size: None,
+                    font_family: None,
+                    rotation: None,
+                },
+                CanvasElement {
+                    kind: "rect".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 10.0,
+                    h: 10.0,
+                    fill: Some("#000000".into()),
+                    stroke: None,
+                    stroke_width: None,
+                    text: None,
+                    radius: None,
+                    opacity: None,
+                    font_size: None,
+                    font_family: None,
+                    rotation: None,
+                },
+            ],
+        };
+        let content = pdf_content(&page, tmp.path());
+        assert!(
+            content.starts_with("%PDF"),
+            "含不支持元素的页面仍应产出合法 PDF"
+        );
+        assert!(content.contains(" re"), "支持的 rect 仍应正常导出");
+    }
+
     // R-A16 回归：总像素超限（单边不超限）应拒绝渲染，防 1GB OOM。
     // 9000×9000=81M px > 64M，但单边 < 16384，必须由总像素门控拦下。
     #[test]
@@ -1316,6 +1638,61 @@ mod tests {
         assert!(
             data.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "PNG magic bytes"
+        );
+    }
+
+    #[test]
+    fn sanitize_image_url_whitelist() {
+        // R-5：data:image/* 放行，相对路径放行
+        assert_eq!(
+            sanitize_image_url("data:image/png;base64,xxx"),
+            "data:image/png;base64,xxx"
+        );
+        assert_eq!(sanitize_image_url("assets/logo.svg"), "assets/logo.svg");
+        assert_eq!(sanitize_image_url("photo.jpg"), "photo.jpg");
+        assert_eq!(sanitize_image_url(""), "");
+    }
+
+    #[test]
+    fn sanitize_image_url_rejects_executable_and_remote() {
+        // R-5：javascript/data:text/html/http(s)/file 一律拒（返空串）
+        assert_eq!(sanitize_image_url("javascript:alert(1)"), "");
+        assert_eq!(
+            sanitize_image_url("data:text/html,<script>alert(1)</script>"),
+            ""
+        );
+        assert_eq!(sanitize_image_url("https://evil.com/x.png"), "");
+        assert_eq!(sanitize_image_url("http://10.0.0.1/exfil.png"), "");
+        assert_eq!(sanitize_image_url("file:///etc/passwd"), "");
+    }
+
+    #[test]
+    fn svg_image_href_injection_blocked() {
+        // R-5 端到端：image 元素的恶意 href 经 sanitize_image_url 拦截
+        let el = CanvasElement {
+            kind: "image".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            text: Some("javascript:alert(1)".into()),
+            fill: None,
+            stroke: None,
+            stroke_width: None,
+            radius: None,
+            opacity: None,
+            font_size: None,
+            font_family: None,
+            rotation: None,
+        };
+        let svg = render_element_svg(&el);
+        assert!(
+            !svg.contains("javascript:"),
+            "javascript: href must be stripped: {svg}"
+        );
+        assert!(
+            svg.contains("href=\"\""),
+            "blocked href should be empty: {svg}"
         );
     }
 }

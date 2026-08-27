@@ -6,6 +6,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod commands;
+mod common;
+
 #[derive(Parser)]
 #[command(
     name = "fusion-design",
@@ -360,34 +363,6 @@ impl From<ThemeModeArg> for fd_design_system::Theme {
     }
 }
 
-/// stdin 单次读取上限（字节）。设计文档体量大，但远小于此；
-/// 超限即拒绝，防巨输入 OOM。50MB 足够任何合法 .fusiondesign。
-const STDIN_READ_CAP: usize = 50 * 1024 * 1024;
-
-/// 分块读 stdin 至 STDIN_READ_CAP，超限 bail + warn。
-fn read_stdin_capped() -> anyhow::Result<String> {
-    use std::io::Read;
-    let stdin = std::io::stdin();
-    let mut handle = stdin.lock();
-    let mut buf = String::new();
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        let n = handle.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        // UTF-8 边界：临时 byte buf 拼接，最后一次性 from_utf8。
-        // 这里直接 push_str 依赖 chunk 可能在多字节字符中间切断；
-        // 改用 bytes 累加再 from_utf8 保证安全。
-        buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
-        if buf.len() > STDIN_READ_CAP {
-            tracing::warn!("stdin 超过 {STDIN_READ_CAP} 字节上限，拒绝读取");
-            anyhow::bail!("stdin 输入超过 {STDIN_READ_CAP} 字节上限，拒绝读取防 OOM");
-        }
-    }
-    Ok(buf)
-}
-
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -410,85 +385,90 @@ fn main() {
     }
 }
 
-/// MultiVariants 风格选择（E-27/P3）。
-/// 旧实现 `<3 styles` 静默 `_ => default_styles` 丢弃全部用户输入。
-/// 改为优先用用户提供的 styles，不足 3 用默认补齐并 warn；None/空用全部默认。
-fn pick_multi_variant_styles(styles: Option<Vec<String>>) -> [String; 3] {
-    let default_styles = ["极简风", "卡片风", "深色风"];
-    match styles {
-        Some(s) if s.len() >= 3 => [s[0].clone(), s[1].clone(), s[2].clone()],
-        Some(s) if !s.is_empty() => {
-            let mut out: Vec<String> = s.into_iter().take(3).collect();
-            let user_count = out.len();
-            for d in default_styles {
-                if out.len() >= 3 {
-                    break;
-                }
-                if !out.iter().any(|x| x == d) {
-                    out.push(d.to_string());
-                }
-            }
-            tracing::warn!(
-                provided = user_count,
-                filled = 3 - user_count,
-                "MultiVariants: 用户 styles 不足 3 个，已用默认风格补齐至 3 个"
-            );
-            [out[0].clone(), out[1].clone(), out[2].clone()]
-        }
-        _ => {
-            tracing::info!("MultiVariants: 未提供 styles，使用默认三种风格");
-            default_styles.map(|s| s.to_string())
-        }
-    }
-}
-
 /// 把 anyhow 错误分类为可操作的商用级提示，而非裸栈。
 fn report_error(e: &anyhow::Error) {
     let msg = format!("{e}");
-    let (category, hint) = if msg.contains("HTTP 401") || msg.contains("Unauthorized") {
+    // E-9：优先按 thiserror 显式变体 downcast（A-4 落地后导出/画布错误有具名类型），
+    // 再退化到子串匹配（HTTP 错误来自 reqwest，无本项目具名类型）。
+    let (category, hint): (String, String) = if let Some(ex) =
+        e.downcast_ref::<fd_export::ExportError>()
+    {
+        match ex {
+            fd_export::ExportError::UnsupportedFormat(_) => (
+                "导出格式不支持".into(),
+                "检查 --format 参数，支持 html/svg/png/pdf/json".into(),
+            ),
+            fd_export::ExportError::BatchPartial { count, .. } => (
+                "批量导出部分失败".into(),
+                format!(
+                    "{} 个页面导出失败，详见日志中失败清单；已导出文件保留",
+                    count
+                ),
+            ),
+            fd_export::ExportError::RenderFailed(_) => (
+                "渲染失败".into(),
+                "检查画布尺寸/元素是否合法；PDF 需系统 CJK 字体".into(),
+            ),
+            fd_export::ExportError::Io(_) => {
+                ("文件 IO 错误".into(), "检查输出目录权限与磁盘空间".into())
+            }
+            fd_export::ExportError::Serialize(_) => {
+                ("序列化错误".into(), "检查文档数据结构完整性".into())
+            }
+        }
+    } else if let Some(c) = e.downcast_ref::<fd_canvas_core::CanvasError>() {
+        match c {
+            fd_canvas_core::CanvasError::NodeNotFound(_) => (
+                "节点未找到".into(),
+                "检查操作的目标 node id 是否存在于当前文档".into(),
+            ),
+            fd_canvas_core::CanvasError::PageNotFound(_) => (
+                "页面未找到".into(),
+                "检查操作的目标 page id 是否存在于当前文档".into(),
+            ),
+            fd_canvas_core::CanvasError::ParseError(_) => (
+                "文档解析失败".into(),
+                "检查 .fusiondesign 文件是否为合法 JSON 且符合 schema".into(),
+            ),
+            fd_canvas_core::CanvasError::DepthExceeded { .. }
+            | fd_canvas_core::CanvasError::NodeTotalExceeded { .. } => (
+                "文档超限".into(),
+                "输入 .fusiondesign 节点嵌套过深或过多，检查文件是否损坏".into(),
+            ),
+            fd_canvas_core::CanvasError::SchemaVersion(_) => (
+                "文档 schema 版本不支持".into(),
+                "文件由更高版本 fusion-design 生成，请升级本程序或用旧版打开".into(),
+            ),
+        }
+    } else if msg.contains("HTTP 401") || msg.contains("Unauthorized") {
         (
-            "鉴权失败",
-            "检查 FUSION_MLX_API_KEY 是否为 gateway master_key 或 fusion-mlx backend key",
+            "鉴权失败".into(),
+            "检查 FUSION_MLX_API_KEY 是否为 gateway master_key 或 fusion-mlx backend key".into(),
         )
     } else if msg.contains("HTTP 404") || msg.contains("connection refused") {
         (
-            "服务不可达",
-            "确认 fusion-mlx(11434)/gateway(11432) 已启动；FUSION_MLX_BASE_URL 指向正确端点",
+            "服务不可达".into(),
+            "确认 fusion-mlx(11434)/gateway(11432) 已启动；FUSION_MLX_BASE_URL 指向正确端点".into(),
         )
     } else if msg.contains("HTTP 5") || msg.contains("502") {
         (
-            "上游服务错误",
-            "fusion-mlx/gateway 临时不可用，检查模型是否已加载后重试",
-        )
-    } else if msg.contains("超过安全上限") || msg.contains("MAX_NODE") {
-        (
-            "文档超限",
-            "输入 .fusiondesign 节点嵌套过深或过多，检查文件是否损坏",
+            "上游服务错误".into(),
+            "fusion-mlx/gateway 临时不可用，检查模型是否已加载后重试".into(),
         )
     } else if msg.contains("Empty choices") || msg.contains("空 choices") {
-        ("模型返回空", "模型未产出内容，检查模型名与 max_tokens 设置")
+        (
+            "模型返回空".into(),
+            "模型未产出内容，检查模型名与 max_tokens 设置".into(),
+        )
     } else {
-        ("运行错误", "详见上方日志；可设 RUST_LOG=debug 获取更多细节")
+        (
+            "运行错误".into(),
+            "详见上方日志；可设 RUST_LOG=debug 获取更多细节".into(),
+        )
     };
     eprintln!("[fusion-design] 失败：{category}");
     eprintln!("  原因：{msg}");
     eprintln!("  建议：{hint}");
-}
-
-// 构建设计规范注册表：加载内置规范，若文档声明了 active_design_system 则激活之。
-// 用于导出路径解析 token 颜色变量（#8），避免 var(--) 被 usvg 回退成黑色。
-fn build_registry(doc: &fd_canvas_core::PenDocument) -> fd_cli::design::DesignSystemRegistry {
-    let mut reg = fd_cli::design::DesignSystemRegistry::new();
-    reg.register_builtin();
-    if let Some(ref id) = doc.active_design_system {
-        match reg.activate(id) {
-            Ok(()) => tracing::info!(design_system = %id, "已激活文档声明的设计规范"),
-            Err(e) => {
-                tracing::warn!(design_system = %id, error = %e, "文档声明的设计规范不存在，使用默认")
-            }
-        }
-    }
-    reg
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -496,6 +476,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     match cli.command {
         Command::ListDesignSystems => {
+            // TODO A-3: 拆到 src/commands/
             let mut reg = design::DesignSystemRegistry::new();
             reg.register_builtin();
             for id in reg.list() {
@@ -504,6 +485,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Activate { id } => {
+            // TODO A-3: 拆到 src/commands/
             let mut reg = design::DesignSystemRegistry::new();
             reg.register_builtin();
             reg.activate(&id)?;
@@ -515,50 +497,50 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             format,
             out,
             ipc_base,
-        } => {
-            let json = std::fs::read_to_string(&input)?;
-            let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
-            let format_str = format!("{:?}", format);
-            let reg = build_registry(&doc);
-            let files =
-                export::Exporter::from_pen_document_with_tokens(&doc, format.into(), &out, &reg)?;
-            println!("已导出 {} 个页面到 {out:?}", files.len());
-            if let Some(base) = ipc_base {
-                let link = fd_ecosystem::EcosystemLink::new(&base);
-                let msg = fd_ecosystem::LinkMessage {
-                    target: fd_ecosystem::EcosystemTarget::FusionCLI,
-                    action: "export-done".into(),
-                    payload: serde_json::json!({
-                        "files": files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
-                        "format": format_str,
-                    }),
-                };
-                link.send(&msg)?;
-                tracing::info!("export: IPC 消息已发送");
-            }
-            Ok(())
-        }
+        } => commands::export::run(input, format, out, ipc_base).await,
         Command::ExportBatch {
             input,
             format,
             formats,
             out,
         } => {
-            let json = std::fs::read_to_string(&input)?;
+            // TODO A-3: 拆到 src/commands/
+            let json = common::read_file_capped(&input)?;
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
-            let reg = build_registry(&doc);
+            let reg = common::build_registry(&doc);
             let fmt_list: Vec<fd_export::ExportFormat> = if let Some(ref fmts) = formats {
                 fmts.iter().map(|f| f.clone().into()).collect()
             } else {
                 vec![format.into()]
             };
             let mut total = 0;
+            // E-12/E-24：批量导出旧实现首个格式失败即 `?` 传播，其余格式静默跳过。
+            // 改为收集所有失败，末尾汇总打印 + 若有失败退出非零（fail visibly，不阻断已成功项）。
+            let mut failures: Vec<String> = Vec::new();
             for fmt in fmt_list {
-                let files = export::Exporter::from_pen_document_with_tokens(&doc, fmt, &out, &reg)?;
-                tracing::info!(format = ?fmt, count = files.len(), "批量导出完成");
-                total += files.len();
+                match export::Exporter::from_pen_document_with_tokens(&doc, fmt, &out, &reg) {
+                    Ok(files) => {
+                        tracing::info!(format = ?fmt, count = files.len(), "批量导出完成");
+                        total += files.len();
+                    }
+                    Err(e) => {
+                        let fmt_str = fmt.extension();
+                        tracing::warn!(format = fmt_str, error = %e, "批量导出该格式失败");
+                        failures.push(format!("{fmt_str}: {e}"));
+                    }
+                }
             }
             println!("已批量导出 {} 个页面到 {out:?}", total);
+            if !failures.is_empty() {
+                eprintln!("批量导出部分失败 ({} 项):", failures.len());
+                for f in &failures {
+                    eprintln!("  - {f}");
+                }
+                return Err(anyhow::anyhow!(
+                    "批量导出部分失败: 成功导出 {total} 页，{} 项格式失败",
+                    failures.len()
+                ));
+            }
             Ok(())
         }
         Command::Generate {
@@ -569,67 +551,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             out,
             ipc_base,
             stream,
-        } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-            if stream {
-                let model_owned = model.clone();
-                let sys = "你是 fusion-design UI 生成器。根据用户描述，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
-                let user_msg = format!("描述：{prompt}\n生成页面「{page}」对应的 UI 布局。");
-                let s = fd_ai_adapter::chat_stream(
-                    client,
-                    model_owned,
-                    sys.to_string(),
-                    user_msg,
-                    2048,
-                )
-                .await;
-                use futures::StreamExt;
-                futures::pin_mut!(s);
-                while let Some(delta) = s.next().await {
-                    match delta {
-                        Ok(d) if d.finished => break,
-                        Ok(d) => print!("{}", d.token),
-                        Err(e) => eprintln!("流式输出错误: {e}"),
-                    }
-                }
-                println!();
-                return Ok(());
-            }
-            let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let doc = skills.text_to_ui_async(&prompt, &page).await?;
-            let json = serde_json::to_string_pretty(&doc)?;
-            if let Some(base) = ipc_base {
-                let link = fd_ecosystem::EcosystemLink::new(&base);
-                let msg = fd_ecosystem::LinkMessage {
-                    target: fd_ecosystem::EcosystemTarget::FusionCLI,
-                    action: "generate-done".into(),
-                    payload: serde_json::json!({
-                        "page": page,
-                        "document": json,
-                    }),
-                };
-                link.send(&msg)?;
-                tracing::info!("generate: IPC 消息已发送");
-                if let Some(p) = out {
-                    std::fs::write(&p, &json)?;
-                    println!("已生成 PenDocument JSON 到 {p:?}");
-                } else {
-                    println!("{json}");
-                }
-            } else {
-                match out {
-                    Some(p) => {
-                        std::fs::write(&p, &json)?;
-                        println!("已生成 PenDocument JSON 到 {p:?}");
-                    }
-                    None => println!("{json}"),
-                }
-            }
-            Ok(())
-        }
+        } => commands::generate::run(prompt, page, model, endpoint, out, ipc_base, stream).await,
         Command::Chat {
             model,
             endpoint,
@@ -641,87 +563,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             stream,
             json,
         } => {
-            use fd_ai_adapter::{MlxChatMessage, MlxStreamDelta};
-            use futures::StreamExt;
-
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-
-            // system prompt：--system-prompt-file 优先于内联 --system-prompt
-            let sys = match system_prompt_file {
-                Some(p) => std::fs::read_to_string(&p)?,
-                None => system_prompt,
-            };
-            // RAG 上下文注入 system prompt 尾部
-            let sys = match rag_context_file {
-                Some(p) => {
-                    let rag = std::fs::read_to_string(&p)?;
-                    if sys.is_empty() {
-                        rag
-                    } else {
-                        format!("{sys}\n\n--- 以下为参考上下文 ---\n{rag}")
-                    }
-                }
-                None => sys,
-            };
-
-            // messages：--messages-file 多轮历史（JSON 数组），缺省则空
-            let mut messages: Vec<MlxChatMessage> = match messages_file {
-                Some(p) => {
-                    let raw = std::fs::read_to_string(&p)?;
-                    if raw.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        serde_json::from_str::<Vec<MlxChatMessage>>(&raw)?
-                    }
-                }
-                None => Vec::new(),
-            };
-            // 前置 system 消息（若给定）
-            if !sys.is_empty() {
-                messages.insert(
-                    0,
-                    MlxChatMessage {
-                        role: "system".into(),
-                        content: sys,
-                    },
-                );
-            }
-            if messages.is_empty() {
-                anyhow::bail!("chat: 无 messages（--messages-file 缺失或空）且无 system prompt");
-            }
-            tracing::info!(model = %model, count = messages.len(), "chat: 流式推理开始");
-
-            // NDJSON 成帧输出：delta / chat_done / error（本子命令自洽契约）。
-            // H-A16/P1-8 回溯：issue #17 设想 studio 经此契约接 fd-cli，但核实 studio
-            // 走 gateway TCP chat_event/chat_done/error，不经 fd-cli。此 schema 供
-            // CLI 管道消费，非对齐 studio。
-            if stream && json {
-                let s =
-                    fd_ai_adapter::chat_stream_messages(client, model, messages, max_tokens).await;
-                futures::pin_mut!(s);
-                while let Some(item) = s.next().await {
-                    match item {
-                        Ok(MlxStreamDelta { token, finished }) => {
-                            if finished {
-                                println!("{}", ndjson_frame_done());
-                                break;
-                            } else if !token.is_empty() {
-                                println!("{}", ndjson_frame_delta(&token));
-                            }
-                        }
-                        Err(e) => {
-                            println!("{}", ndjson_frame_error(&e.to_string()));
-                            tracing::error!(error = %e, "chat: 流式错误");
-                            break;
-                        }
-                    }
-                }
-            } else {
-                anyhow::bail!("chat: 当前仅支持 --stream --json NDJSON 输出");
-            }
-            Ok(())
+            commands::chat::run(
+                model,
+                endpoint,
+                system_prompt,
+                system_prompt_file,
+                messages_file,
+                rag_context_file,
+                max_tokens,
+                stream,
+                json,
+            )
+            .await
         }
         Command::ImageToUi {
             sketch,
@@ -731,8 +584,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            // TODO A-3: 拆到 src/commands/
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
+                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
             )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let doc = skills
@@ -756,11 +610,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            // TODO A-3: 拆到 src/commands/
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
+                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
             )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let picked = pick_multi_variant_styles(styles);
+            let picked = common::pick_multi_variant_styles(styles);
             let docs = skills
                 .multi_variants_async(
                     &prompt,
@@ -785,9 +640,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let doc_json = std::fs::read_to_string(&input)?;
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            // TODO A-3: 拆到 src/commands/
+            let doc_json = common::read_file_capped(&input)?;
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
+                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
             )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let spec = skills.spec_doc_async(&doc_json, &title).await?;
@@ -808,8 +664,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             endpoint,
             out,
         } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
+            // TODO A-3: 拆到 src/commands/
+            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
+                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
             )?;
             let skills = fd_ai_adapter::DesignSkills::new(client, model);
             let docs = skills.page_flow_async(&flow, &style_hint).await?;
@@ -824,6 +681,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::CheckFrontend { dir, backend } => {
+            // TODO A-3: 拆到 src/commands/
             host::HostBridgeConfig {
                 frontend_dir: dir,
                 backend_endpoint: backend,
@@ -833,50 +691,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("前端目录校验通过");
             Ok(())
         }
-        Command::CheckMlx { endpoint, model } => {
-            let resolved = fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?;
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(&resolved)?;
-            println!("endpoint: {resolved}");
-            let status = client.health_check().await?;
-            let json = serde_json::to_string_pretty(&status)?;
-            println!("{json}");
-            // 鉴权或不可达直接失败——无须再探真推理。
-            if !matches!(status.auth_ok, Some(true)) || !status.available {
-                match status.status.as_deref() {
-                    Some(s) => anyhow::bail!("❌ fusion-mlx 不可用：{s}"),
-                    None => anyhow::bail!("❌ fusion-mlx 不可用"),
-                }
-            }
-            // 通过 /v1/models 列表后，仍可能「假绿」：gateway 列了模型名但 MLX 未加载。
-            // 用真推理探针（1 token）做最终判定。模型解析：--model > FUSION_MLX_MODEL > 列表首个。
-            let model = match model.trim() {
-                "" => match std::env::var("FUSION_MLX_MODEL") {
-                    Ok(m) if !m.trim().is_empty() => m.trim().to_string(),
-                    _ => status
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| "default".to_string()),
-                },
-                other => other.to_string(),
-            };
-            println!("\n[推理探针] model = {model}");
-            let probe = client.check_generate(&model).await?;
-            let pjson = serde_json::to_string_pretty(&probe)?;
-            println!("{pjson}");
-            if probe.available {
-                println!("✅ fusion-mlx 服务可用（推理探针通过）");
-                Ok(())
-            } else {
-                match probe.status.as_deref() {
-                    Some(s) => anyhow::bail!("❌ fusion-mlx 不可用：{s}"),
-                    None => anyhow::bail!("❌ fusion-mlx 推理探针失败"),
-                }
-            }
-        }
+        Command::CheckMlx { endpoint, model } => commands::check_mlx::run(endpoint, model).await,
         Command::ParseHtml { input, page } => {
+            // TODO A-3: 拆到 src/commands/
             let html = match input {
-                Some(p) => std::fs::read_to_string(&p)?,
-                None => read_stdin_capped()?,
+                Some(p) => common::read_file_capped(&p)?,
+                None => common::read_stdin_capped()?,
             };
             let page_name = page.as_deref().unwrap_or("Page");
             let doc = fd_ai_adapter::html_to_pen_document(&html, page_name)?;
@@ -885,6 +705,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::TokenCSS { design_system } => {
+            // TODO A-3: 拆到 src/commands/
             let mut reg = design::DesignSystemRegistry::new();
             reg.register_builtin();
             let system = reg.get(&design_system).ok_or_else(|| {
@@ -899,61 +720,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             rules,
             fix,
             dry_run,
-        } => {
-            let json = std::fs::read_to_string(&input)?;
-            let mut doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
-
-            let mut linter = match rules {
-                Some(r) => {
-                    fd_design_lint::Linter::with_rules(r.into_iter().map(Into::into).collect())
-                }
-                None => fd_design_lint::Linter::new(),
-            };
-
-            if let Some(ref ds_id) = design_system {
-                let mut reg = design::DesignSystemRegistry::new();
-                reg.register_builtin();
-                if let Some(system) = reg.get(ds_id) {
-                    linter = linter.with_design_system(system.clone());
-                }
-            }
-
-            let result = linter.lint(&doc);
-            let output = serde_json::to_string_pretty(&result)?;
-            println!("{output}");
-
-            if fix {
-                let fix_result = linter.auto_fix(&mut doc);
-                let fix_output = serde_json::to_string_pretty(&fix_result)?;
-                println!("{fix_output}");
-
-                if !dry_run {
-                    let fixed_json = serde_json::to_string_pretty(&doc)?;
-                    std::fs::write(&input, &fixed_json)?;
-                    eprintln!("修复已写入: {}", input.display());
-                } else {
-                    eprintln!("dry-run 模式: 修复未写入文件");
-                }
-            }
-
-            Ok(())
-        }
+        } => commands::lint::run(input, design_system, rules, fix, dry_run),
         Command::Codegen {
             input,
             target,
             component,
             out,
         } => {
+            // TODO A-3: 拆到 src/commands/
             let json = match input {
-                Some(p) => std::fs::read_to_string(&p)?,
-                None => read_stdin_capped()?,
+                Some(p) => common::read_file_capped(&p)?,
+                None => common::read_stdin_capped()?,
             };
             let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
             // H-A11：codegen 前解析 token 引用（token:color.accent → 实际 hex）。
             // 旧实现直接把 PenDocument 传 codegen，token:xxx 原样输出——浏览器不认，
             // SwiftUI 侧 DesignTokens.xxx 未定义编译失败。按文档声明的
             // active_design_system 构建注册表并解析，递归覆盖嵌套 children。
-            let reg = build_registry(&doc);
+            let reg = common::build_registry(&doc);
             let doc = fd_codegen::resolve_tokens(&doc, &reg);
             let code = match target {
                 CodegenTargetArg::Html => {
@@ -989,11 +773,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Undo { input } => {
+            // TODO A-3: 拆到 src/commands/
             let history_path = input.with_extension("history.json");
             if !history_path.exists() {
                 anyhow::bail!("历史文件不存在: {history_path:?}");
             }
-            let hist_json = std::fs::read_to_string(&history_path)?;
+            let hist_json = common::read_file_capped(&history_path)?;
             let mut stack: fd_canvas_core::UndoRedoStack = serde_json::from_str(&hist_json)
                 .map_err(|e| anyhow::anyhow!("历史文件解析失败: {e}"))?;
             match stack.undo() {
@@ -1009,11 +794,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Redo { input } => {
+            // TODO A-3: 拆到 src/commands/
             let history_path = input.with_extension("history.json");
             if !history_path.exists() {
                 anyhow::bail!("历史文件不存在: {history_path:?}");
             }
-            let hist_json = std::fs::read_to_string(&history_path)?;
+            let hist_json = common::read_file_capped(&history_path)?;
             let mut stack: fd_canvas_core::UndoRedoStack = serde_json::from_str(&hist_json)
                 .map_err(|e| anyhow::anyhow!("历史文件解析失败: {e}"))?;
             match stack.redo() {
@@ -1028,24 +814,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 None => anyhow::bail!("无法重做：已到最新状态"),
             }
         }
-        Command::Health { endpoint } => {
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoint(
-                &fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-            let status = client.health_check().await;
-            let output = match status {
-                Ok(s) => serde_json::to_string_pretty(&s)?,
-                Err(e) => serde_json::to_string_pretty(&serde_json::json!({
-                    "available": false,
-                    "error": e.to_string()
-                }))?,
-            };
-            println!("{output}");
-            Ok(())
-        }
+        Command::Health { endpoint } => commands::health::run(endpoint).await,
         Command::Diff { old, new } => {
-            let old_json = std::fs::read_to_string(&old)?;
-            let new_json = std::fs::read_to_string(&new)?;
+            // TODO A-3: 拆到 src/commands/
+            let old_json = common::read_file_capped(&old)?;
+            let new_json = common::read_file_capped(&new)?;
             let old_doc: fd_canvas_core::PenDocument = serde_json::from_str(&old_json)?;
             let new_doc: fd_canvas_core::PenDocument = serde_json::from_str(&new_json)?;
             let diff = old_doc.diff(&new_doc);
@@ -1057,6 +830,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             design_system,
             mode,
         } => {
+            // TODO A-3: 拆到 src/commands/
             let mut reg = fd_design_system::DesignSystemRegistry::new();
             reg.register_builtin();
             let system = reg.get(&design_system).ok_or_else(|| {
@@ -1072,6 +846,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             method,
             config,
         } => {
+            // TODO A-3: 拆到 src/commands/
             let trainer = fd_ecosystem::TrainerClient::new();
             let status = match method.as_str() {
                 "grpo" => trainer.run_rlsl("grpo", &dataset, &model, config.as_deref())?,
@@ -1086,24 +861,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-// H-A16/P1-8：NDJSON 成帧函数抽出为纯函数，便于回归测试本子命令自洽契约。
-// 三帧 schema：delta / chat_done / error。注：studio 走 gateway TCP 用 chat_event
-// 非 delta，此 schema 供 CLI 管道消费，非对齐 studio（见 Chat 子命令 doc）。
-fn ndjson_frame_delta(token: &str) -> serde_json::Value {
-    serde_json::json!({"type":"delta","token":token})
-}
-
-fn ndjson_frame_done() -> serde_json::Value {
-    serde_json::json!({"type":"chat_done","finish_reason":"stop"})
-}
-
-fn ndjson_frame_error(message: &str) -> serde_json::Value {
-    serde_json::json!({"type":"error","message":message})
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::{
+        ndjson_frame_delta, ndjson_frame_done, ndjson_frame_error, pick_multi_variant_styles,
+    };
     use clap::Parser;
 
     #[test]

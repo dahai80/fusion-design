@@ -30,7 +30,8 @@ async-stream = "0.3"
 op-ai = { workspace = true }  # vendored OpenPencil subset
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }
-scraper = "0.22"
+# A-2：html_to_pen_document 拆到 fd-html-parser，此处 re-export 保持调用方不变。
+fd-html-parser = { path = "../fd-html-parser" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt", "macros", "net"] }

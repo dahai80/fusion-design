@@ -36,6 +36,22 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11432";
 
+/// A-1：把逗号分隔的 endpoint 串拆成去空 trim 后的 Vec。
+/// `"http://a:11432,http://b:11432"` → `["http://a:11432","http://b:11432"]`。
+/// 空串 → `[DEFAULT_MLX_ENDPOINT]`（保证至少 1 条，交由 with_endpoints 校验）。
+fn parse_endpoints(raw: &str) -> Vec<String> {
+    let parts: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        vec![DEFAULT_MLX_ENDPOINT.to_string()]
+    } else {
+        parts
+    }
+}
+
 /// fusion-mlx RouteGuard 要求的来源标识头（存在即放行）。
 /// 方案B（netlayer-compliance-plan.md，用户 2026-08-07 裁定）：fusion-design
 /// 统一经 fusion-gateway `:11432` 调用 fusion-mlx，不再直连 11434。
@@ -95,6 +111,12 @@ struct MlxResponseMessage {
 #[derive(Clone)]
 pub struct FusionMlxClient {
     endpoint: String,
+    // A-1：多节点 failover。单节点时 `endpoints == vec![endpoint]`。
+    // `FUSION_MLX_BASE_URL` 逗号分隔多值时，每 endpoint 各经 validate_localhost。
+    endpoints: Vec<String>,
+    // A-1：轮询计数器。每请求/重试 attempt fetch_add 取下一 endpoint，
+    // 单节点负载均衡 + 502/503 即切下一节点（被动故障转移）。
+    rr: Arc<std::sync::atomic::AtomicU32>,
     http: reqwest::Client,
 }
 
@@ -112,10 +134,26 @@ impl FusionMlxClient {
     }
 
     /// 用指定 endpoint 构造；强校验 host 为 `127.0.0.1` 或 `localhost`。
+    /// `endpoint` 逗号分隔多值时（A-1）按多节点构造，每 endpoint 各校验。
     pub fn with_endpoint(endpoint: &str) -> anyhow::Result<Self> {
-        validate_localhost(endpoint)?;
+        let endpoints = parse_endpoints(endpoint);
+        Self::with_endpoints(endpoints)
+    }
+
+    /// A-1：多节点构造器。`endpoints` 不可空，每条经 validate_localhost；
+    /// 全部合法才建 client。`endpoint` 字段取首条（兼容旧单 endpoint 读字段路径）。
+    pub fn with_endpoints(endpoints: Vec<String>) -> anyhow::Result<Self> {
+        if endpoints.is_empty() {
+            anyhow::bail!("endpoints 列表为空，至少需 1 个本地/局域网 endpoint");
+        }
+        for ep in &endpoints {
+            validate_localhost(ep)?;
+        }
+        let endpoint = endpoints[0].clone();
         Ok(Self {
-            endpoint: endpoint.to_string(),
+            endpoint,
+            endpoints,
+            rr: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 // C8：缺超时则 fusion-mlx 挂起时请求永久阻塞，调用方
@@ -126,20 +164,43 @@ impl FusionMlxClient {
         })
     }
 
-    /// 解析 CLI `--endpoint` 实参到最终 endpoint。
+    /// A-1：按 attempt 轮询选 endpoint。round-robin 计数器 fetch_add 取模，
+    /// 让相邻请求/重试落不同节点；单节点时恒返首条。
+    fn endpoint_for_attempt(&self, attempt: u32) -> &str {
+        if self.endpoints.len() == 1 {
+            return &self.endpoint;
+        }
+        let idx = self.rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize;
+        let pos = idx % self.endpoints.len();
+        let ep = &self.endpoints[pos];
+        tracing::debug!(
+            attempt,
+            endpoint = %ep,
+            pos,
+            n = self.endpoints.len(),
+            "endpoint_for_attempt: 轮询选节点"
+        );
+        ep
+    }
+
+    /// 解析 CLI `--endpoint` 实参到最终 endpoint 列表。
     /// CLI 层把 `--endpoint` 默认值设为空串；空串时读 `FUSION_MLX_BASE_URL`，
     /// 缺省回退 `http://127.0.0.1:11432`（方案B 经 gateway）。非空串直接透传
-    /// （用户显式传 `--endpoint` 优先级最高）。返回值供 `with_endpoint` 使用。
-    pub fn resolve_endpoint(cli_endpoint: &str) -> anyhow::Result<String> {
-        let resolved = match cli_endpoint.trim() {
+    /// （用户显式传 `--endpoint` 优先级最高）。逗号分隔多值各校验（A-1）。
+    /// 返回 endpoints 列表供 `with_endpoints` 使用。
+    pub fn resolve_endpoint(cli_endpoint: &str) -> anyhow::Result<Vec<String>> {
+        let raw = match cli_endpoint.trim() {
             "" => match std::env::var("FUSION_MLX_BASE_URL") {
                 Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
                 _ => DEFAULT_MLX_ENDPOINT.to_string(),
             },
             other => other.to_string(),
         };
-        validate_localhost(&resolved)?;
-        Ok(resolved)
+        let endpoints = parse_endpoints(&raw);
+        for ep in &endpoints {
+            validate_localhost(ep)?;
+        }
+        Ok(endpoints)
     }
 
     /// 同步发送 chat 请求（阻塞当前线程，供 `ChatProvider::send` 调用）。
@@ -168,8 +229,7 @@ impl FusionMlxClient {
             max_tokens,
             temperature: None,
         };
-        let url = format!("{}/v1/chat/completions", self.endpoint);
-        let resp: MlxChatResponse = self.blocking_post(&url, &payload)?;
+        let resp: MlxChatResponse = self.blocking_post("/v1/chat/completions", &payload)?;
         Ok(resp
             .choices
             .into_iter()
@@ -205,8 +265,7 @@ impl FusionMlxClient {
             max_tokens,
             temperature: None,
         };
-        let url = format!("{}/v1/chat/completions", self.endpoint);
-        let resp: MlxChatResponse = self.blocking_post(&url, &payload)?;
+        let resp: MlxChatResponse = self.blocking_post("/v1/chat/completions", &payload)?;
         Ok(resp
             .choices
             .into_iter()
@@ -258,6 +317,21 @@ impl FusionMlxClient {
     }
 }
 
+// A-6：统一鉴权头附加。retry_async_post / chat_stream_messages / check_generate 三处
+// 原各自手写 route header + bearer match，逻辑分叉易漏（如只加 route 忘 bearer）。
+// 此 helper 收口：route header 恒加 + 可选 bearer。bearer 由调用方预算（避免重试循环
+// 每次重读 env，性能），与 authed 方法互补——authed 即时读 env（低频单次请求场景）。
+fn attach_route_bearer(
+    builder: reqwest::RequestBuilder,
+    bearer: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let builder = builder.header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1);
+    match bearer {
+        Some(b) => builder.header("Authorization", b),
+        None => builder,
+    }
+}
+
 /// 异步版本（供 `fd-ecosystem` 任务队列调用）。
 impl FusionMlxClient {
     pub async fn chat_async(
@@ -282,15 +356,19 @@ impl FusionMlxClient {
             max_tokens,
             temperature: None,
         };
-        let url = format!("{}/v1/chat/completions", self.endpoint);
-        let resp = self
-            .authed(self.http.post(&url).json(&payload))
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("fusion-mlx HTTP {}", resp.status());
-        }
-        let parsed: MlxChatResponse = resp.json().await?;
+        // R-3：经 retry_async_post 重试（瞬时错误退避，4xx 永久失败，deadline 封顶）。
+        // A-1：failover 经 endpoints+rr 轮询，单节点 502/503 即切下一节点。
+        let bearer = self.bearer_token();
+        let bearer_ref: Option<&str> = bearer.as_deref();
+        let parsed: MlxChatResponse = retry_async_post(
+            &self.http,
+            &self.endpoints,
+            &self.rr,
+            "/v1/chat/completions",
+            &payload,
+            bearer_ref,
+        )
+        .await?;
         Ok(parsed
             .choices
             .into_iter()
@@ -332,16 +410,17 @@ fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
 
 /// 判定 IP 是否为私有段（RFC1918）或链路本地/唯一本地地址。
 /// 公网 IP（含 8.8.8.8、1.1.1.1 等）返回 false。
+/// E-2：移除 is_unspecified()——0.0.0.0/:: 非"本地可达"地址，放行它等于允许
+/// 绑定任意网卡（含公网）的 endpoint，击穿离线约束。loopback 已在 validate_localhost
+/// 上层判定；此处仅私有/链路本地/唯一本地段，集群 worker（10.x/192.168.x/fe80）保留。
 fn is_private_or_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_private() // 10/8、172.16/12、192.168/16
                 || v4.is_link_local() // 169.254/16
-                || v4.is_unspecified() // 0.0.0.0
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
-                || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // 唯一本地 fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // 链路本地 fe80::/10
         }
@@ -360,12 +439,18 @@ fn is_private_or_local(ip: &IpAddr) -> bool {
 /// 专用 runtime 是 multi-thread 的，因此 `block_in_place` 可用，
 /// `reqwest` 的 DNS/TLS 解析不会阻塞主线程。
 ///
-/// H-A6：worker_threads 由 1 提升到 4。旧值 1 使所有并发 block_on 串行化到
-/// 单线程，首个 180s 长推理请求饿死后续请求（FIFO 头阻塞），多面板并发 UI 冻结。
-/// multi-thread runtime 保持 block_in_place 可用，不引入嵌套 runtime panic。
+/// H-A6：worker_threads 自适应机器核数（最少 4）。旧值 1 使所有并发 block_on
+/// 串行化到单线程，首个 180s 长推理请求饿死后续请求（FIFO 头阻塞），多面板并发
+/// UI 冻结。multi-thread runtime 保持 block_in_place 可用，不引入嵌套 runtime panic。
+/// A-10：固定 4 在高核机器仍瓶颈，改为 available_parallelism 自适应（回退 4）。
 static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(4);
+    tracing::info!(workers, "BLOCKING_RT: 自适应 worker 线程数");
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
+        .worker_threads(workers)
         .enable_all()
         .build()
         .expect("blocking tokio runtime 创建失败")
@@ -378,6 +463,16 @@ static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 const RETRY_BACKOFF_BASE_MS: u64 = 500;
 const RETRY_MAX_BACKOFF_MS: u64 = 8_000;
 const RETRY_DEFAULT_MAX_ATTEMPTS: u32 = 4;
+// R-12：SSE buffer 残留上限。FUSION_MLX_SSE_BUFFER_CAP 可调（字节），缺省 8MB。
+const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
+
+fn sse_buffer_cap() -> usize {
+    std::env::var("FUSION_MLX_SSE_BUFFER_CAP")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1024)
+        .unwrap_or(MAX_SSE_BUFFER)
+}
 
 fn retry_max_attempts() -> u32 {
     // FUSION_MLX_RETRY_MAX 覆盖；<1 视为缺省。0/1 = 不重试（仅首次）。
@@ -389,8 +484,11 @@ fn retry_max_attempts() -> u32 {
 }
 
 fn is_transient_status(code: u16) -> bool {
-    // 502/503 = 瞬时（模型加载中/被驱逐/网关临时不可达）。4xx = 永久，不重试。
-    code == 502 || code == 503
+    // L-7：扩展瞬时错误集。
+    // 502/503/504 = 网关/服务端瞬时（模型加载中/被驱逐/网关临时不可达/超时）。
+    // 429 = 限流（Too Many Requests），529 = 上游过载（Anthropic 风格透传）。
+    // 其余 4xx = 永久，不重试。
+    matches!(code, 502 | 503 | 504 | 429 | 529)
 }
 
 fn backoff_delay(attempt: u32) -> std::time::Duration {
@@ -410,27 +508,53 @@ impl FusionMlxClient {
     /// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
     /// 附加 RouteGuard + Bearer 鉴权头后发往 fusion-mlx。
     /// M-5：502/503 瞬时错误指数退避重试，4xx 永久错误直接失败。
+    /// A-1：`path` 为相对 endpoint 的后缀（如 `/v1/chat/completions`），每 attempt
+    /// 经 `endpoint_for_attempt` 轮询选节点拼 url——单节点 502/503 即切下一节点。
     fn blocking_post<T: Serialize + ?Sized>(
         &self,
-        url: &str,
+        path: &str,
         payload: &T,
     ) -> anyhow::Result<MlxChatResponse> {
         let http = self.http.clone();
-        let url = url.to_string();
+        let path = path.to_string();
         let bearer = self.bearer_token();
+        let endpoints = self.endpoints.clone();
+        let rr = self.rr.clone();
         BLOCKING_RT.block_on(async move {
             let max = retry_max_attempts();
+            // P-1：总 deadline 封顶重试时长，防 4×长退避 + 挂起响应无限阻塞。
+            // 默认 300s（FUSION_MLX_RETRY_DEADLINE_SECS 可调），每轮超 deadline 即 bail。
+            let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(300);
+            let deadline = std::time::Duration::from_secs(deadline_secs);
+            let started = std::time::Instant::now();
             let mut last_err: Option<anyhow::Error> = None;
             for attempt in 0..max {
-                // RequestBuilder 消耗性，每次重试重建。
-                let req = http
-                    .post(&url)
-                    .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
-                    .json(payload);
-                let req = match &bearer {
-                    Some(b) => req.header("Authorization", b),
-                    None => req,
+                if started.elapsed() > deadline {
+                    tracing::error!(
+                        attempt,
+                        elapsed = ?started.elapsed(),
+                        deadline = ?deadline,
+                        "blocking_post: 超过总 deadline，放弃重试"
+                    );
+                    anyhow::bail!(
+                        "fusion-mlx 重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                        deadline,
+                        attempt,
+                        max
+                    );
+                }
+                // A-1：每 attempt 轮询选 endpoint 拼完整 url（failover）。
+                let idx = if endpoints.len() == 1 {
+                    0
+                } else {
+                    rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % endpoints.len()
                 };
+                let url = format!("{}{}", endpoints[idx], path);
+                // RequestBuilder 消耗性，每次重试重建。A-6：鉴权头经 attach_route_bearer 统一。
+                let req = attach_route_bearer(http.post(&url).json(payload), bearer.as_deref());
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
                         return Ok::<_, anyhow::Error>(resp.json::<MlxChatResponse>().await?);
@@ -442,8 +566,9 @@ impl FusionMlxClient {
                             tracing::warn!(
                                 attempt,
                                 code,
+                                endpoint = %endpoints[idx],
                                 ?delay,
-                                "blocking_post: 瞬时错误，退避后重试"
+                                "blocking_post: 瞬时错误，退避后切换节点重试"
                             );
                             tokio::time::sleep(delay).await;
                             continue;
@@ -462,8 +587,9 @@ impl FusionMlxClient {
                             tracing::warn!(
                                 attempt,
                                 error = %e,
+                                endpoint = %endpoints[idx],
                                 ?delay,
-                                "blocking_post: 连接失败，退避后重试"
+                                "blocking_post: 连接失败，退避后切换节点重试"
                             );
                             last_err = Some(anyhow::Error::from(e));
                             tokio::time::sleep(delay).await;
@@ -482,6 +608,97 @@ impl FusionMlxClient {
             Err(last_err.unwrap_or_else(|| anyhow::anyhow!("blocking_post: 重试循环异常退出")))
         })
     }
+}
+
+/// R-3：异步 POST 重试。复用 blocking_post 同款退避/瞬时判定/deadline 语义，
+/// 供 chat_async 等 async 路径统一重试。4xx 永久错误直接失败，瞬时错误退避重试。
+/// A-1：`endpoints`+`rr` 实现 failover——每 attempt 轮询选 endpoint 拼 url，
+/// 单节点 502/503 即切下一节点。
+async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    endpoints: &[String],
+    rr: &Arc<std::sync::atomic::AtomicU32>,
+    path: &str,
+    payload: &T,
+    bearer: Option<&str>,
+) -> anyhow::Result<R> {
+    let max = retry_max_attempts();
+    let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    let deadline = std::time::Duration::from_secs(deadline_secs);
+    let started = std::time::Instant::now();
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..max {
+        if started.elapsed() > deadline {
+            tracing::error!(
+                attempt,
+                elapsed = ?started.elapsed(),
+                deadline = ?deadline,
+                "retry_async_post: 超过总 deadline，放弃重试"
+            );
+            anyhow::bail!(
+                "fusion-mlx 重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                deadline,
+                attempt,
+                max
+            );
+        }
+        let idx = if endpoints.len() == 1 {
+            0
+        } else {
+            rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % endpoints.len()
+        };
+        let url = format!("{}{}", endpoints[idx], path);
+        // A-6：鉴权头经 attach_route_bearer 统一（bearer 已为 Option<&str>）。
+        let req = attach_route_bearer(http.post(&url).json(payload), bearer);
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return Ok(resp.json::<R>().await?);
+            }
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                if is_transient_status(code) && attempt + 1 < max {
+                    let delay = backoff_delay(attempt);
+                    tracing::warn!(
+                        attempt,
+                        code,
+                        endpoint = %endpoints[idx],
+                        ?delay,
+                        "retry_async_post: 瞬时错误，退避后切换节点重试"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                if attempt + 1 < max {
+                    tracing::warn!(attempt, code, "retry_async_post: 永久错误，不重试");
+                } else {
+                    tracing::error!(attempt, code, "retry_async_post: 重试耗尽");
+                }
+                anyhow::bail!("fusion-mlx HTTP {code}（尝试 {}/{max} 次）", attempt + 1);
+            }
+            Err(e) => {
+                if attempt + 1 < max {
+                    let delay = backoff_delay(attempt);
+                    tracing::warn!(
+                        attempt, error = %e, endpoint = %endpoints[idx], ?delay,
+                        "retry_async_post: 连接失败，退避后切换节点重试"
+                    );
+                    last_err = Some(anyhow::Error::from(e));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                tracing::error!(attempt, error = %e, "retry_async_post: 连接失败，重试耗尽");
+                anyhow::bail!(
+                    "fusion-mlx 连接失败（尝试 {}/{} 次）: {e}",
+                    attempt + 1,
+                    max
+                );
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("retry_async_post: 重试循环异常退出")))
 }
 
 // ── SSE 流式推理 ──
@@ -539,27 +756,52 @@ pub async fn chat_stream_messages(
         "max_tokens": max_tokens,
         "stream": true,
     });
-    let url = format!("{}/v1/chat/completions", client.endpoint);
+    let endpoints = client.endpoints.clone();
+    let rr = client.rr.clone();
     let bearer = client.bearer_token();
     let http = client.http;
     // M-5：建连阶段（send + status）指数退避重试 502/503。拿到 2xx 即进流消费。
     // 流已建立后的中途断流不重试（语义复杂，见 TODO）。
     // RequestBuilder 消耗性，每次重试重建；bearer 保留 owned，闭包按引用取用。
+    // A-1：每 attempt 轮询选 endpoint 拼 url（failover）。
     let max = retry_max_attempts();
+    // R-4：建连阶段总 deadline 封顶，防 4×长退避无限挂起。
+    let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    let deadline = std::time::Duration::from_secs(deadline_secs);
+    let started = std::time::Instant::now();
     let resp = {
         let mut last_err: Option<anyhow::Error> = None;
         let mut got: Option<reqwest::Response> = None;
         for attempt in 0..max {
-            let build_req = || {
-                let r = http
-                    .post(&url)
-                    .header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1)
-                    .json(&payload);
-                match &bearer {
-                    Some(b) => r.header("Authorization", b),
-                    None => r,
-                }
+            if started.elapsed() > deadline {
+                tracing::error!(
+                    attempt,
+                    elapsed = ?started.elapsed(),
+                    deadline = ?deadline,
+                    "chat_stream_messages: 建连超过总 deadline，放弃重试"
+                );
+                return futures::stream::once(async move {
+                    Err(anyhow::anyhow!(
+                        "fusion-mlx 建连重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                        deadline,
+                        attempt,
+                        max
+                    ))
+                })
+                .boxed();
+            }
+            let idx = if endpoints.len() == 1 {
+                0
+            } else {
+                rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % endpoints.len()
             };
+            let url = format!("{}/v1/chat/completions", endpoints[idx]);
+            // A-6：鉴权头经 attach_route_bearer 统一。bearer 预算一次，闭包按引用取用。
+            let build_req =
+                || attach_route_bearer(http.post(&url).json(&payload), bearer.as_deref());
             let attempt_req = build_req();
             match attempt_req.send().await {
                 Ok(r) if r.status().is_success() => {
@@ -573,8 +815,9 @@ pub async fn chat_stream_messages(
                         tracing::warn!(
                             attempt,
                             code,
+                            endpoint = %endpoints[idx],
                             ?delay,
-                            "chat_stream_messages: 建连瞬时错误，退避后重试"
+                            "chat_stream_messages: 建连瞬时错误，退避后切换节点重试"
                         );
                         tokio::time::sleep(delay).await;
                         continue;
@@ -597,8 +840,8 @@ pub async fn chat_stream_messages(
                     if attempt + 1 < max {
                         let delay = backoff_delay(attempt);
                         tracing::warn!(
-                            attempt, error = %e, ?delay,
-                            "chat_stream_messages: 建连失败，退避后重试"
+                            attempt, error = %e, endpoint = %endpoints[idx], ?delay,
+                            "chat_stream_messages: 建连失败，退避后切换节点重试"
                         );
                         last_err = Some(anyhow::Error::from(e));
                         tokio::time::sleep(delay).await;
@@ -639,21 +882,10 @@ pub async fn chat_stream_messages(
                 match stream.next().await {
                     Some(Ok(bytes)) => {
                         buffer.extend_from_slice(&bytes);
-                        // L7：buffer 无上限增长 → 上游慢/大块无换行时内存膨胀。
-                        // 超过上限仍无完整行，视为异常流，报错并丢弃缓冲。
-                        const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
-                        if buffer.len() > MAX_SSE_BUFFER && !buffer.contains(&b'\n') {
-                            tracing::error!(
-                                len = buffer.len(),
-                                "SSE buffer 超限且无完整行，终止流"
-                            );
-                            return Some((
-                                Err(anyhow::anyhow!(
-                                    "SSE buffer 超限 ({MAX_SSE_BUFFER} 字节) 无完整行"
-                                )),
-                                (stream, Vec::new()),
-                            ));
-                        }
+                        // R-12：先排空所有完整行（含本轮及之前残留），再判定残留上限。
+                        // 旧实现 `&& !buffer.contains(&b'\n')` 在「超限但含换行」时
+                        // 静默跳过 cap，且 contains 是 O(n) 全扫。改为：完整行必先 drain，
+                        // 仅对 drain 后的**跨 chunk 残留**（无换行的半截）做上限判定。
                         while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
                             // L6：完整行整体 from_utf8_lossy 解码（行内已是完整 UTF-8，
                             //   SSE data: 前缀+JSON 结构为 ASCII，CJK 在 JSON 值内且完整）。
@@ -688,6 +920,26 @@ pub async fn chat_stream_messages(
                                         ));
                                     }
                                 }
+                            }
+                        }
+                        // R-12：while-drain 后残留 = 跨 chunk 半截行（无换行）。
+                        // 残留超上限即异常流（上游慢/单行超 8MB），报错终止，杜绝内存膨胀。
+                        // 旧条件含 `!buffer.contains(&b'\n')` 在超限但含换行时静默放行，
+                        // 已由「先 drain 再判残留」根除该盲区。
+                        if buffer.len() > MAX_SSE_BUFFER {
+                            let cap = sse_buffer_cap();
+                            if buffer.len() > cap {
+                                tracing::error!(
+                                    len = buffer.len(),
+                                    cap,
+                                    "SSE 残留超限（跨 chunk 半截行无换行），终止流"
+                                );
+                                return Some((
+                                    Err(anyhow::anyhow!(
+                                        "SSE buffer 残留超限 ({cap} 字节) 无完整行"
+                                    )),
+                                    (stream, Vec::new()),
+                                ));
                             }
                         }
                     }
@@ -907,13 +1159,38 @@ impl FusionMlxClient {
             max_tokens: 1,
             temperature: None,
         };
-        let url = format!("{}/v1/chat/completions", self.endpoint);
         // M-5：502/503 = 模型加载中/被驱逐，退避等待后重试。4xx/非瞬时 5xx/连接失败耗尽
         // 仍按原诊断语义返回（不改变 GenerateProbeStatus 结构）。
+        // A-1：每 attempt 轮询选 endpoint（failover），url 在循环内按节点拼。
         let max = retry_max_attempts();
+        // R-4：探针重试总 deadline 封顶，防 4×长退避无限挂起。
+        let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(300);
+        let deadline = std::time::Duration::from_secs(deadline_secs);
+        let started = std::time::Instant::now();
         let mut last_err: Option<String> = None;
         let mut last_code: Option<u16> = None;
         for attempt in 0..max {
+            if started.elapsed() > deadline {
+                tracing::error!(
+                    attempt,
+                    elapsed = ?started.elapsed(),
+                    deadline = ?deadline,
+                    "check_generate: 超过总 deadline，放弃重试"
+                );
+                return Ok(GenerateProbeStatus {
+                    model_loaded: false,
+                    available: false,
+                    status: Some(format!(
+                        "推理探针重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                        deadline, attempt, max
+                    )),
+                    http_code: None,
+                });
+            }
+            let url = format!("{}/v1/chat/completions", self.endpoint_for_attempt(attempt));
             let resp = self
                 .authed(self.http.post(&url).json(&payload))
                 .send()
@@ -1115,8 +1392,37 @@ pub async fn chat_with_image(
 }
 
 /// 读取图片文件并编码为 base64。
+/// P-3：读前按 metadata 预检 ≤50MB，超大草图直接 bail 防 OOM/base64 膨胀。
 pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
+    const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+    let len = std::fs::metadata(path)
+        .map_err(|e| anyhow::anyhow!("读取草图元数据失败 {}: {e}", path.display()))?
+        .len();
+    if len > MAX_IMAGE_BYTES {
+        tracing::warn!(size = len, "草图超过 50MB 上限，拒绝编码");
+        anyhow::bail!("草图 {} 超过 50MB 上限（{} 字节）", path.display(), len);
+    }
     let bytes = std::fs::read(path)?;
+    Ok(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &bytes,
+    ))
+}
+
+/// R-13：异步版图片 base64 编码。async 上下文下用 tokio::fs 替代 std::fs，
+/// 避免同步 IO 阻塞 tokio worker 线程（image_to_ui_async 调用路径）。
+/// 同步版保留供阻塞调用方（image_to_ui 同步版走 BLOCKING_RT）。
+pub async fn encode_image_base64_async(path: &std::path::Path) -> anyhow::Result<String> {
+    const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+    let len = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("读取草图元数据失败 {}: {e}", path.display()))?
+        .len();
+    if len > MAX_IMAGE_BYTES {
+        tracing::warn!(size = len, "草图超过 50MB 上限，拒绝编码");
+        anyhow::bail!("草图 {} 超过 50MB 上限（{} 字节）", path.display(), len);
+    }
+    let bytes = tokio::fs::read(path).await?;
     Ok(base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         &bytes,
@@ -1360,6 +1666,19 @@ mod tests {
         assert!(validate_localhost("http://8.8.8.8:8080").is_err());
         assert!(validate_localhost("https://api.openai.com").is_err());
         assert!(validate_localhost("http://1.1.1.1:8080").is_err());
+    }
+
+    #[test]
+    fn validate_localhost_rejects_unspecified() {
+        // E-2：0.0.0.0 / :: 非"本地可达"地址，放行等于允许公网网卡绑定，击穿离线。
+        assert!(
+            validate_localhost("http://0.0.0.0:11434").is_err(),
+            "0.0.0.0 须拒"
+        );
+        assert!(
+            validate_localhost("http://[::]:11434").is_err(),
+            "[::] 须拒"
+        );
     }
 
     #[test]
@@ -1719,7 +2038,8 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
             let user = format!(
                 "补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。"
             );
-            let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
+            // R-13：async 上下文用 tokio::fs 异步编码，不阻塞 worker 线程。
+            let resp = match encode_image_base64_async(std::path::Path::new(sketch_path)).await {
                 Ok(b64) => {
                     tracing::info!(
                         sketch_path,
@@ -2201,6 +2521,10 @@ impl DesignSkill for MultiVariantsSkill {
 
 use fd_canvas_core::{NodeKind, Page, PenDocument, PenNode};
 
+// A-2：html_to_pen_document 拆到 fd-html-parser 叶子 crate，re-export 保持
+// 调用方 `fd_ai_adapter::html_to_pen_document`（fd-cli）不变。
+pub use fd_html_parser::html_to_pen_document;
+
 /// AI 设计 skill 入口（对接 fusion-mlx 多模态推理）。
 ///
 /// 设计原则：本层只负责把自然语言 / 参考图转化为 fusion-mlx prompt，
@@ -2308,7 +2632,7 @@ impl DesignSkills {
         let sys = ui_generator_system_prompt();
         let user =
             format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
-        let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
+        let resp = match encode_image_base64_async(std::path::Path::new(sketch_path)).await {
             Ok(b64) => {
                 tracing::info!(
                     sketch_path,
@@ -2325,14 +2649,11 @@ impl DesignSkills {
                 )
                 .await?
             }
+            // L-5：草图不可读即 image-to-ui 无意义，不静默降级文字回退（fail visibly, Rule 12）。
             Err(e) => {
-                tracing::warn!(sketch_path, error = %e, "image_to_ui_async: 草图加载失败，回退文字描述");
-                let user_text = format!(
-                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
-                );
-                self.client
-                    .chat_async(&self.default_model, &sys, &user_text, DEFAULT_MAX_TOKENS)
-                    .await?
+                return Err(anyhow::anyhow!(
+                    "image_to_ui_async: 草图加载失败: {e}（路径: {sketch_path}）"
+                ));
             }
         };
         parse_ui_json(&resp, page_name)
@@ -2549,9 +2870,11 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
                     tracing::info!("parse_ui_json: JSON 修复后解析成功");
                     v
                 }
+                // R-2：修复仍失败 → fail visibly，不再静默回退合成占位文档
+                // （审计 R-2：伪成功占位掩盖模型输出错误，用户须看到真实失败）。
                 Err(e2) => {
-                    tracing::warn!(error = %e2, "parse_ui_json: 修复仍失败，回退合成文档");
-                    return Ok(synthesize_fallback_doc(page_name));
+                    tracing::error!(error = %e2, "parse_ui_json: JSON 修复仍失败，拒绝伪成功");
+                    anyhow::bail!("模型输出非合法 JSON，修复失败: {e2}");
                 }
             }
         }
@@ -2559,8 +2882,8 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
     let page_obj = v.get("page").and_then(|p| p.as_object());
     let (w, h) = match page_obj {
         Some(o) => (
-            o.get("width").and_then(|x| x.as_f64()).unwrap_or(1440.0) as f32,
-            o.get("height").and_then(|x| x.as_f64()).unwrap_or(900.0) as f32,
+            o.get("width").and_then(|x| x.as_f64()).unwrap_or(1440.0),
+            o.get("height").and_then(|x| x.as_f64()).unwrap_or(900.0),
         ),
         None => (1440.0, 900.0),
     };
@@ -2570,14 +2893,20 @@ fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
     let nodes = match nodes_val {
         Some(nv) => match parse_nodes_with_depth(nv, 0) {
             Ok(n) => n,
+            // R-2：nodes 解析失败 → fail visibly（半结构化损坏同样不可伪成功）。
             Err(e) => {
-                tracing::warn!(error = %e, "parse_ui_json: nodes 解析失败，回退合成文档");
-                return Ok(synthesize_fallback_doc(page_name));
+                tracing::error!(error = %e, "parse_ui_json: nodes 解析失败，拒绝伪成功");
+                anyhow::bail!("模型输出 nodes 解析失败: {e}");
             }
         },
+        // R-2：缺 nodes 字段视为合法空页（非伪成功——空文档是有效状态，
+        // 不注入合成的占位元素）。模型可能输出仅 page 尺寸无节点的设计稿。
         None => {
-            tracing::warn!("parse_ui_json: JSON 缺 nodes 字段，回退合成文档");
-            return Ok(synthesize_fallback_doc(page_name));
+            tracing::info!("parse_ui_json: JSON 缺 nodes 字段，返回空页");
+            let mut doc = PenDocument::new();
+            let page = Page::new("page_1", page_name, w, h);
+            doc.add_page(page);
+            return Ok(doc);
         }
     };
     let validated: Vec<PenNode> = nodes.into_iter().map(validate_node).collect();
@@ -2724,47 +3053,6 @@ fn balance_json_braces(s: &mut String) {
     }
 }
 
-/// 合成兜底文档：当模型 JSON 不可恢复时，生成一个含占位节点的合法 PenDocument，
-/// 保证 CLI/调用方拿到可用结构而非报错。商用场景下优于硬失败。
-fn synthesize_fallback_doc(page_name: &str) -> PenDocument {
-    tracing::info!(page_name, "synthesize_fallback_doc: 生成占位兜底文档");
-    let mut doc = PenDocument::new();
-    let mut page = Page::new("page_1", page_name, 1440.0, 900.0);
-    page.add(PenNode {
-        id: "n_bg".to_string(),
-        kind: fd_canvas_core::NodeKind::Rect,
-        name: "background".to_string(),
-        x: 0.0,
-        y: 0.0,
-        w: 1440.0,
-        h: 900.0,
-        style: fd_canvas_core::NodeStyle {
-            fill: Some("#ffffff".to_string()),
-            ..Default::default()
-        },
-        text: None,
-        children: vec![],
-        rotation: 0.0,
-        z_index: 0,
-    });
-    page.add(PenNode {
-        id: "n_placeholder".to_string(),
-        kind: fd_canvas_core::NodeKind::Text,
-        name: "placeholder".to_string(),
-        x: 520.0,
-        y: 420.0,
-        w: 400.0,
-        h: 60.0,
-        style: fd_canvas_core::NodeStyle::default(),
-        text: Some("AI 输出不可用，已生成占位布局".to_string()),
-        children: vec![],
-        rotation: 0.0,
-        z_index: 1,
-    });
-    doc.add_page(page);
-    doc
-}
-
 const MAX_NODE_DEPTH: usize = 20;
 
 fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Result<Vec<PenNode>> {
@@ -2826,12 +3114,7 @@ fn parse_node_with_depth(
         .and_then(|x| x.as_str())
         .map(String::from)
         .unwrap_or_else(|| kind_str.to_string());
-    let get_f = |key: &str, d: f32| {
-        o.get(key)
-            .and_then(|x| x.as_f64())
-            .map(|v| v as f32)
-            .unwrap_or(d)
-    };
+    let get_f = |key: &str, d: f64| o.get(key).and_then(|x| x.as_f64()).unwrap_or(d);
     let text = o.get("text").and_then(|x| x.as_str()).map(String::from);
     let fill = o.get("fill").and_then(|x| x.as_str()).map(String::from);
     let stroke = o.get("stroke").and_then(|x| x.as_str()).map(String::from);
@@ -2895,344 +3178,6 @@ fn strip_code_fence(s: &str) -> &str {
     inner.trim_start_matches("json").trim()
 }
 
-// ── HTML → PenDocument 解析器 ──
-//
-// AI 响应中常包含 HTML artifact（如 <artifact type="html">... 或 ```html...``` 代码块）。
-// 本解析器将 HTML 元素转换为 PenDocument 节点树，支持：
-// - 基础元素映射：div/section/main→Rect, h1-h6/p/span/a→Text, img→Image, button→Rect
-// - 样式提取：width/height/left/top/background/color/font-size/border-radius
-// - 嵌套子元素递归解析
-// - class→token 引用（如 class="bg-primary" → fill=var(--color-primary)）
-
-use scraper::{ElementRef, Html, Node, Selector};
-
-/// 从 AI 响应中提取 HTML 片段并转换为 PenDocument。
-///
-/// 支持的输入格式：
-/// 1. 纯 HTML 字符串
-/// 2. ```html...``` 代码块包裹
-/// 3. <artifact type="html">...</artifact> 标签包裹
-pub fn html_to_pen_document(html: &str, page_name: &str) -> anyhow::Result<PenDocument> {
-    let extracted = extract_html_artifact(html);
-    let document = Html::parse_document(&extracted);
-
-    let body_sel = Selector::parse("body").unwrap();
-    let body_el = document.select(&body_sel).next();
-
-    let container = body_el
-        .map(|el| el.inner_html())
-        .unwrap_or_else(|| extracted.clone());
-    let container_doc = Html::parse_fragment(&container);
-
-    let mut doc = PenDocument::new();
-    let mut page = Page::new("page_1", page_name, 1440.0, 900.0);
-
-    let root_sel = Selector::parse(":root > *").unwrap_or_else(|_| Selector::parse("*").unwrap());
-    let mut auto_y: f32 = 0.0;
-    let mut node_counter: u32 = 0;
-    for el_ref in container_doc.select(&root_sel) {
-        if let Some(node) = html_element_to_node(&el_ref, 0.0, &mut auto_y, 0, &mut node_counter) {
-            auto_y += node.h + 8.0;
-            page.add(node);
-        }
-    }
-
-    if page.nodes.is_empty() {
-        let any_sel = Selector::parse("*").unwrap();
-        let root_el = container_doc.select(&any_sel).next();
-        if let Some(root) = root_el {
-            for child_ref in root.child_elements() {
-                if let Some(node) =
-                    html_element_to_node(&child_ref, 0.0, &mut auto_y, 0, &mut node_counter)
-                {
-                    auto_y += node.h + 8.0;
-                    page.add(node);
-                }
-            }
-        }
-    }
-
-    doc.add_page(page);
-    tracing::info!(
-        "html_to_pen_document: 解析完成，{} 个节点",
-        doc.pages.first().map(|p| p.nodes.len()).unwrap_or(0)
-    );
-    Ok(doc)
-}
-
-/// 从 AI 响应文本中提取 HTML 片段。
-fn extract_html_artifact(raw: &str) -> String {
-    // 尝试提取 <artifact type="html">...</artifact>
-    if let Some(start) = raw.find(r#"<artifact"#) {
-        if let Some(content_start) = raw[start..].find('>') {
-            let content_start = start + content_start + 1;
-            if let Some(end) = raw[content_start..].find("</artifact>") {
-                return raw[content_start..content_start + end].trim().to_string();
-            }
-        }
-    }
-
-    // 尝试提取 ```html ... ```
-    if let Some(start_marker) = raw.find("```html") {
-        let content_start = start_marker + 7;
-        if let Some(end) = raw[content_start..].find("```") {
-            return raw[content_start..content_start + end].trim().to_string();
-        }
-    }
-
-    // 尝试提取 ``` ... ``` (generic code fence)
-    if raw.trim().starts_with("```") {
-        let trimmed = raw.trim();
-        let first_newline = trimmed.find('\n').unwrap_or(3);
-        let content_start = first_newline + 1;
-        if let Some(end) = trimmed[content_start..].rfind("```") {
-            return trimmed[content_start..content_start + end]
-                .trim()
-                .to_string();
-        }
-    }
-
-    // 如果包含 HTML 标签，原样返回
-    if raw.contains('<') && raw.contains('>') {
-        return raw.trim().to_string();
-    }
-
-    raw.trim().to_string()
-}
-
-/// 将 HTML 元素转换为 PenNode。
-fn html_element_to_node(
-    el_ref: &ElementRef,
-    base_x: f32,
-    auto_y: &mut f32,
-    depth: usize,
-    counter: &mut u32,
-) -> Option<PenNode> {
-    // C2：深度守卫。parse-html 面向任意 HTML，深层嵌套（如 10 万层 <div>）
-    // 无界递归 → 栈溢出。与 fd-canvas-core MAX_NODE_DEPTH 对齐，超限截断该子树。
-    const MAX_PARSE_HTML_DEPTH: usize = 64;
-    if depth > MAX_PARSE_HTML_DEPTH {
-        tracing::warn!(depth, "parse-html 嵌套深度超限，截断子树");
-        return None;
-    }
-    let el = el_ref.value();
-    let tag = el.name();
-
-    let (kind, name) = match tag {
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => (NodeKind::Text, format!("heading_{tag}")),
-        "p" | "span" | "a" | "label" | "li" => (NodeKind::Text, tag.to_string()),
-        "img" | "svg" => (NodeKind::Image, tag.to_string()),
-        "input" | "textarea" | "select" => (NodeKind::Rect, format!("input_{tag}")),
-        "button" => (NodeKind::Rect, "button".to_string()),
-        _ => (NodeKind::Rect, tag.to_string()),
-    };
-
-    let text = extract_text_content(el_ref);
-    let mut style = fd_canvas_core::NodeStyle::default();
-    let (mut x, mut y, mut w, mut h) = (base_x, *auto_y, 300.0, 40.0);
-
-    // Tag-based defaults first
-    match tag {
-        "h1" => {
-            w = 1440.0;
-            h = 60.0;
-            style.fill = Some("#FFFFFF".into());
-        }
-        "h2" => {
-            w = 600.0;
-            h = 48.0;
-            style.fill = Some("#FFFFFF".into());
-        }
-        "h3" => {
-            w = 400.0;
-            h = 36.0;
-            style.fill = Some("#FFFFFF".into());
-        }
-        "p" | "span" | "a" | "label" => {
-            w = 300.0;
-            h = 24.0;
-            style.fill = Some("#E0E0E0".into());
-        }
-        "button" => {
-            w = 120.0;
-            h = 40.0;
-            style.radius = Some(8.0);
-            style.fill = Some("#007AFF".into());
-        }
-        "input" => {
-            w = 300.0;
-            h = 36.0;
-            style.radius = Some(6.0);
-            style.fill = Some("#2C2C2E".into());
-            style.stroke = Some("1px solid #555".into());
-        }
-        "img" => {
-            w = 200.0;
-            h = 150.0;
-        }
-        "div" | "section" | "main" | "header" | "footer" | "nav" | "article" | "form" => {
-            if text.is_some() {
-                h = 40.0;
-            } else {
-                h = 80.0;
-            }
-            w = 1440.0;
-        }
-        "ul" | "ol" => {
-            w = 300.0;
-            h = 120.0;
-        }
-        "li" => {
-            w = 280.0;
-            h = 28.0;
-            style.fill = Some("#E0E0E0".into());
-        }
-        _ => {}
-    }
-
-    // Inline style overrides defaults
-    let parsed_style = el.attr("style").map(parse_inline_style);
-    if let Some(ref parsed) = parsed_style {
-        if let Some(v) = parsed.get("width") {
-            w = parse_px(v).unwrap_or(w);
-        }
-        if let Some(v) = parsed.get("height") {
-            h = parse_px(v).unwrap_or(h);
-        }
-        if let Some(v) = parsed.get("left") {
-            x = base_x + parse_px(v).unwrap_or(0.0);
-        }
-        if let Some(v) = parsed.get("top") {
-            y = parse_px(v).unwrap_or(0.0);
-        }
-        if let Some(v) = parsed.get("background") {
-            style.fill = Some(v.clone());
-        }
-        if let Some(v) = parsed.get("background-color") {
-            style.fill = Some(v.clone());
-        }
-        if let Some(v) = parsed.get("color") {
-            if kind == NodeKind::Text {
-                style.fill = Some(v.clone());
-            }
-        }
-        if let Some(v) = parsed.get("border-radius") {
-            style.radius = Some(parse_px(v).unwrap_or(0.0));
-        }
-        if let Some(v) = parsed.get("border") {
-            style.stroke = Some(v.clone());
-        }
-    }
-
-    // class → token hint (overrides tag default, but not inline style)
-    if let Some(class) = el.attr("class") {
-        if let Some(token_fill) = class_to_fill_hint(class) {
-            let has_bg = parsed_style.as_ref().is_some_and(|p| {
-                p.contains_key("background") || p.contains_key("background-color")
-            });
-            if !has_bg {
-                style.fill = Some(token_fill);
-            }
-        }
-    }
-
-    *counter += 1;
-    // C2：节点总数上限，防海量节点 OOM。与 fd-canvas-core MAX_NODE_TOTAL 对齐。
-    const MAX_PARSE_HTML_TOTAL: u32 = 100_000;
-    if *counter > MAX_PARSE_HTML_TOTAL {
-        tracing::warn!(total = *counter, "parse-html 节点总数超限，截断剩余子树");
-        return None;
-    }
-    let id = format!("n_{}", counter);
-    let node_text = if kind == NodeKind::Text { text } else { None };
-
-    let children: Vec<PenNode> = el_ref
-        .child_elements()
-        .filter_map(|child_ref| {
-            let mut child_auto_y = 0.0f32;
-            html_element_to_node(&child_ref, x + 16.0, &mut child_auto_y, depth + 1, counter)
-        })
-        .collect();
-
-    Some(PenNode {
-        id,
-        kind,
-        name,
-        x,
-        y,
-        w,
-        h,
-        style,
-        text: node_text,
-        children,
-        rotation: 0.0,
-        z_index: depth as i32,
-    })
-}
-
-/// 提取元素内的直接文本内容。
-fn extract_text_content(el_ref: &ElementRef) -> Option<String> {
-    let mut texts = Vec::new();
-    for child in el_ref.children() {
-        if let Node::Text(t) = child.value() {
-            let trimmed = t.text.trim();
-            if !trimmed.is_empty() {
-                texts.push(trimmed.to_string());
-            }
-        }
-    }
-    if texts.is_empty() {
-        None
-    } else {
-        Some(texts.join(" "))
-    }
-}
-
-/// 解析内联 style 属性为 key-value 映射。
-fn parse_inline_style(style_str: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for decl in style_str.split(';') {
-        let decl = decl.trim();
-        if decl.is_empty() {
-            continue;
-        }
-        if let Some((key, val)) = decl.split_once(':') {
-            map.insert(key.trim().to_string(), val.trim().to_string());
-        }
-    }
-    map
-}
-
-/// 解析 CSS px 值为 f32。
-fn parse_px(val: &str) -> Option<f32> {
-    let v = val.trim();
-    if let Some(num) = v.strip_suffix("px") {
-        num.trim().parse::<f32>().ok()
-    } else if let Ok(n) = v.parse::<f32>() {
-        Some(n)
-    } else if let Some(pct) = v.strip_suffix('%') {
-        pct.trim().parse::<f32>().ok()
-    } else {
-        None
-    }
-}
-
-/// CSS class → token fill 提示。
-fn class_to_fill_hint(class: &str) -> Option<String> {
-    for cls in class.split_whitespace() {
-        match cls {
-            "bg-primary" | "btn-primary" => return Some("var(--color-accent)".into()),
-            "bg-secondary" | "btn-secondary" => return Some("var(--color-secondary)".into()),
-            "bg-danger" | "btn-danger" => return Some("var(--color-error)".into()),
-            "bg-success" | "btn-success" => return Some("var(--color-success)".into()),
-            "bg-dark" => return Some("#1C1C1E".into()),
-            "bg-light" | "bg-white" => return Some("#FFFFFF".into()),
-            _ => {}
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod skills_tests {
     use super::*;
@@ -3274,26 +3219,24 @@ mod skills_tests {
     }
 
     #[test]
-    fn parse_ui_json_missing_nodes_falls_back() {
-        // 商用兜底：缺 nodes 不硬失败，返回合成文档。
+    fn parse_ui_json_missing_nodes_empty_page() {
+        // R-2：缺 nodes 字段视为合法空页（非伪成功占位）。
         let doc = parse_ui_json(r#"{"page":{}}"#, "x").unwrap();
-        assert!(!doc.pages[0].nodes.is_empty());
-    }
-
-    #[test]
-    fn parse_ui_json_unknown_kind_falls_back() {
-        // 未知 kind 触发 nodes 解析失败 → 合成兜底，不硬失败。
-        let bad = r#"{"nodes":[{"id":"x","kind":"weird"}]}"#;
-        let doc = parse_ui_json(bad, "x").unwrap();
-        assert!(!doc.pages[0].nodes.is_empty());
-    }
-
-    #[test]
-    fn parse_ui_json_invalid_json_falls_back() {
-        // 商用兜底：彻底无法解析的 JSON 不再硬失败，返回合成占位文档。
-        let doc = parse_ui_json("not json", "x").unwrap();
         assert_eq!(doc.pages.len(), 1);
-        assert!(!doc.pages[0].nodes.is_empty());
+        assert!(doc.pages[0].nodes.is_empty());
+    }
+
+    #[test]
+    fn parse_ui_json_unknown_kind_bails() {
+        // R-2：未知 kind 触发 nodes 解析失败 → fail visibly，不再伪成功占位。
+        let bad = r#"{"nodes":[{"id":"x","kind":"weird"}]}"#;
+        assert!(parse_ui_json(bad, "x").is_err());
+    }
+
+    #[test]
+    fn parse_ui_json_invalid_json_bails() {
+        // R-2：彻底无法解析的 JSON → fail visibly，不再伪成功占位。
+        assert!(parse_ui_json("not json", "x").is_err());
     }
 
     #[test]
@@ -3310,14 +3253,6 @@ mod skills_tests {
             repaired.contains("100,\"w\"") || repaired.contains("100, \"w\""),
             "repaired={repaired}"
         );
-    }
-
-    #[test]
-    fn synthesize_fallback_doc_is_valid() {
-        let doc = synthesize_fallback_doc("login");
-        assert_eq!(doc.pages.len(), 1);
-        assert_eq!(doc.pages[0].name, "login");
-        assert!(doc.pages[0].nodes.iter().any(|n| n.id == "n_bg"));
     }
 
     #[test]
@@ -3373,7 +3308,7 @@ mod skills_tests {
         // 清掉环境变量，空串应回退方案B gateway 11432
         std::env::remove_var("FUSION_MLX_BASE_URL");
         let ep = FusionMlxClient::resolve_endpoint("").unwrap();
-        assert_eq!(ep, "http://127.0.0.1:11432");
+        assert_eq!(ep, vec!["http://127.0.0.1:11432"]);
     }
 
     #[test]
@@ -3381,8 +3316,35 @@ mod skills_tests {
         // 用户显式传 --endpoint 优先级最高，忽略 env
         std::env::set_var("FUSION_MLX_BASE_URL", "http://127.0.0.1:11434");
         let ep = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432").unwrap();
-        assert_eq!(ep, "http://127.0.0.1:11432");
+        assert_eq!(ep, vec!["http://127.0.0.1:11432"]);
         std::env::remove_var("FUSION_MLX_BASE_URL");
+    }
+
+    #[test]
+    fn resolve_endpoint_multi_value_split_by_comma() {
+        // A-1：逗号分隔多值应拆成多条 endpoint，各经 validate_localhost。
+        std::env::remove_var("FUSION_MLX_BASE_URL");
+        let ep = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432,http://10.0.0.5:11432")
+            .unwrap();
+        assert_eq!(ep, vec!["http://127.0.0.1:11432", "http://10.0.0.5:11432"]);
+    }
+
+    #[test]
+    fn resolve_endpoint_multi_value_rejects_public() {
+        // A-1：多值中任一公网 endpoint 整体拒绝。
+        std::env::remove_var("FUSION_MLX_BASE_URL");
+        let r = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432,http://8.8.8.8:11432");
+        assert!(r.is_err(), "多值含公网 IP 应整体拒绝");
+    }
+
+    #[test]
+    fn parse_endpoints_splits_and_trims() {
+        assert_eq!(
+            parse_endpoints("http://a:1, http://b:2 ,http://c:3"),
+            vec!["http://a:1", "http://b:2", "http://c:3"]
+        );
+        assert_eq!(parse_endpoints(""), vec!["http://127.0.0.1:11432"]);
+        assert_eq!(parse_endpoints("  ,  "), vec!["http://127.0.0.1:11432"]);
     }
 
     #[test]
@@ -3641,6 +3603,12 @@ mod mlx_integration {
 
     fn mock_client(endpoint: &str) -> FusionMlxClient {
         FusionMlxClient::with_endpoint(endpoint).unwrap()
+    }
+
+    /// A-1：多节点 mock client（endpoints 列表，跳过 validate_localhost 的公网校验——
+    /// 测试 server 绑 127.0.0.1，本身就是 loopback，校验必过）。
+    fn mock_client_endpoints(endpoints: Vec<String>) -> FusionMlxClient {
+        FusionMlxClient::with_endpoints(endpoints).unwrap()
     }
     /// SSE mock server: emit each frame as a "data: <frame>" line, then a final "data: [DONE]".
     async fn spawn_sse_server(frames: Vec<String>) -> String {
@@ -4356,6 +4324,52 @@ mod mlx_integration {
         assert!(err.contains("503"), "错误须含 503：{err}");
     }
 
+    /// A-1：多节点 failover。节点 A 恒 503，节点 B 恒 200。
+    /// 首请求落 A（rr idx 0）→ 503 → 重试切 B（rr idx 1）→ 200 成功。
+    /// 断言：最终成功，A 被调用 1 次，B 被调用 1 次。
+    #[test]
+    fn blocking_post_failover_to_next_endpoint() {
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // A：恒 503（给足 8 次覆盖，但 failover 后只调 1 次即切走）。
+        let (url_a, count_a) = rt.block_on(spawn_sequence_server(
+            vec![503, 503, 503, 503, 503, 503, 503, 503],
+            body.clone(),
+        ));
+        // B：恒 200。
+        let (url_b, count_b) = rt.block_on(spawn_sequence_server(vec![], body.clone()));
+        let client = mock_client_endpoints(vec![url_a, url_b]);
+        let out = client.chat_sync("m", "sys", "ping", 1);
+        assert!(out.is_ok(), "A 503 应 failover 到 B 成功：{:?}", out);
+        let calls_a = count_a.load(std::sync::atomic::Ordering::SeqCst);
+        let calls_b = count_b.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(calls_a, 1, "A 应仅被调用 1 次（首请求落 A 后即切走）");
+        assert_eq!(calls_b, 1, "B 应被调用 1 次（failover 落 B 成功）");
+    }
+
+    /// A-1：全节点 503 → 重试耗尽失败，两节点都被轮询到。
+    #[test]
+    fn blocking_post_failover_all_endpoints_down() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (url_a, count_a) = rt.block_on(spawn_sequence_server(
+            vec![503, 503, 503, 503, 503, 503, 503, 503],
+            String::from(r#"{"error":"nope"}"#),
+        ));
+        let (url_b, count_b) = rt.block_on(spawn_sequence_server(
+            vec![503, 503, 503, 503, 503, 503, 503, 503],
+            String::from(r#"{"error":"nope"}"#),
+        ));
+        let client = mock_client_endpoints(vec![url_a, url_b]);
+        let out = client.chat_sync("m", "sys", "ping", 1);
+        assert!(out.is_err(), "全节点 503 应重试耗尽失败");
+        let total = count_a.load(std::sync::atomic::Ordering::SeqCst)
+            + count_b.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            total, RETRY_DEFAULT_MAX_ATTEMPTS,
+            "两节点合计应调用满 max={RETRY_DEFAULT_MAX_ATTEMPTS} 次"
+        );
+    }
+
     /// check_generate：先 503 两次再 200 → 探针重试后 model_loaded=true。
     #[tokio::test]
     async fn check_generate_retries_on_503_then_loaded() {
@@ -4505,24 +4519,24 @@ mod mlx_integration {
             .any(|n| n.text.as_deref() == Some("AI 输出不可用，已生成占位布局")));
     }
 
-    /// 生产 E2E：模型返回彻底损坏 JSON → 合成兜底文档（不硬失败）。
+    /// 生产 E2E：模型返回彻底损坏 JSON → R-2 拒绝伪成功，向上传播错误（不再合成占位兜底）。
     #[tokio::test]
-    async fn image_to_ui_e2e_garbled_falls_back_gracefully() {
+    async fn image_to_ui_e2e_garbled_propagates_error() {
         let body = String::from(r#"{"choices":[{"message":{"content":"totally not json {{{"}}]}"#);
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
-        let doc = skills
-            .image_to_ui_async(&sketch, "测试", "Home")
-            .await
-            .unwrap();
-        assert_eq!(doc.pages.len(), 1);
-        // 占位兜底节点存在
-        assert!(doc.pages[0]
-            .nodes
-            .iter()
-            .any(|n| n.id == "n_bg" || n.id == "n_placeholder"));
+        let result = skills.image_to_ui_async(&sketch, "测试", "Home").await;
+        assert!(
+            result.is_err(),
+            "彻底损坏 JSON 应向上传播错误，不合成伪成功占位"
+        );
+        let msg = format!("{}", result.err().unwrap());
+        assert!(
+            msg.contains("JSON") || msg.contains("json") || msg.contains("nodes"),
+            "错误信息应指明 JSON/nodes 解析失败: {msg}"
+        );
     }
 
     /// 生产 E2E：HTTP 5xx → 向上传播错误（不静默吞）。
@@ -4870,140 +4884,5 @@ mod mlx_integration {
             deltas.iter().any(|d| matches!(d, ChatDelta::Done { .. })),
             "空文本仍应有 Done 帧"
         );
-    }
-}
-
-#[cfg(test)]
-mod html_parser_tests {
-    use super::*;
-
-    #[test]
-    fn extract_plain_html() {
-        let html = r#"<div><h1>Hello</h1><p>World</p></div>"#;
-        let result = extract_html_artifact(html);
-        assert!(result.contains("<h1>"));
-    }
-
-    #[test]
-    fn extract_code_fenced_html() {
-        let raw = "```html\n<div><button>Click</button></div>\n```";
-        let result = extract_html_artifact(raw);
-        assert!(result.contains("<button>"));
-        assert!(!result.contains("```"));
-    }
-
-    #[test]
-    fn extract_artifact_tag() {
-        let raw = r#"<artifact type="html"><div>Content</div></artifact>"#;
-        let result = extract_html_artifact(raw);
-        assert!(result.contains("<div>Content</div>"));
-        assert!(!result.contains("<artifact"));
-    }
-
-    #[test]
-    fn html_to_pen_document_basic() {
-        let html = r#"<h1>Title</h1><p>Paragraph</p><button>Click</button>"#;
-        let doc = html_to_pen_document(html, "TestPage").unwrap();
-        assert_eq!(doc.pages.len(), 1);
-        let page = &doc.pages[0];
-        assert!(page.nodes.len() >= 2, "at least h1 and p");
-        let h1 = page.nodes.iter().find(|n| n.name == "heading_h1");
-        assert!(h1.is_some());
-        assert_eq!(h1.unwrap().kind, fd_canvas_core::NodeKind::Text);
-        assert_eq!(h1.unwrap().text.as_deref(), Some("Title"));
-    }
-
-    #[test]
-    fn html_to_pen_document_button() {
-        let html = r#"<button>Submit</button>"#;
-        let doc = html_to_pen_document(html, "BtnPage").unwrap();
-        let btn = doc.pages[0].nodes.iter().find(|n| n.name == "button");
-        assert!(btn.is_some());
-        assert_eq!(btn.unwrap().kind, fd_canvas_core::NodeKind::Rect);
-        assert_eq!(btn.unwrap().style.radius, Some(8.0));
-    }
-
-    #[test]
-    fn html_to_pen_document_inline_style() {
-        let html = r#"<div style="background: #333; width: 200px; height: 100px; border-radius: 12px;">Box</div>"#;
-        let doc = html_to_pen_document(html, "StylePage").unwrap();
-        let div = doc.pages[0].nodes.first().unwrap();
-        assert_eq!(div.w, 200.0);
-        assert_eq!(div.h, 100.0);
-        assert_eq!(div.style.fill.as_deref(), Some("#333"));
-        assert_eq!(div.style.radius, Some(12.0));
-    }
-
-    #[test]
-    fn html_to_pen_document_class_token_hint() {
-        let html = r#"<button class="btn-primary">Go</button>"#;
-        let doc = html_to_pen_document(html, "TokenPage").unwrap();
-        let btn = doc.pages[0].nodes.first().unwrap();
-        assert_eq!(btn.style.fill.as_deref(), Some("var(--color-accent)"));
-    }
-
-    #[test]
-    fn html_to_pen_document_nested() {
-        let html = r#"<div><h1>Title</h1><p>Sub</p></div>"#;
-        let doc = html_to_pen_document(html, "NestedPage").unwrap();
-        let div = doc.pages[0].nodes.first().unwrap();
-        assert!(!div.children.is_empty(), "div should have child nodes");
-    }
-
-    // C2 回归：深度嵌套 HTML（68 层 > MAX_PARSE_HTML_DEPTH=64）必须不栈溢出、
-    // 不 OOM，解析完成（超深子树被截断）。旧实现无界递归会栈溢出崩溃。
-    #[test]
-    fn html_to_pen_document_deeply_nested_no_overflow() {
-        let mut html = String::new();
-        for _ in 0..68 {
-            html.push_str("<div>");
-        }
-        html.push_str("deep");
-        for _ in 0..68 {
-            html.push_str("</div>");
-        }
-        // 关键断言：不 panic（栈溢出）/不 OOM，返回 Ok。
-        let result = html_to_pen_document(&html, "DeepPage");
-        assert!(result.is_ok(), "深度嵌套 HTML 必须被深度守卫截断而非崩溃");
-    }
-
-    #[test]
-    fn html_to_pen_document_img() {
-        let html = r#"<img src="test.png" />"#;
-        let doc = html_to_pen_document(html, "ImgPage").unwrap();
-        let img = doc.pages[0]
-            .nodes
-            .iter()
-            .find(|n| n.kind == fd_canvas_core::NodeKind::Image);
-        assert!(img.is_some());
-    }
-
-    #[test]
-    fn parse_inline_style_basic() {
-        let map = parse_inline_style("width: 100px; height: 50px; color: #fff");
-        assert_eq!(map.get("width").unwrap(), "100px");
-        assert_eq!(map.get("height").unwrap(), "50px");
-        assert_eq!(map.get("color").unwrap(), "#fff");
-    }
-
-    #[test]
-    fn parse_px_values() {
-        assert_eq!(parse_px("100px"), Some(100.0));
-        assert_eq!(parse_px("50"), Some(50.0));
-        assert_eq!(parse_px("75%"), Some(75.0));
-        assert_eq!(parse_px("auto"), None);
-    }
-
-    #[test]
-    fn class_to_fill_hint_mapping() {
-        assert_eq!(
-            class_to_fill_hint("bg-primary"),
-            Some("var(--color-accent)".to_string())
-        );
-        assert_eq!(
-            class_to_fill_hint("bg-danger"),
-            Some("var(--color-error)".to_string())
-        );
-        assert_eq!(class_to_fill_hint("unknown"), None);
     }
 }

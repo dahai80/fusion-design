@@ -68,13 +68,21 @@ fn sanitize_ipc_subpath(base: &Path, sub: &str) -> anyhow::Result<PathBuf> {
     }
     let joined = base.join(sub_path);
     // 二次校验：若 base/joined 均可规范化（已存在），比较规范化路径以防符号链接绕过；
-    // 否则退化为词法 starts_with——组件已过滤掉 `..`/绝对路径，词法校验即充分。
+    // 否则退化校验——组件已过滤掉 `..`/绝对路径，但**词法 starts_with 不足以防符号链接**
+    // （joined 路径上某组件可能是指向 base 外的符号链接）。退化时仅检测 **base 之下**
+    // 的新增组件是否为符号链接（不含 base 自身及其系统祖先，如 macOS /var→/private/var
+    // 是合法系统软链，不应误拒）。任一 base 内新增组件为符号链接一律拒（R-9）。
     // 不返回规范化路径，保持与 list()/调用方一致的路径形态。
     let canonical_base = base.canonicalize();
     let canonical_joined = joined.canonicalize();
     let within = match (canonical_base, canonical_joined) {
         (Ok(cb), Ok(cj)) => cj.starts_with(&cb),
-        _ => joined.starts_with(base),
+        _ => {
+            // 退化分支：canonicalize 失败（路径尚不存在或权限不足）。
+            // 仅检测 base 之下的新增组件，跳过 base 自身及系统前缀。
+            reject_symlink_below_base(base, &joined)?;
+            joined.starts_with(base)
+        }
     };
     if !within {
         tracing::warn!(
@@ -85,6 +93,95 @@ fn sanitize_ipc_subpath(base: &Path, sub: &str) -> anyhow::Result<PathBuf> {
         anyhow::bail!("IPC 子路径逃出基目录: {sub}");
     }
     Ok(joined)
+}
+
+/// R-9：检测 base 之下的新增路径组件是否为符号链接。跳过 base 自身及其系统祖先
+/// （如 macOS /var→/private/var 是合法系统软链），仅扫 base 之后到 joined 之间的组件。
+fn reject_symlink_below_base(base: &Path, joined: &Path) -> anyhow::Result<()> {
+    // joined = base + sub_path 组件。从 base 之后逐级构建前缀检测。
+    let mut acc = base.to_path_buf();
+    let base_components = base.components().count();
+    for (i, comp) in joined.components().enumerate() {
+        if i < base_components {
+            // base 自身及祖先组件，跳过（系统软链合法）。
+            continue;
+        }
+        acc.push(comp);
+        if let Ok(meta) = std::fs::symlink_metadata(&acc) {
+            if meta.file_type().is_symlink() {
+                tracing::warn!(
+                    component = %acc.display(),
+                    "IPC 子路径含符号链接组件（base 之下），退化校验下拒绝以防穿越"
+                );
+                anyhow::bail!("IPC 子路径含符号链接组件: {}", acc.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// R-8：判定路径是否为合法 IPC 消息文件——仅放行 `.json` 扩展名。
+/// 排除 sync_to_code 写入的代码产物（`.html`/`.tsx`）与 `.tmp*` 残留（E-22）。
+fn is_ipc_message(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("json")
+}
+
+/// E-22：清理目录下 `.tmp*` 残留文件（上次 send 在 rename 前崩溃遗留）。
+/// 失败仅 warn 不阻断主流程（清理是尽力而为）。
+fn cleanup_stale_tmp(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.contains(".tmp") {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(file = %path.display(), error = %e, "cleanup_stale_tmp: 删除残留 .tmp 失败");
+            } else {
+                tracing::debug!(file = %path.display(), "cleanup_stale_tmp: 清理残留 .tmp");
+            }
+        }
+    }
+}
+
+/// E-20：在 PATH 上查找可执行文件（which 语义，无外部依赖）。
+/// 拆分 PATH 环境变量逐目录拼接候选名，存在且为文件即返回。
+fn which_trainer(name: &str) -> Result<PathBuf, ()> {
+    let path_env = std::env::var_os("PATH").ok_or(())?;
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(())
+}
+
+/// E-20：定位 Fusion 单仓共享 .venv/bin 目录。
+/// 优先 FUSION_VENV_ROOT env；否则从当前可执行所在目录向上查找含 `.venv/bin` 的祖先。
+/// 避免硬编码 `/Users/dahai/fusion/.venv`，跨机器/部署可移植。
+fn fusion_venv_bin_dir() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("FUSION_VENV_ROOT") {
+        return Some(PathBuf::from(root).join("bin"));
+    }
+    // 从当前可执行路径向上找 .venv/bin（cargo run 时是 target/debug，仓库根在祖先）。
+    let exe = std::env::current_exe().ok()?;
+    let mut cur = exe.parent()?.to_path_buf();
+    for _ in 0..10 {
+        let candidate = cur.join(".venv").join("bin");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    None
 }
 
 /// 联动消息体。
@@ -102,12 +199,27 @@ pub struct TrainerClient {
 }
 
 impl TrainerClient {
-    /// 解析 fusion-trainer 可执行路径：优先 FUSION_TRAINER_BIN，否则共享 .venv 默认值。
+    /// 解析 fusion-trainer 可执行路径：优先 FUSION_TRAINER_BIN env，否则 PATH 查找
+    /// `fusion-trainer`，再回退共享 .venv 默认值（仍含用户家目录，仅作 last-resort）。
+    /// E-20：删 `/Users/dahai/...` 硬编码为唯一来源，改为可发现优先。
     pub fn resolve_bin() -> PathBuf {
         if let Ok(b) = std::env::var("FUSION_TRAINER_BIN") {
             return PathBuf::from(b);
         }
-        PathBuf::from("/Users/dahai/fusion/.venv/bin/fusion-trainer")
+        // 优先 PATH 上的 fusion-trainer（which 语义，可移植）。
+        if let Ok(p) = which_trainer("fusion-trainer") {
+            return p;
+        }
+        // 回退：当前 fusion-design 工程同级 .venv（Fusion 单仓约定）。
+        // 由 FUSION_VENV_ROOT 或向上查找 fusion/.venv 推导，避免绝对路径硬编码。
+        if let Some(venv) = fusion_venv_bin_dir() {
+            let candidate = venv.join("fusion-trainer");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        // 最终回退：依赖 PATH（spawn 时若不存在会显式报错并提示 FUSION_TRAINER_BIN）。
+        PathBuf::from("fusion-trainer")
     }
 
     pub fn new() -> Self {
@@ -222,6 +334,9 @@ impl EcosystemLink {
     pub fn send(&self, msg: &LinkMessage) -> anyhow::Result<PathBuf> {
         let dir = sanitize_ipc_subpath(&self.base_dir, &msg.target.ipc_dir())?;
         std::fs::create_dir_all(&dir)?;
+        // E-22：清理上次 send 崩溃遗留的 .tmp* 文件，防被后续 list 误消费
+        // （is_ipc_message 已过滤，但残留文件污染目录、占 inode，主动清）。
+        cleanup_stale_tmp(&dir);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
@@ -242,6 +357,10 @@ impl EcosystemLink {
     }
 
     /// 列出某目标的全部待处理消息文件。
+    ///
+    /// R-8：仅返回 `.json` 文件，忽略代码产物（`.html`/`.tsx`/`.tmp*`）。
+    /// sync_to_code 会把生成的 HTML/React 写入同一 `fusion-code/` 目录，
+    /// 无过滤则 `list(FusionCode)` 会把 `.tsx`/`.html` 当消息消费，解析失败报错。
     pub fn list(&self, target: EcosystemTarget) -> anyhow::Result<Vec<PathBuf>> {
         let dir = self.base_dir.join(target.ipc_dir());
         if !dir.exists() {
@@ -250,6 +369,7 @@ impl EcosystemLink {
         let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
+            .filter(|p| is_ipc_message(p))
             .collect();
         files.sort();
         Ok(files)
@@ -257,28 +377,69 @@ impl EcosystemLink {
 
     /// 读取并删除一条消息（消费式）。含大小护栏，防恶意大文件 OOM。
     ///
-    /// H-A3/P2-3：破坏性消费（读后即删），仅适用于**单消费者**场景。多消费者
-    /// 并发监听同一目录会互相吞消息且无报错——当前 fusion-design 为单进程 CLI，
-    /// 无第二消费者。如未来引入多消费者，须改为租约/ACK 或 move-to-processed，
-    /// 勿直接复用此方法。
-    /// R-A2：解析失败时**不删文件**（保留供诊断），返回 Err 含文件路径，避免
-    /// 损坏文件被静默丢弃后无从定位。调用方须显式处理 Err（见 watch_code_changes）。
+    /// R-7：原子抢占——先 `rename(file, .processing/<name>)` 抢占，rename 在同一文件系统
+    /// 原子，成功者独占消费，失败者（已被抢，文件不存在）跳过。修复旧实现「读后即删」
+    /// 在多消费者下互相吞消息且无报错的缺陷。当前单消费者下行为不变（rename 总成功）。
+    /// R-A2：解析失败时**不删处理中文件**（保留供诊断），返回 Err 含文件路径。
+    /// 调用方须显式处理 Err（见 watch_code_changes）。
     pub fn consume(&self, file: &Path) -> anyhow::Result<LinkMessage> {
-        let meta = std::fs::metadata(file)
-            .map_err(|e| anyhow::anyhow!("读取 IPC 消息元数据失败 {}: {e}", file.display()))?;
-        const MAX_IPC_FILE: u64 = 8 * 1024 * 1024;
-        if meta.len() > MAX_IPC_FILE {
-            tracing::warn!(size = meta.len(), "IPC 消息文件超过 8MB 上限，拒绝读取");
-            anyhow::bail!("IPC 消息文件 {} 超过 8MB 安全上限", file.display());
+        // R-7：原子抢占。.processing/ 与消息目录同父，同文件系统 rename 原子。
+        let proc_dir = file
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("IPC 消息文件无父目录: {}", file.display()))?
+            .join(".processing");
+        std::fs::create_dir_all(&proc_dir)?;
+        let proc_name = file
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("IPC 消息文件无文件名: {}", file.display()))?;
+        let proc_file = proc_dir.join(proc_name);
+        match std::fs::rename(file, &proc_file) {
+            Ok(()) => {
+                tracing::debug!(
+                    from = %file.display(),
+                    to = %proc_file.display(),
+                    "consume: rename 抢占成功，独占消费"
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 已被其他消费者抢走，跳过（非错误）。
+                tracing::debug!(
+                    file = %file.display(),
+                    "consume: 文件已被其他消费者抢占，跳过"
+                );
+                anyhow::bail!("IPC 消息已被其他消费者消费: {}", file.display());
+            }
+            Err(e) => {
+                tracing::warn!(file = %file.display(), error = %e, "consume: rename 抢占失败");
+                anyhow::bail!("抢占 IPC 消息失败 {}: {e}", file.display());
+            }
         }
-        let json = std::fs::read_to_string(file)
-            .map_err(|e| anyhow::anyhow!("读取 IPC 消息文件失败 {}: {e}", file.display()))?;
+        // L-6：TOCTOU 修复——单 fd 闭环，不做 metadata() 预检（meta 与 read 间文件可变）。
+        // open 后 take(cap) 限读，按实际读取字节数校验上限。
+        const MAX_IPC_FILE: u64 = 8 * 1024 * 1024;
+        let f = std::fs::File::open(&proc_file)
+            .map_err(|e| anyhow::anyhow!("打开 IPC 消息文件失败 {}: {e}", proc_file.display()))?;
+        use std::io::Read;
+        let mut buf = Vec::new();
+        f.take(MAX_IPC_FILE + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| anyhow::anyhow!("读取 IPC 消息文件失败 {}: {e}", proc_file.display()))?;
+        if buf.len() as u64 > MAX_IPC_FILE {
+            tracing::warn!(size = buf.len(), "IPC 消息文件超过 8MB 上限，拒绝读取");
+            anyhow::bail!("IPC 消息文件 {} 超过 8MB 安全上限", proc_file.display());
+        }
+        let json = String::from_utf8(buf)
+            .map_err(|e| anyhow::anyhow!("IPC 消息文件非 UTF-8 {}: {e}", proc_file.display()))?;
         let msg: LinkMessage = serde_json::from_str(&json).map_err(|e| {
-            // R-A2：解析失败不删文件，保留供诊断，显式报错路径。
-            anyhow::anyhow!("解析 IPC 消息失败 {}（文件保留未删）: {e}", file.display())
+            // R-A2：解析失败不删处理中文件，保留供诊断，显式报错路径。
+            anyhow::anyhow!(
+                "解析 IPC 消息失败 {}（文件保留未删）: {e}",
+                proc_file.display()
+            )
         })?;
-        std::fs::remove_file(file)
-            .map_err(|e| anyhow::anyhow!("消费后删除 IPC 消息文件失败 {}: {e}", file.display()))?;
+        std::fs::remove_file(&proc_file).map_err(|e| {
+            anyhow::anyhow!("消费后删除 IPC 消息文件失败 {}: {e}", proc_file.display())
+        })?;
         Ok(msg)
     }
 
@@ -630,7 +791,8 @@ mod tests {
         assert!(link.list(EcosystemTarget::FusionCode).unwrap().is_empty());
     }
 
-    // R-A2：损坏文件 consume 应失败且不删文件（保留供诊断），不静默丢数据。
+    // R-A2 + R-7：损坏文件 consume 应失败。R-7 先 rename 到 .processing/ 抢占，
+    // 解析失败后文件保留在 .processing/ 供诊断（不再静默丢数据）。
     #[test]
     fn consume_corrupt_file_preserves_and_errors() {
         let tmp = tempdir().unwrap();
@@ -642,16 +804,18 @@ mod tests {
         std::fs::write(&corrupt, "{ not valid json").unwrap();
         let result = link.consume(&corrupt);
         assert!(result.is_err(), "损坏文件应解析失败返回 Err");
-        // 关键：文件保留未删，可供诊断（非静默丢弃）
+        // R-7：原路径已 rename 抢占移走，文件保留在 .processing/ 供诊断（非静默丢弃）。
+        assert!(!corrupt.exists(), "原文件应已被 rename 抢占移走");
+        let proc_file = dir.join(".processing").join("corrupt.json");
         assert!(
-            corrupt.exists(),
-            "损坏文件应保留供诊断，不应被 consume 删除"
+            proc_file.exists(),
+            "损坏文件应保留在 .processing/ 供诊断，不应被 consume 删除"
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("保留未删"), "Err 文案应明示文件保留");
     }
 
-    // R-A2：超大文件 consume 应拒绝且不删（保留供诊断）。
+    // R-A2 + R-7：超大文件 consume 应拒绝，文件保留在 .processing/ 供诊断。
     #[test]
     fn consume_oversize_file_rejects_preserves() {
         let tmp = tempdir().unwrap();
@@ -663,11 +827,12 @@ mod tests {
         std::fs::write(&big, "x".repeat(9 * 1024 * 1024)).unwrap();
         let result = link.consume(&big);
         assert!(result.is_err(), "超大文件应被拒绝");
-        assert!(big.exists(), "超大文件应保留未删");
+        let proc_file = dir.join(".processing").join("big.json");
+        assert!(proc_file.exists(), "超大文件应保留在 .processing/ 未删");
     }
 
-    // R-A2/P2-3：watch_code_changes 遇损坏文件不应 panic、不应静默——返回空指令
-    // 但损坏文件保留（fail visibly，由调用方日志可见）。
+    // R-A2/P2-3 + R-7：watch_code_changes 遇损坏文件不应 panic、不应静默——返回空指令，
+    // 损坏文件被 rename 抢占到 .processing/ 保留（fail visibly，由调用方日志可见）。
     #[test]
     fn watch_code_changes_corrupt_file_does_not_silently_swallow() {
         let tmp = tempdir().unwrap();
@@ -675,10 +840,13 @@ mod tests {
         let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.json"), "{ broken").unwrap();
-        // 应返回 Ok（空指令），不 panic；损坏文件保留供诊断。
+        // 应返回 Ok（空指令），不 panic；损坏文件抢占移到 .processing/ 保留供诊断。
         let cmds = link.watch_code_changes().expect("损坏文件不应致整体失败");
         assert!(cmds.is_empty());
-        assert!(dir.join("bad.json").exists(), "损坏文件应保留");
+        assert!(
+            dir.join(".processing").join("bad.json").exists(),
+            "损坏文件应保留在 .processing/"
+        );
     }
 
     #[test]
