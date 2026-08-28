@@ -464,6 +464,12 @@ fn sanitize_image_url(raw: &str) -> String {
         tracing::warn!(url = %trimmed, "SVG image href 拒绝出网/可执行协议");
         return String::new();
     }
+    // SEC-N3：无协议前缀路径放行前检查 .. 段防路径穿越。
+    // 离线 SVG 无出网，但相对路径可解析到文件系统敏感位置（理论风险）。
+    if trimmed.contains("/../") || trimmed.starts_with("../") || trimmed == ".." {
+        tracing::warn!(url = %trimmed, "SVG image href 拒绝含 .. 的路径穿越意图");
+        return String::new();
+    }
     // 无协议前缀：相对路径或纯文件名，放行（本地资源，不出网）
     trimmed.to_string()
 }
@@ -1664,6 +1670,22 @@ mod tests {
         assert_eq!(sanitize_image_url("https://evil.com/x.png"), "");
         assert_eq!(sanitize_image_url("http://10.0.0.1/exfil.png"), "");
         assert_eq!(sanitize_image_url("file:///etc/passwd"), "");
+    }
+
+    #[test]
+    fn sanitize_image_url_rejects_dotdot_traversal() {
+        assert_eq!(sanitize_image_url("../secret"), "");
+        assert_eq!(sanitize_image_url("a/../b"), "");
+        assert_eq!(sanitize_image_url("../../etc/passwd"), "");
+    }
+    #[test]
+    fn sanitize_image_url_allows_normal_relative() {
+        assert_eq!(sanitize_image_url("logo.png"), "logo.png");
+        assert_eq!(sanitize_image_url("assets/icon.svg"), "assets/icon.svg");
+        assert_eq!(
+            sanitize_image_url("data:image/png;base64,xxx"),
+            "data:image/png;base64,xxx"
+        );
     }
 
     #[test]
