@@ -6,6 +6,7 @@
 
 pub mod chat;
 pub mod check_mlx;
+pub mod design_system;
 pub mod export;
 pub mod generate;
 pub mod health;

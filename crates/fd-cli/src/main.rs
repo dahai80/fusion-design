@@ -472,26 +472,11 @@ fn report_error(e: &anyhow::Error) {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    use fd_cli::{design, export, host};
+    use fd_cli::{export, host};
 
     match cli.command {
-        Command::ListDesignSystems => {
-            // TODO A-3: 拆到 src/commands/
-            let mut reg = design::DesignSystemRegistry::new();
-            reg.register_builtin();
-            for id in reg.list() {
-                println!("{id}");
-            }
-            Ok(())
-        }
-        Command::Activate { id } => {
-            // TODO A-3: 拆到 src/commands/
-            let mut reg = design::DesignSystemRegistry::new();
-            reg.register_builtin();
-            reg.activate(&id)?;
-            println!("已激活: {id}");
-            Ok(())
-        }
+        Command::ListDesignSystems => commands::design_system::list_design_systems().await,
+        Command::Activate { id } => commands::design_system::activate(id).await,
         Command::Export {
             input,
             format,
@@ -705,14 +690,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::TokenCSS { design_system } => {
-            // TODO A-3: 拆到 src/commands/
-            let mut reg = design::DesignSystemRegistry::new();
-            reg.register_builtin();
-            let system = reg.get(&design_system).ok_or_else(|| {
-                anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list())
-            })?;
-            println!("{}", system.to_css_custom_properties());
-            Ok(())
+            commands::design_system::token_css(design_system).await
         }
         Command::Lint {
             input,
@@ -829,17 +807,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Theme {
             design_system,
             mode,
-        } => {
-            // TODO A-3: 拆到 src/commands/
-            let mut reg = fd_design_system::DesignSystemRegistry::new();
-            reg.register_builtin();
-            let system = reg.get(&design_system).ok_or_else(|| {
-                anyhow::anyhow!("设计规范 '{design_system}' 未找到，可用: {:?}", reg.list())
-            })?;
-            let css = system.to_css_custom_properties_for_theme(mode.into());
-            println!("{css}");
-            Ok(())
-        }
+        } => commands::design_system::theme(design_system, mode).await,
         Command::Train {
             dataset,
             model,
