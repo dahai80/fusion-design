@@ -595,7 +595,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let json = serde_json::to_string_pretty(&doc)?;
             match out {
                 Some(p) => {
-                    std::fs::write(&p, &json)?;
+                    tokio::fs::write(&p, &json).await?;
                     println!("已生成图生 UI PenDocument JSON 到 {p:?}");
                 }
                 None => println!("{json}"),
@@ -626,7 +626,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let json = serde_json::to_string_pretty(&docs)?;
             match out {
                 Some(p) => {
-                    std::fs::write(&p, &json)?;
+                    tokio::fs::write(&p, &json).await?;
                     println!("已生成 3 套多方案 PenDocument JSON 到 {p:?}");
                 }
                 None => println!("{json}"),
@@ -650,7 +650,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let json = serde_json::to_string_pretty(&spec)?;
             match out {
                 Some(p) => {
-                    std::fs::write(&p, &json)?;
+                    tokio::fs::write(&p, &json).await?;
                     println!("已生成设计规范文档到 {p:?}");
                 }
                 None => println!("{json}"),
@@ -673,7 +673,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let json = serde_json::to_string_pretty(&docs)?;
             match out {
                 Some(p) => {
-                    std::fs::write(&p, &json)?;
+                    tokio::fs::write(&p, &json).await?;
                     println!("已生成 PageFlow 多页面文档到 {p:?}");
                 }
                 None => println!("{json}"),
@@ -765,7 +765,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             match out {
                 Some(p) => {
-                    std::fs::write(&p, &code)?;
+                    tokio::fs::write(&p, &code).await?;
                     tracing::info!("已导出代码到 {p:?}");
                 }
                 None => println!("{code}"),
@@ -785,7 +785,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(doc) => {
                     let out_json = serde_json::to_string_pretty(&doc)?;
                     let hist_out = serde_json::to_string_pretty(&stack)?;
-                    std::fs::write(&history_path, &hist_out)?;
+                    tokio::fs::write(&history_path, &hist_out).await?;
                     println!("{out_json}");
                     tracing::info!("undo: 成功回退");
                     Ok(())
@@ -806,7 +806,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(doc) => {
                     let out_json = serde_json::to_string_pretty(&doc)?;
                     let hist_out = serde_json::to_string_pretty(&stack)?;
-                    std::fs::write(&history_path, &hist_out)?;
+                    tokio::fs::write(&history_path, &hist_out).await?;
                     println!("{out_json}");
                     tracing::info!("redo: 成功重做");
                     Ok(())
