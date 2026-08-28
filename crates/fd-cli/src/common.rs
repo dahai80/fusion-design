@@ -9,28 +9,33 @@ use std::path::{Path, PathBuf};
 /// 超限即拒绝，防巨输入 OOM。50MB 足够任何合法 .fusiondesign。
 const STDIN_READ_CAP: usize = 50 * 1024 * 1024;
 
+// FAULT-2：纯函数，累加 bytes 一次性 from_utf8。供 read_stdin_capped 复用 + 单测。
+pub fn decode_stdin_bytes(buf: Vec<u8>) -> anyhow::Result<String> {
+    String::from_utf8(buf).map_err(|e| anyhow::anyhow!("stdin 输入非 UTF-8: {e}"))
+}
+
 /// 分块读 stdin 至 STDIN_READ_CAP，超限 bail + warn。
 pub fn read_stdin_capped() -> anyhow::Result<String> {
     use std::io::Read;
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     loop {
         let n = handle.read(&mut chunk)?;
         if n == 0 {
             break;
         }
-        // UTF-8 边界：临时 byte buf 拼接，最后一次性 from_utf8。
-        // 这里直接 push_str 依赖 chunk 可能在多字节字符中间切断；
-        // 改用 bytes 累加再 from_utf8 保证安全。
-        buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        // FAULT-2：字节累加原始 bytes，不在循环内转 UTF-8。
+        // chunk 可能在多字节字符中间切断，循环内 from_utf8_lossy 会用 U+FFFD 替换损坏字节。
+        // 末尾一次性 from_utf8 保证边界完整，无效 UTF-8 返 Err fail visibly（不静默替换）。
+        buf.extend_from_slice(&chunk[..n]);
         if buf.len() > STDIN_READ_CAP {
             tracing::warn!("stdin 超过 {STDIN_READ_CAP} 字节上限，拒绝读取");
             anyhow::bail!("stdin 输入超过 {STDIN_READ_CAP} 字节上限，拒绝读取防 OOM");
         }
     }
-    Ok(buf)
+    decode_stdin_bytes(buf)
 }
 
 /// 文件读取上限（字节），复用 stdin 上限语义。
@@ -133,4 +138,22 @@ pub fn ndjson_frame_done() -> serde_json::Value {
 
 pub fn ndjson_frame_error(message: &str) -> serde_json::Value {
     serde_json::json!({"type":"error","message":message})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_stdin_bytes_multibyte_split() {
+        // 「中」= 0xE4 0xB8 0xAD。把首字符的后 2 字节放 chunk 末、前 1 字节放下 chunk 首，
+        // 模拟 chunk 边界切断。旧 from_utf8_lossy 逐 chunk 转会丢字节。
+        let mut bytes = vec![0xE4, 0xB8, 0xAD]; // 完整「中」
+        bytes.push(0xE4); // 切断：下字符首字节孤立
+        let mut full = bytes.clone();
+        full.push(0xB8);
+        full.push(0xAD); // 拼「中中」
+        let got = decode_stdin_bytes(full).unwrap();
+        assert_eq!(got, "中中");
+    }
 }
