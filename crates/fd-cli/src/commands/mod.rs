@@ -4,6 +4,7 @@
 //! 6 个 arm（export/generate/chat/lint/check_mlx/health），其余 arm 仍内联
 //! 于 main.rs run() 并标注 TODO 待后续拆分，避免一次大改风险失控。
 
+pub mod ai_skill;
 pub mod chat;
 pub mod check_mlx;
 pub mod design_system;

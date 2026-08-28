@@ -568,25 +568,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             model,
             endpoint,
             out,
-        } => {
-            // TODO A-3: 拆到 src/commands/
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
-                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-            let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let doc = skills
-                .image_to_ui_async(&sketch.to_string_lossy(), &hint, &page)
-                .await?;
-            let json = serde_json::to_string_pretty(&doc)?;
-            match out {
-                Some(p) => {
-                    tokio::fs::write(&p, &json).await?;
-                    println!("已生成图生 UI PenDocument JSON 到 {p:?}");
-                }
-                None => println!("{json}"),
-            }
-            Ok(())
-        }
+        } => commands::ai_skill::image_to_ui(sketch, hint, page, model, endpoint, out).await,
         Command::MultiVariants {
             prompt,
             page,
@@ -594,77 +576,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             model,
             endpoint,
             out,
-        } => {
-            // TODO A-3: 拆到 src/commands/
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
-                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-            let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let picked = common::pick_multi_variant_styles(styles);
-            let docs = skills
-                .multi_variants_async(
-                    &prompt,
-                    &page,
-                    [picked[0].as_str(), picked[1].as_str(), picked[2].as_str()],
-                )
-                .await?;
-            let json = serde_json::to_string_pretty(&docs)?;
-            match out {
-                Some(p) => {
-                    tokio::fs::write(&p, &json).await?;
-                    println!("已生成 3 套多方案 PenDocument JSON 到 {p:?}");
-                }
-                None => println!("{json}"),
-            }
-            Ok(())
-        }
+        } => commands::ai_skill::multi_variants(prompt, page, styles, model, endpoint, out).await,
         Command::SpecDoc {
             input,
             title,
             model,
             endpoint,
             out,
-        } => {
-            // TODO A-3: 拆到 src/commands/
-            let doc_json = common::read_file_capped(&input)?;
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
-                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-            let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let spec = skills.spec_doc_async(&doc_json, &title).await?;
-            let json = serde_json::to_string_pretty(&spec)?;
-            match out {
-                Some(p) => {
-                    tokio::fs::write(&p, &json).await?;
-                    println!("已生成设计规范文档到 {p:?}");
-                }
-                None => println!("{json}"),
-            }
-            Ok(())
-        }
+        } => commands::ai_skill::spec_doc(input, title, model, endpoint, out).await,
         Command::PageFlow {
             flow,
             style_hint,
             model,
             endpoint,
             out,
-        } => {
-            // TODO A-3: 拆到 src/commands/
-            let client = fd_ai_adapter::FusionMlxClient::with_endpoints(
-                fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
-            )?;
-            let skills = fd_ai_adapter::DesignSkills::new(client, model);
-            let docs = skills.page_flow_async(&flow, &style_hint).await?;
-            let json = serde_json::to_string_pretty(&docs)?;
-            match out {
-                Some(p) => {
-                    tokio::fs::write(&p, &json).await?;
-                    println!("已生成 PageFlow 多页面文档到 {p:?}");
-                }
-                None => println!("{json}"),
-            }
-            Ok(())
-        }
+        } => commands::ai_skill::page_flow(flow, style_hint, model, endpoint, out).await,
         Command::CheckFrontend { dir, backend } => {
             // TODO A-3: 拆到 src/commands/
             host::HostBridgeConfig {
@@ -813,19 +739,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             model,
             method,
             config,
-        } => {
-            // TODO A-3: 拆到 src/commands/
-            let trainer = fd_ecosystem::TrainerClient::new();
-            let status = match method.as_str() {
-                "grpo" => trainer.run_rlsl("grpo", &dataset, &model, config.as_deref())?,
-                "sft" => trainer.run_sft(&dataset, &model, config.as_deref())?,
-                other => anyhow::bail!("不支持的 --method: {other} (仅 sft|grpo)"),
-            };
-            if !status.success() {
-                anyhow::bail!("fusion-trainer 退出码 {}", status.code().unwrap_or(-1));
-            }
-            Ok(())
-        }
+        } => commands::ai_skill::train(dataset, model, method, config).await,
     }
 }
 
