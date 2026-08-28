@@ -30,6 +30,10 @@ async-stream = "0.3"
 op-ai = { workspace = true }  # vendored OpenPencil subset
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }
+# ARCH-11：skill 系统（SkillContext trait + 7 skill + helper）迁出到 fd-skills，
+# adapter impl SkillContext for FusionMlxClient 反向实现 trait。re-export 保持
+# adapter 内部调用方（DesignSkills facade / mlx_integration tests）路径不变。
+fd-skills = { path = "../fd-skills" }
 # A-2：html_to_pen_document 拆到 fd-html-parser，此处 re-export 保持调用方不变。
 fd-html-parser = { path = "../fd-html-parser" }
 

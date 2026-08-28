@@ -568,6 +568,7 @@ dependencies = [
  "fd-canvas-core",
  "fd-design-system",
  "fd-html-parser",
+ "fd-skills",
  "futures",
  "op-ai",
  "reqwest",
@@ -726,6 +727,20 @@ dependencies = [
  "anyhow",
  "fd-canvas-core",
  "scraper",
+ "tracing",
+]
+
+[[package]]
+name = "fd-skills"
+version = "0.1.12"
+dependencies = [
+ "anyhow",
+ "base64",
+ "fd-canvas-core",
+ "fd-design-system",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

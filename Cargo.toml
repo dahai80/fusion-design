@@ -7,6 +7,10 @@ members = [
     "crates/fd-codegen",
     # A-2：html_to_pen_document 拆出叶子 crate（仅 fd-canvas-core + scraper 依赖）。
     "crates/fd-html-parser",
+    # ARCH-11：skill 系统（SkillContext trait + 7 skill + SkillRegistry + 纯 helper）
+    # 从 fd-ai-adapter 迁出，trait 化解耦 inference client。adapter 反向 impl SkillContext
+    # for FusionMlxClient。fd-skills 零 HTTP，纯 trait + helper + 解析逻辑。
+    "crates/fd-skills",
     "crates/fd-ai-adapter",
     "crates/fd-design-system",
     "crates/fd-ecosystem",

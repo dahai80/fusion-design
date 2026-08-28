@@ -126,7 +126,7 @@ pub struct Page {
 }
 
 /// �矢量节点（统一形状，覆盖 rect/circle/text/image/group）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PenNode {
     pub id: String,
     pub kind: NodeKind,
@@ -745,28 +745,38 @@ pub enum CanvasError {
 
 // ── 撤销/重做栈 ──
 
+mod undo_delta;
+pub use undo_delta::{NodeChange, UndoDelta};
+
 const UNDO_REDO_MAX_DEPTH: usize = 50;
 
-// P2：VecDeque + pop_front() O(1)，替代 Vec::remove(0) O(n) 深拷贝。
+// FUNC-7：delta 栈替代快照栈。存 UndoDelta + 当前态 current，省内存。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoRedoStack {
-    undo_stack: VecDeque<PenDocument>,
-    redo_stack: VecDeque<PenDocument>,
+    undo_stack: VecDeque<UndoDelta>,
+    redo_stack: VecDeque<UndoDelta>,
+    current: PenDocument,
 }
 
 impl UndoRedoStack {
-    pub fn new() -> Self {
+    pub fn new(initial: PenDocument) -> Self {
         Self {
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
+            current: initial,
         }
     }
 
-    pub fn push(&mut self, snapshot: PenDocument) {
+    pub fn current(&self) -> &PenDocument {
+        &self.current
+    }
+
+    pub fn push(&mut self, delta: UndoDelta) {
         if self.undo_stack.len() >= UNDO_REDO_MAX_DEPTH {
             self.undo_stack.pop_front();
         }
-        self.undo_stack.push_back(snapshot);
+        delta.apply(&mut self.current);
+        self.undo_stack.push_back(delta);
         self.redo_stack.clear();
     }
 
@@ -779,24 +789,23 @@ impl UndoRedoStack {
     }
 
     pub fn undo(&mut self) -> Option<PenDocument> {
-        if self.undo_stack.len() < 2 {
-            return None;
-        }
-        let current = self.undo_stack.pop_back()?;
-        self.redo_stack.push_back(current);
-        self.undo_stack.back().cloned()
+        let delta = self.undo_stack.pop_back()?;
+        delta.apply_reverse(&mut self.current);
+        self.redo_stack.push_back(delta);
+        Some(self.current.clone())
     }
 
     pub fn redo(&mut self) -> Option<PenDocument> {
-        let snapshot = self.redo_stack.pop_back()?;
-        self.undo_stack.push_back(snapshot.clone());
-        Some(snapshot)
+        let delta = self.redo_stack.pop_back()?;
+        delta.apply(&mut self.current);
+        self.undo_stack.push_back(delta);
+        Some(self.current.clone())
     }
 }
 
 impl Default for UndoRedoStack {
     fn default() -> Self {
-        Self::new()
+        Self::new(PenDocument::default())
     }
 }
 
@@ -1348,32 +1357,34 @@ mod tests {
 
     #[test]
     fn undo_redo_basic() {
-        let mut stack = UndoRedoStack::new();
-        let doc_v1 = PenDocument::new();
-        stack.push(doc_v1.clone());
-
-        let mut doc_v2 = doc_v1.clone();
-        doc_v2.add_page(Page {
-            id: "p1".into(),
-            name: "Page 1".into(),
-            width: 800.0,
-            height: 600.0,
-            nodes: vec![],
+        let mut init = PenDocument::new();
+        init.add_page(Page {
+            id: "p0".into(),
+            name: "P0".into(),
+            width: 100.0,
+            height: 100.0,
+            nodes: vec![PenNode::rect("a", 0.0, 0.0, 10.0, 10.0)],
         });
-        stack.push(doc_v2.clone());
+        let mut stack = UndoRedoStack::new(init);
+        let mut next = stack.current().clone();
+        next.pages[0]
+            .nodes
+            .push(PenNode::rect("b", 0.0, 0.0, 10.0, 10.0));
+        stack.push(UndoDelta::compute(stack.current(), &next));
 
         assert!(stack.can_undo());
+        assert_eq!(stack.current().pages[0].nodes.len(), 2);
         let undone = stack.undo().unwrap();
-        assert_eq!(undone.pages.len(), 0);
+        assert_eq!(undone.pages[0].nodes.len(), 1);
 
         assert!(stack.can_redo());
         let redone = stack.redo().unwrap();
-        assert_eq!(redone.pages.len(), 1);
+        assert_eq!(redone.pages[0].nodes.len(), 2);
     }
 
     #[test]
     fn undo_redo_empty_safe() {
-        let mut stack = UndoRedoStack::new();
+        let mut stack = UndoRedoStack::new(PenDocument::new());
         assert!(!stack.can_undo());
         assert!(!stack.can_redo());
         assert!(stack.undo().is_none());
@@ -1382,23 +1393,28 @@ mod tests {
 
     #[test]
     fn undo_redo_max_depth() {
-        let mut stack = UndoRedoStack::new();
+        let mut init = PenDocument::new();
+        init.add_page(Page {
+            id: "p0".into(),
+            name: "P0".into(),
+            width: 100.0,
+            height: 100.0,
+            nodes: vec![],
+        });
+        let mut stack = UndoRedoStack::new(init);
         for i in 0..60 {
-            let mut doc = PenDocument::new();
-            doc.add_page(Page {
-                id: format!("p{i}"),
-                name: format!("Page {i}"),
-                width: 800.0,
-                height: 600.0,
-                nodes: vec![],
-            });
-            stack.push(doc);
+            let mut next = stack.current().clone();
+            next.pages[0]
+                .nodes
+                .push(PenNode::rect(format!("n{i}"), 0.0, 0.0, 10.0, 10.0));
+            stack.push(UndoDelta::compute(stack.current(), &next));
         }
-        // 最多 50 步，超过的应被丢弃
+        // 60 节点累积，MAX_DEPTH=50 丢最早 10 delta，current 现 60 节点
+        assert_eq!(stack.current().pages[0].nodes.len(), 60);
         assert!(stack.can_undo());
         let undone = stack.undo().unwrap();
-        // 最旧的 10 个已被丢弃，undo 应退到第 50 步
-        assert_eq!(undone.pages.len(), 1);
+        // undo 撤销最近 add-node delta（n59）→ 59 节点
+        assert_eq!(undone.pages[0].nodes.len(), 59);
     }
 
     #[test]
