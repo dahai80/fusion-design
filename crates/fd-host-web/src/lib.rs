@@ -35,17 +35,60 @@ type DragMoveClosure = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>
 thread_local! {
     static ACTIVE_DRAG_MOVE: std::cell::RefCell<Option<DragMoveClosure>> =
         const { std::cell::RefCell::new(None) };
+    // R-1 backfill：拖拽/平移/框选/resize 的 on_up Closure 暂存。
+    // 旧 .forget() 在 mouseup 未触发（鼠标拖拽中途离开窗口）时永久泄漏该 Closure。
+    // 每次 mousedown 前调 cleanup_pending_drag() 回收上一轮残留的 on_up + on_move，
+    // 消除"漏 mouseup 即泄漏"路径。on_up 触发时也 take + drop。
+    static PENDING_DRAG_UP: std::cell::RefCell<Option<DragMoveClosure>> =
+        const { std::cell::RefCell::new(None) };
+    // R-1 backfill：resize handle 的 on_handle_mousedown Closure 暂存（每选中节点 8 个）。
+    // 旧 .forget() 每次 select_node 切换选中泄漏 8 个 Closure（长会话线性增长）。
+    // select_node 重建前 clear() 丢弃上一批 8 个。
+    static RESIZE_HANDLES: std::cell::RefCell<Vec<DragMoveClosure>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-// R-1 余 14 处 forget 的审计裁定回溯：
-// 剩余 .forget() 站点分两类，均非长会话泄漏根因，故保留 forget + 文档化（不做 stored-Vec 转换）：
-//   (1) setup_delegated_* / setup_* 的容器级委托监听器（click/mousedown/wheel/message）——
-//       mount 一次即应用生命周期常驻，经 mark_listeners_installed 幂等保护防重复 attach。
-//       事件委托模式下非逐节点绑定，节点增删不新增监听器。常驻监听器 forget 是 web_sys 惯例，
-//       不随会话长度增长，无线性内存泄漏。
-//   (2) Closure::once 的 on_mouseup/on_up —— 触发一次后 wasm-bindgen 自清理（P0-2 注释），
-//       forget 仅持有至触发点，非持续泄漏。
-// 真正的会话级泄漏（拖拽 on_move 每次新增）已由 ACTIVE_DRAG_MOVE 修复。
+// R-1 backfill：拖拽开始前回收上一轮残留监听。
+// 处理"mouseup 漏触发"场景——鼠标拖拽中途离开窗口，mouseup 永不到达，
+// 旧 on_up（PENDING_DRAG_UP）+ on_move（ACTIVE_DRAG_MOVE）成为悬空监听 + 泄漏 Closure。
+// 此处 remove_event_listener 后 drop Closure，避免下一轮拖拽叠加 + 线性内存增长。
+// 失败仅 .ok()：监听器可能已被 on_up 触发时移除，重复移除无碍。
+fn cleanup_pending_drag() {
+    if let Some(w) = web_sys::window() {
+        ACTIVE_DRAG_MOVE.with(|c| {
+            if let Some(cl) = c.borrow_mut().take() {
+                let mv_ref: &js_sys::Function = cl.as_ref().unchecked_ref();
+                w.remove_event_listener_with_callback("mousemove", mv_ref)
+                    .ok();
+                drop(cl);
+                web_sys::console::warn_1(
+                    &"fd-host-web: R-1 回收上一轮残留 on_move（mouseup 漏触发）".into(),
+                );
+            }
+        });
+        PENDING_DRAG_UP.with(|c| {
+            if let Some(cl) = c.borrow_mut().take() {
+                let up_ref: &js_sys::Function = cl.as_ref().unchecked_ref();
+                w.remove_event_listener_with_callback("mouseup", up_ref)
+                    .ok();
+                drop(cl);
+                web_sys::console::warn_1(
+                    &"fd-host-web: R-1 回收上一轮残留 on_up（mouseup 漏触发）".into(),
+                );
+            }
+        });
+    }
+}
+
+// R-1 余 forget 站点审计裁定回溯：
+// 剩余 .forget() 站点为容器级委托监听器（setup_delegated_* / setup_* 的 click/mousedown/
+// wheel/message）——mount 一次即应用生命周期常驻，经 mark_listeners_installed 幂等保护防重复
+// attach。事件委托模式下非逐节点绑定，节点增删不新增监听器。常驻监听器 forget 是 web_sys 惯例，
+// 不随会话长度增长，无线性内存泄漏。
+// 拖拽热路径（on_move / on_up / resize handle）已全部转 stored-thread_local：
+//   - on_move → ACTIVE_DRAG_MOVE（mouseup take 回收）
+//   - on_up   → PENDING_DRAG_UP（mouseup take + 漏触发时 cleanup_pending_drag 回收）
+//   - resize handle → RESIZE_HANDLES（select_node 重建前 clear 回收上一批 8 个）
 // 若未来需 unmount 全量回收，可在此 thread_local 旁加 Vec<Closure> + unmount() drop——
 // 当前无 unmount 调用方，stored-Vec 增复杂度不解决现存泄漏，按 Rule 2 不引入。
 
@@ -1422,6 +1465,8 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
     };
 
     let on_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
@@ -1574,7 +1619,7 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
             .into();
         // R-1：存 on_mousemove 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_mousemove));
-        let on_mouseup = Closure::once(Box::new(move |event: web_sys::Event| {
+        let on_mouseup = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
             };
@@ -1583,7 +1628,8 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                 .ok();
             // R-1：移除监听后 take + drop on_mousemove Closure，回收线性内存。
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // self-remove：Closure::once 触发后由 wasm-bindgen 清理，无需 forget（P0-2）。
+            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (raw_dx, raw_dy) = match mm {
                 Some(m) => (m.client_x() as f32 - start_x, m.client_y() as f32 - start_y),
@@ -1633,11 +1679,12 @@ fn setup_delegated_mousedown_listener(container_id: &str) {
                 dy: final_dy,
             });
             hide_snap_lines();
-        }) as Box<dyn FnOnce(web_sys::Event)>);
+        }) as Box<dyn FnMut(web_sys::Event)>);
         window
             .add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref())
             .ok();
-        on_mouseup.forget();
+        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_mouseup));
         // R-1：on_mousemove 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
 
         event.stop_propagation();
@@ -1831,6 +1878,8 @@ fn setup_canvas_pan_listener(container_id: &str) {
     };
 
     let on_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
@@ -1864,7 +1913,7 @@ fn setup_canvas_pan_listener(container_id: &str) {
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
-        let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
+        let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
             };
@@ -1873,17 +1922,19 @@ fn setup_canvas_pan_listener(container_id: &str) {
                 .ok();
             // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // Closure::once 触发后自清理，无需 forget（P0-2）。
+            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
                 Some(m) => (m.client_x() as f32 - start_x, m.client_y() as f32 - start_y),
                 None => (0.0, 0.0),
             };
             send_bridge_event(BridgeEvent::CanvasPan { dx, dy });
-        }) as Box<dyn FnOnce(web_sys::Event)>);
+        }) as Box<dyn FnMut(web_sys::Event)>);
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
-        on_up.forget();
+        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_up));
         // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
 
         event.prevent_default();
@@ -1912,6 +1963,8 @@ fn setup_marquee_listener(container_id: &str) {
     };
 
     let on_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
@@ -2003,7 +2056,7 @@ fn setup_marquee_listener(container_id: &str) {
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
-        let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
+        let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
             };
@@ -2012,7 +2065,8 @@ fn setup_marquee_listener(container_id: &str) {
                 .ok();
             // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // Closure::once 触发后自清理（P0-2）。
+            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
 
             // 移除选框 DOM
             if let Some(doc) = w.document() {
@@ -2043,11 +2097,12 @@ fn setup_marquee_listener(container_id: &str) {
             if !selected.is_empty() {
                 send_bridge_event(BridgeEvent::MarqueeSelect { node_ids: selected });
             }
-        }) as Box<dyn FnOnce(web_sys::Event)>);
+        }) as Box<dyn FnMut(web_sys::Event)>);
 
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
-        on_up.forget();
+        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_up));
         // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
     }) as Box<dyn FnMut(web_sys::Event)>);
 
@@ -2492,6 +2547,9 @@ fn select_node(node_id: &str) {
                 }
             }
         }
+        // R-1 backfill：DOM handle 已移除，同步回收上一批 8 个 on_handle_mousedown Closure
+        // （旧 .forget() 每次选中切换泄漏 8 个，长会话线性增长）。clear drop 全部。
+        RESIZE_HANDLES.with(|c| c.borrow_mut().clear());
     };
     clear_prev(&document);
 
@@ -2572,6 +2630,8 @@ fn create_resize_handle(
     let dir_str = dir.to_string();
     let nid = node_id.to_string();
     let on_handle_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
+        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
@@ -2637,7 +2697,7 @@ fn create_resize_handle(
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
         // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
-        let on_up = Closure::once(Box::new(move |event: web_sys::Event| {
+        let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
                 return;
             };
@@ -2646,7 +2706,8 @@ fn create_resize_handle(
                 .ok();
             // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // Closure::once 触发后自清理（P0-2）。
+            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
 
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
@@ -2667,11 +2728,12 @@ fn create_resize_handle(
 
             // refresh handles after resize
             select_node(&rid);
-        }) as Box<dyn FnOnce(web_sys::Event)>);
+        }) as Box<dyn FnMut(web_sys::Event)>);
         window
             .add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
-        on_up.forget();
+        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_up));
         // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
 
         event.stop_propagation();
@@ -2680,7 +2742,8 @@ fn create_resize_handle(
     handle
         .add_event_listener_with_callback("mousedown", on_handle_mousedown.as_ref().unchecked_ref())
         .ok();
-    on_handle_mousedown.forget();
+    // R-1 backfill：handle mousedown Closure 托管到 RESIZE_HANDLES（select_node 重建前 clear 回收）。
+    RESIZE_HANDLES.with(|c| c.borrow_mut().push(on_handle_mousedown));
 
     Some(handle)
 }

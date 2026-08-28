@@ -149,6 +149,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # OPS-8：release-pack 须装 wasm-bindgen-cli，否则 build.sh 退化为拷贝裸 wasm
+      # 改名 _bg.wasm（错误形态，非 --target web 产物），tag 发布包损坏。
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --locked --version 0.2.126
+
       - name: Build release tarball
         run: ./Scripts/build.sh
 

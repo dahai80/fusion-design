@@ -31,6 +31,34 @@ const MAX_NODE_TOTAL: usize = 100_000;
 // 当前版本 1。加载时校验：缺失视作 1（兼容旧文件），高于当前视作错误。
 pub const SCHEMA_VERSION: u32 = 1;
 
+// ARCH-5：schema 迁移框架。从 `from` 版本迁移到 `from+1`，原地改 `doc`，返回新版本号。
+// 当前仅 v1（无前驱），故 body 为空 match（no-op）。v2 破坏性变更时加 `1 => { ...; Ok(2) }` 分支。
+// 调用方（from_json）循环 `while v < SCHEMA_VERSION { v = migrate_schema(v, &mut value)? }`。
+// 在 serde_json::Value 层操作而非结构体层：迁移逻辑早于反序列化，能改字段名/结构，
+// 而结构体反序列化已按目标版本定型，无法兼容旧字段形态。
+pub fn migrate_schema(from: u32, doc: &mut serde_json::Value) -> anyhow::Result<u32> {
+    match from {
+        // v0（无版本号旧文件）→ v1：无结构差异，直接提版本号。
+        0 => {
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert(
+                    "schema_version".to_string(),
+                    serde_json::json!(SCHEMA_VERSION),
+                );
+            }
+            tracing::info!(from = 0, to = 1, "schema 迁移 v0 → v1（no-op，仅补版本号）");
+            Ok(1)
+        }
+        // 已是当前版本：不应被调用，但防御性返回原值。
+        v if v >= SCHEMA_VERSION => Ok(v),
+        // 预留位：未来 1 => Ok(2) 等破坏性迁移分支。
+        other => {
+            tracing::warn!(from = other, "schema 迁移：无对应分支，保持原版本");
+            Ok(other)
+        }
+    }
+}
+
 // ── 文档/页面/节点 ──
 
 /// 画布文档（顶层工程文件 `.fusiondesign` 的结构体）。
@@ -523,7 +551,30 @@ impl PenDocument {
     /// 的可疑情形显式 warn（fail visibly），不报错以免阻断合法的新建空文档。
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
         let trimmed = json.trim();
-        let doc: PenDocument = serde_json::from_str(json)
+        // ARCH-5：先解析为 serde_json::Value，跑 schema 迁移循环，再反序列化为结构体。
+        // 迁移在 Value 层进行，能改字段名/结构；结构体 Deserialize 已按目标版本定型。
+        let mut value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("反序列化失败（解析为 JSON Value）: {e}"))?;
+        let mut v = match &value {
+            serde_json::Value::Object(obj) => obj
+                .get("schema_version")
+                .and_then(|sv| sv.as_u64())
+                .map(|n| n as u32)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        if v == 0 {
+            v = SCHEMA_VERSION;
+        }
+        if v > SCHEMA_VERSION {
+            anyhow::bail!(
+                "文件 schema 版本 {v} 高于当前支持 {SCHEMA_VERSION}，请升级 fusion-design"
+            );
+        }
+        while v < SCHEMA_VERSION {
+            v = migrate_schema(v, &mut value)?;
+        }
+        let doc: PenDocument = serde_json::from_value(value)
             .map_err(|e| anyhow::anyhow!("反序列化失败（含安全护栏校验）: {e}"))?;
         // 可疑截断：原文非空（非纯空白/空对象）但解析出零页面。提示用户文件可能损坏。
         if !trimmed.is_empty() && trimmed != "{}" && doc.pages.is_empty() {
@@ -1668,5 +1719,38 @@ mod security_tests {
         let json = doc.to_json().unwrap();
         let back = PenDocument::from_json(&json).unwrap();
         assert_eq!(back.pages.len(), 1);
+    }
+
+    // ARCH-5：schema 迁移框架回归。
+    #[test]
+    fn migrate_schema_v0_to_v1_noop_but_stamps_version() {
+        let mut val = serde_json::json!({"pages": [], "schema_version": 0});
+        let new_v = migrate_schema(0, &mut val).unwrap();
+        assert_eq!(new_v, 1);
+        assert_eq!(val["schema_version"], 1);
+    }
+
+    #[test]
+    fn migrate_schema_current_version_is_passthrough() {
+        let mut val = serde_json::json!({"schema_version": SCHEMA_VERSION});
+        let new_v = migrate_schema(SCHEMA_VERSION, &mut val).unwrap();
+        assert_eq!(new_v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn from_json_missing_schema_version_defaults_to_current() {
+        let json = serde_json::json!({"pages": [{"id":"p","name":"P","width":1.0,"height":1.0,"nodes":[]}]}).to_string();
+        let doc = PenDocument::from_json(&json).unwrap();
+        assert_eq!(doc.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn from_json_future_schema_version_rejected() {
+        let json = format!(
+            "{{\"schema_version\": {}, \"pages\": []}}",
+            SCHEMA_VERSION + 1
+        );
+        let err = PenDocument::from_json(&json).unwrap_err();
+        assert!(format!("{err}").contains("高于当前支持"), "got: {err}");
     }
 }
