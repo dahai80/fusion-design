@@ -2,7 +2,7 @@
 
 use wasm_bindgen::JsCast;
 
-use crate::{fd_log_error, shell_lock, MAX_CHILDREN_PER_NODE, PenDocument};
+use crate::{fd_log_error, shell_lock, PenDocument, MAX_CHILDREN_PER_NODE};
 
 /// 重置画布视图（缩放=1.0，平移=0,0）。
 pub(crate) fn reset_canvas_view() {

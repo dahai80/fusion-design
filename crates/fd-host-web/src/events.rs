@@ -10,10 +10,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::{
-    collect_snap_candidates, find_snap_offset, hide_snap_lines, node_selector, read_attr_f32,
-    select_node, send_bridge_event, shell_lock, show_snap_lines, viewport_cull_update,
-    BridgeEvent, cleanup_pending_drag, ACTIVE_DRAG_MOVE, PENDING_DRAG_UP, DEFAULT_NODE_HEIGHT,
-    DEFAULT_NODE_WIDTH, MIN_MARQUEE_SIZE,
+    cleanup_pending_drag, collect_snap_candidates, find_snap_offset, hide_snap_lines,
+    node_selector, read_attr_f32, select_node, send_bridge_event, shell_lock, show_snap_lines,
+    viewport_cull_update, BridgeEvent, ACTIVE_DRAG_MOVE, DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH,
+    MIN_MARQUEE_SIZE, PENDING_DRAG_UP,
 };
 
 // ── 交互事件 ──
@@ -21,7 +21,8 @@ use crate::{
 // ── requestAnimationFrame 节流 ──
 
 /// 全局 rAF 句柄，避免同一帧多次调度。
-pub(crate) static RAF_SCHEDULED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static RAF_SCHEDULED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 通过 requestAnimationFrame 节流执行回调，确保每帧最多执行一次。
 /// 修复 P0-3：rAF 注册失败或回调 panic 时标志永久卡 true -> 渲染停摆。
@@ -1045,4 +1046,3 @@ fn toggle_node_selection(node_id: &str) {
         }
     }
 }
-
