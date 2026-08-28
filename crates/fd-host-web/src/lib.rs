@@ -15,6 +15,20 @@ use wasm_bindgen::JsCast;
 
 use fd_canvas_core::{sanitize_css_value, PenDocument};
 
+// ARCH-10 round2：消息桥接集群拆到独立模块（从原 320-766 行迁出）。
+// 本 commit 同时落地 OPS-13 WASM 日志环形缓冲（LogRingBuffer/fd_log_*）+
+// F-19 dispatch_to_host 累积队列 + log.capture.dump 派发 arm（见 commit message）。
+// re-export 协议 enum + 事件发送 fn + HOST_HANDLER_NAME 供 lib.rs 事件处理器
+// 与 tests.rs（use super::*）续用。
+pub(crate) mod bridge;
+#[allow(unused_imports)]
+pub(crate) use bridge::{
+    parse_bridge_command, send_bridge_event, send_to_host, BridgeCommand, BridgeEvent,
+};
+#[cfg(target_arch = "wasm32")]
+#[allow(unused_imports)]
+pub(crate) use bridge::HOST_HANDLER_NAME;
+
 fn css_escape_attr_value(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -98,6 +112,94 @@ fn cleanup_pending_drag() {
 #[cfg(target_arch = "wasm32")]
 const LISTENERS_ATTR: &str = "data-fd-listeners";
 
+// ── OPS-13：WASM 日志环形缓冲 ──
+// 审计裁定：WKWebView 内现场故障零诊断件。WASM 沙箱无文件系统，console.* 仅开发者
+// 工具可见，企业运维无门。加环形缓冲捕获最近 N 条 error/warn，host 经消息桥
+// `log.capture.dump` 拉取 → Swift 侧落盘（host 侧 handler 留 TODO+issue，非本工程范围）。
+// 容量 200 条平衡诊断覆盖与线性内存占用（每条 ~数百字节，封顶 ~100KB）。
+
+const LOG_RING_CAPACITY: usize = 200;
+
+#[derive(serde::Serialize, Clone)]
+pub(crate) struct LogEntry {
+    level: &'static str,
+    ts_ms: f64,
+    msg: String,
+}
+
+struct LogRingBuffer {
+    entries: std::collections::VecDeque<LogEntry>,
+}
+
+impl LogRingBuffer {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(LOG_RING_CAPACITY),
+        }
+    }
+
+    fn push(&mut self, entry: LogEntry) {
+        if self.entries.len() >= LOG_RING_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    fn dump(&self) -> Vec<LogEntry> {
+        self.entries.iter().cloned().collect()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+thread_local! {
+    pub(crate) static LOG_RING: std::cell::RefCell<LogRingBuffer> =
+        std::cell::RefCell::new(LogRingBuffer::new());
+}
+
+// 性能时间戳：wasm32 取 performance.now()（单调时钟，毫秒），非 wasm 测试填 0.0。
+// Date::now() 受宿主时钟漂移影响且部分环境受限，performance.now() 更稳。
+fn log_timestamp() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(0.0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0.0
+    }
+}
+
+// OPS-13：error/warn 日志双写——console.*（开发者工具可见）+ 环形缓冲（host 可拉取）。
+// 现有 32 处裸 console::error_1/warn_1 站点暂不逐一迁移（回归面大），先接入 panic hook
+// + 桥接失败 + 反序列化失败等关键现场故障路径，余下逐步迁移。
+pub(crate) fn fd_log_error(msg: &str) {
+    web_sys::console::error_1(&msg.into());
+    LOG_RING.with(|r| {
+        r.borrow_mut().push(LogEntry {
+            level: "error",
+            ts_ms: log_timestamp(),
+            msg: msg.to_string(),
+        })
+    });
+}
+
+pub(crate) fn fd_log_warn(msg: &str) {
+    web_sys::console::warn_1(&msg.into());
+    LOG_RING.with(|r| {
+        r.borrow_mut().push(LogEntry {
+            level: "warn",
+            ts_ms: log_timestamp(),
+            msg: msg.to_string(),
+        })
+    });
+}
+
 /// 检查当前容器是否已装监听器；未装则标记并返回 false（需安装），已装返回 true。
 fn mark_listeners_installed(container_id: &str) -> bool {
     // L-15：非 wasm 目标无 DOM，返回 true（跳过安装，幂等安全）。
@@ -136,8 +238,8 @@ fn shell_lock() -> std::sync::MutexGuard<'static, Option<WebShellInner>> {
     match SHELL.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            web_sys::console::error_1(
-                &"fd-host-web: SHELL 锁中毒（持锁线程 panic），丢弃脏数据重置为 None，下次 mount 重新初始化".into(),
+            fd_log_error(
+                "fd-host-web: SHELL 锁中毒（持锁线程 panic），丢弃脏数据重置为 None，下次 mount 重新初始化",
             );
             let mut guard = poisoned.into_inner();
             *guard = None;
@@ -162,6 +264,10 @@ struct WebShellInner {
     // C11：缓存最近一次 render_dom 的 PenDocument JSON，替代 DOM 属性存储。
     // viewport_cull_update 从这里读取，避免每帧从 data-fd-doc 重新解析整文档。
     cached_doc_json: Option<String>,
+    // PERF-2：缓存已解析的 PenDocument，避免 viewport_cull_update 每 rAF tick
+    // 重解析 JSON（O(文档大小) × 帧率）。与 cached_doc_json 同步写入，json 为真相源，
+    // doc 为缓存。doc=None 而 json=Some 时回退解析一次（安全网，不应常态触发）。
+    cached_doc: Option<PenDocument>,
     // P-7：当前选中节点 id。select_node 只清上一个选中元素 + handles，
     // 免全局 [data-fd-selected] 扫描。None = 无选中。
     selected_id: Option<String>,
@@ -180,6 +286,14 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
     // R-A18：注册 panic hook，panic 落 console.error 而非静默 unreachable trap。
     // 否则事件回调任一 panic → 整个 WebShell 死亡 → WKWebView 永久白屏无诊断。
     console_error_panic_hook::set_once();
+    // OPS-13：panic 是最需诊断的现场故障，但 console_error_panic_hook 仅落 console.*
+    // （开发者工具可见，企业运维无门）。再包一层：取 panic_hook 库的 hook 作为 prev，
+    // panic 时先写环形缓冲（host 可拉取落盘）再链调 prev，双写不互斥。
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        fd_log_error(&format!("fd-host-web: panic: {info}"));
+        prev_hook(info);
+    }));
 
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("mount: window unavailable"))?;
     let document = window
@@ -196,18 +310,20 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
         canvas_id: canvas_id.to_string(),
         ready: true,
         cached_doc_json: None,
+        cached_doc: None,
         selected_id: None,
         selected_ids: std::collections::HashSet::new(),
     };
 
     // 注册消息监听器
-    setup_message_listener(&window)?;
+    bridge::setup_message_listener(&window)?;
 
     let shell = WebShell { inner };
     *shell_lock() = Some(WebShellInner {
         canvas_id: canvas_id.to_string(),
         ready: true,
         cached_doc_json: None,
+        cached_doc: None,
         selected_id: None,
         selected_ids: std::collections::HashSet::new(),
     });
@@ -215,420 +331,6 @@ pub fn mount(canvas_id: &str) -> Result<WebShell, JsValue> {
     Ok(shell)
 }
 
-// ── 消息桥接 ──
-
-/// 设置 `message` 事件监听器，接收原生宿主消息。
-fn setup_message_listener(window: &web_sys::Window) -> Result<(), JsValue> {
-    let handler = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-        if let Some(data) = event.data().as_string() {
-            handle_host_message(&data);
-        }
-    }) as Box<dyn FnMut(web_sys::MessageEvent)>);
-
-    window.add_event_listener_with_callback("message", handler.as_ref().unchecked_ref())?;
-    handler.forget(); // 防止被 GC 回收
-    Ok(())
-}
-
-/// 处理来自原生宿主（Fusion-Desk）的消息。
-fn handle_host_message(json: &str) {
-    // 解析 HostMessage 形状
-    let msg: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(e) => {
-            web_sys::console::error_1(&format!("fd-host-web: 反序列化消息失败: {e}").into());
-            return;
-        }
-    };
-
-    let kind = msg
-        .get("kind")
-        .and_then(|k| k.as_str())
-        .unwrap_or("unknown");
-
-    // L-16：协议版本护栏——schema_version 超过本端支持版本则拒绝处理，
-    // 回传错误事件，避免静默按旧语义误解析新协议消息。
-    const HOST_PROTOCOL_VERSION: u64 = 1;
-    if let Some(v) = msg.get("schema_version").and_then(|x| x.as_u64()) {
-        if v > HOST_PROTOCOL_VERSION {
-            web_sys::console::warn_1(
-                &format!(
-                    "fd-host-web: 消息 schema_version={v} 超过本端支持版本 {HOST_PROTOCOL_VERSION}，拒绝处理"
-                )
-                .into(),
-            );
-            send_to_host(
-                "error",
-                &serde_json::json!({ "reason": "unsupported schema_version", "version": v }),
-            );
-            return;
-        }
-    }
-
-    match kind {
-        "page.render" => {
-            // 渲染 PenDocument 页面
-            if let Some(payload) = msg.get("payload") {
-                if let Some(doc_json) = payload.get("document").and_then(|d| d.as_str()) {
-                    render_page(doc_json);
-                }
-            }
-        }
-        "page.render-dom" => {
-            // DOM 渲染管线
-            if let Some(payload) = msg.get("payload") {
-                if let Some(doc_json) = payload.get("document").and_then(|d| d.as_str()) {
-                    render_dom(doc_json);
-                }
-            }
-        }
-        "tokens.apply" => {
-            if let Some(payload) = msg.get("payload") {
-                if let Some(css) = payload.get("css").and_then(|c| c.as_str()) {
-                    apply_tokens_css(css);
-                }
-            }
-        }
-        "node.select" => {
-            if let Some(payload) = msg.get("payload") {
-                if let Some(node_id) = payload.get("node_id").and_then(|n| n.as_str()) {
-                    select_node(node_id);
-                }
-            }
-        }
-        "node.mutate" => {
-            if let Some(payload) = msg.get("payload") {
-                if let Some(node_id) = payload.get("node_id").and_then(|n| n.as_str()) {
-                    let x = payload.get("x").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let y = payload.get("y").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let w = payload.get("w").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let h = payload.get("h").and_then(|v| v.as_f64()).map(|v| v as f32);
-                    let fill = payload
-                        .get("fill")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let stroke = payload
-                        .get("stroke")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let stroke_width = payload
-                        .get("stroke_width")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| v as f32);
-                    let radius = payload
-                        .get("radius")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| v as f32);
-                    let font_size = payload
-                        .get("font_size")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| v as f32);
-                    let font_family = payload
-                        .get("font_family")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let opacity = payload
-                        .get("opacity")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| v as f32);
-                    mutate_node(
-                        node_id,
-                        x,
-                        y,
-                        w,
-                        h,
-                        &fill,
-                        &stroke,
-                        stroke_width,
-                        radius,
-                        font_size,
-                        &font_family,
-                        opacity,
-                    );
-                }
-            }
-        }
-        "canvas.clear" => {
-            clear_canvas();
-        }
-        "canvas.reset-view" => {
-            reset_canvas_view();
-        }
-        "node.set-visibility" => {
-            if let Some(payload) = msg.get("payload") {
-                if let Some(node_id) = payload.get("node_id").and_then(|n| n.as_str()) {
-                    let visible = payload
-                        .get("visible")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    set_node_visibility(node_id, visible);
-                }
-            }
-        }
-        "node.reorder" => {
-            if let Some(payload) = msg.get("payload") {
-                if let Some(node_id) = payload.get("node_id").and_then(|n| n.as_str()) {
-                    let new_index = payload
-                        .get("new_index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    reorder_node(node_id, new_index);
-                }
-            }
-        }
-        "system.ready" => {
-            web_sys::console::log_1(&"fd-host-web: 宿主就绪".into());
-        }
-        other => {
-            // L5：未识别 kind 用 warn 而非 debug，便于版本不匹配时定位
-            web_sys::console::warn_1(
-                &format!("fd-host-web: 未识别消息 kind={other}，可能版本不匹配").into(),
-            );
-        }
-    }
-}
-
-/// 宿主桥 handler 名（对应 studio 侧注册的 WKScriptMessageHandler name）。
-/// 仅 wasm32 路径 dispatch_to_host 消费；非 wasm 构建不编译避免 dead_code 警告（CI clippy -D warnings）。
-#[cfg(target_arch = "wasm32")]
-const HOST_HANDLER_NAME: &str = "fdHost";
-
-/// 向后端发送消息。
-///
-/// R-A22：桥接主路径走 `window.webkit.messageHandlers.fdHost.postMessage`，
-/// 对齐 CLAUDE.md/README 声称的 WKWebView 标准原生回调。若该 handler 不存在
-/// （旧版 studio 未注册 / 非 WKWebView 环境），回退到 `navigator.__fd_host_post`
-/// 属性轮询契约，保持向后兼容。
-fn send_to_host(kind: &str, payload: &serde_json::Value) {
-    let msg = serde_json::json!({
-        "direction": "WebViewToBackend",
-        "kind": kind,
-        "payload": payload,
-    });
-    let json = match serde_json::to_string(&msg) {
-        Ok(s) => s,
-        // E-41：序列化失败显式告警而非吞消息（旧实现 unwrap_or_default="" 静默丢消息）。
-        Err(e) => {
-            web_sys::console::warn_1(
-                &format!("fd-host-web: send_to_host 序列化失败 kind={kind} err={e}").into(),
-            );
-            return;
-        }
-    };
-    // js_sys::global 在非 wasm 目标会 panic（imported statics 不可用）；
-    // 仅 wasm32 分发，原生测试环境无 window，直接返回。
-    #[cfg(target_arch = "wasm32")]
-    {
-        dispatch_to_host(&json, kind);
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = (json, kind);
-    }
-}
-
-/// wasm32 专用：按 R-A22 桥接契约分发消息到原生宿主。
-#[cfg(target_arch = "wasm32")]
-fn dispatch_to_host(json: &str, kind: &str) {
-    let global = js_sys::global();
-    let Some(w) = global.dyn_ref::<web_sys::Window>() else {
-        return;
-    };
-    // 主路径：webkit.messageHandlers.<handler>.postMessage（WKWebView 标准）。
-    let handlers = js_sys::Reflect::get(w, &JsValue::from_str("webkit")).ok();
-    if let Some(webkit) = handlers {
-        let mh = js_sys::Reflect::get(&webkit, &JsValue::from_str("messageHandlers")).ok();
-        if let Some(mh) = mh {
-            let handler = js_sys::Reflect::get(&mh, &JsValue::from_str(HOST_HANDLER_NAME)).ok();
-            if let Some(handler) = handler {
-                let post = js_sys::Reflect::get(&handler, &JsValue::from_str("postMessage")).ok();
-                if let Some(post) = post {
-                    if let Some(post_fn) = post.dyn_ref::<js_sys::Function>() {
-                        let js_val = JsValue::from_str(json);
-                        if post_fn.call1(&handler, &js_val).is_ok() {
-                            return;
-                        }
-                        web_sys::console::warn_1(
-                            &format!(
-                                "fd-host-web: webkit.messageHandlers.{HOST_HANDLER_NAME}.postMessage 调用失败 kind={kind}"
-                            )
-                            .into(),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    // 回退：navigator.__fd_host_post 属性契约（旧 studio 轮询读取）。
-    let js_val = JsValue::from_str(json);
-    let _ = js_sys::Reflect::set(
-        &w.navigator(),
-        &JsValue::from_str("__fd_host_post"),
-        &js_val,
-    );
-}
-
-// ── Bridge 消息协议 ──
-
-/// 后端 → WebView 的命令类型。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum BridgeCommand {
-    /// 渲染 PenDocument 页面
-    PageRender { document_json: String },
-    /// 设置设计 Token CSS
-    ApplyTokens { css: String },
-    /// 选中节点
-    SelectNode { node_id: String },
-    /// 修改节点位置/尺寸/样式
-    MutateNode {
-        node_id: String,
-        x: Option<f32>,
-        y: Option<f32>,
-        w: Option<f32>,
-        h: Option<f32>,
-        fill: Option<String>,
-        stroke: Option<String>,
-        stroke_width: Option<f32>,
-        radius: Option<f32>,
-        font_size: Option<f32>,
-        font_family: Option<String>,
-        opacity: Option<f32>,
-    },
-    /// 清空画布
-    ClearCanvas,
-    /// Plan 预览：用虚线显示即将写入的节点
-    PlanPreview { document_json: String },
-    /// 确认 Plan：移除虚线预览层
-    PlanApply,
-    /// 拒绝 Plan：移除虚线预览层
-    PlanReject,
-    /// 设置节点可见性
-    SetNodeVisibility { node_id: String, visible: bool },
-    /// 设置节点锁定状态
-    SetNodeLocked { node_id: String, locked: bool },
-    /// 重排序节点（移动到目标位置）
-    ReorderNode { node_id: String, new_index: usize },
-}
-
-/// WebView → 后端的事件类型。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum BridgeEvent {
-    /// 节点被点击
-    NodeClick { node_id: String, x: f32, y: f32 },
-    /// 节点被拖拽
-    NodeDrag { node_id: String, dx: f32, dy: f32 },
-    /// 节点被调整大小
-    NodeResize { node_id: String, w: f32, h: f32 },
-    /// 节点被选中
-    NodeSelect { node_id: String },
-    /// 节点多选（Shift+点击追加）
-    NodeMultiSelect { node_id: String },
-    /// 画布区域被点击（空白区域）
-    CanvasClick { x: f32, y: f32 },
-    /// 画布缩放（wheel 事件）
-    CanvasZoom { delta: f32, x: f32, y: f32 },
-    /// 画布平移（中键/Space+拖拽）
-    CanvasPan { dx: f32, dy: f32 },
-    /// 框选完成（marquee 矩形内的节点 id 列表）
-    MarqueeSelect { node_ids: Vec<String> },
-    /// 用户输入 AI 对话
-    AiChat { message: String },
-}
-
-/// 解析 BridgeCommand 从 JSON。
-fn parse_bridge_command(json: &str) -> Option<BridgeCommand> {
-    serde_json::from_str(json).ok()
-}
-
-/// 将 BridgeEvent 序列化为 JSON 并发送到后端。
-fn send_bridge_event(event: BridgeEvent) {
-    let payload = serde_json::to_value(&event).unwrap_or_default();
-    let kind = match &event {
-        BridgeEvent::NodeClick { .. } => "node.click",
-        BridgeEvent::NodeDrag { .. } => "node.drag",
-        BridgeEvent::NodeResize { .. } => "node.resize",
-        BridgeEvent::NodeSelect { .. } => "node.select",
-        BridgeEvent::NodeMultiSelect { .. } => "node.multi-select",
-        BridgeEvent::CanvasClick { .. } => "canvas.click",
-        BridgeEvent::CanvasZoom { .. } => "canvas.zoom",
-        BridgeEvent::CanvasPan { .. } => "canvas.pan",
-        BridgeEvent::MarqueeSelect { .. } => "marquee.select",
-        BridgeEvent::AiChat { .. } => "ai.chat",
-    };
-    send_to_host(kind, &payload);
-}
-
-// ── fusionBridge：JS 全局对象，供原生端调用 ──
-
-/// fusionBridge.sendCommand(commandJson) — 供 WKWebView 原生端调用。
-#[wasm_bindgen]
-pub fn fusion_bridge_send_command(command_json: &str) -> Result<(), JsValue> {
-    let command = parse_bridge_command(command_json)
-        .ok_or_else(|| JsValue::from_str("无法解析 BridgeCommand"))?;
-
-    match command {
-        BridgeCommand::PageRender { document_json } => {
-            render_page(&document_json);
-        }
-        BridgeCommand::ApplyTokens { css } => {
-            apply_tokens_css(&css);
-        }
-        BridgeCommand::SelectNode { node_id } => {
-            select_node(&node_id);
-        }
-        BridgeCommand::MutateNode {
-            node_id,
-            x,
-            y,
-            w,
-            h,
-            fill,
-            stroke,
-            stroke_width,
-            radius,
-            font_size,
-            font_family,
-            opacity,
-        } => {
-            mutate_node(
-                &node_id,
-                x,
-                y,
-                w,
-                h,
-                &fill,
-                &stroke,
-                stroke_width,
-                radius,
-                font_size,
-                &font_family,
-                opacity,
-            );
-        }
-        BridgeCommand::ClearCanvas => {
-            clear_canvas();
-        }
-        BridgeCommand::PlanPreview { document_json } => {
-            render_plan_preview(&document_json);
-        }
-        BridgeCommand::PlanApply => {
-            remove_plan_preview();
-        }
-        BridgeCommand::PlanReject => {
-            remove_plan_preview();
-        }
-        BridgeCommand::SetNodeVisibility { node_id, visible } => {
-            set_node_visibility(&node_id, visible);
-        }
-        BridgeCommand::SetNodeLocked { node_id, locked } => {
-            set_node_locked(&node_id, locked);
-        }
-        BridgeCommand::ReorderNode { node_id, new_index } => {
-            reorder_node(&node_id, new_index);
-        }
-    }
-    Ok(())
-}
 
 // ── DOM 渲染管线（性能优化版）──
 
@@ -652,13 +354,11 @@ const MAX_CHILDREN_PER_NODE: usize = 2_000;
 /// - DocumentFragment 批量插入，避免逐节点 layout thrashing
 /// - 事件委托：容器级别单处理器，替代逐节点绑定
 /// - 视口剔除：仅渲染视口内节点（zoom/pan 变化时增量更新）
-fn render_dom(doc_json: &str) {
+pub(crate) fn render_dom(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            web_sys::console::error_1(
-                &format!("fd-host-web: DOM 渲染 PenDocument 解析失败: {e}").into(),
-            );
+            fd_log_error(&format!("fd-host-web: DOM 渲染 PenDocument 解析失败: {e}"));
             return;
         }
     };
@@ -712,6 +412,8 @@ fn render_dom(doc_json: &str) {
         let mut guard = shell_lock();
         if let Some(inner) = guard.as_mut() {
             inner.cached_doc_json = Some(doc_json.to_string());
+            // PERF-2：同步缓存已解析的 PenDocument，viewport_cull_update 免每帧重解析。
+            inner.cached_doc = Some(doc.clone());
             // P-7/R-17：全量重渲替换 DOM，旧选中元素已消失，清空选中记录避免悬空。
             inner.selected_id = None;
             inner.selected_ids.clear();
@@ -862,17 +564,32 @@ fn viewport_cull_update() {
         None => return,
     };
 
-    // C11：从 SHELL 内存缓存读取 doc JSON，不再从 DOM 属性每帧重解析。
-    let doc_json = {
+    // PERF-2：优先读已缓存的 PenDocument（render_dom/render_page 写入），免每帧重解析。
+    // doc=None 而 json=Some 时回退解析一次（安全网，不应常态触发——写站同步设 doc）。
+    let doc = {
         let guard = shell_lock();
-        match guard.as_ref().and_then(|i| i.cached_doc_json.clone()) {
-            Some(j) => j,
-            None => return,
+        // 同一借用作用域内同时取 doc 缓存与 json 回退源，避免二次借用。
+        let (cached, json_fallback) = match guard.as_ref() {
+            Some(i) => (i.cached_doc.clone(), i.cached_doc_json.clone()),
+            None => (None, None),
+        };
+        match cached {
+            Some(d) => d,
+            None => {
+                let doc_json = match json_fallback {
+                    Some(j) => j,
+                    None => return,
+                };
+                drop(guard);
+                match PenDocument::from_json(&doc_json) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        fd_log_error(&format!("fd-host-web: viewport_cull_update 解析失败: {e}"));
+                        return;
+                    }
+                }
+            }
         }
-    };
-    let doc = match PenDocument::from_json(&doc_json) {
-        Ok(d) => d,
-        Err(_) => return,
     };
 
     // E-37/P2-5：一次遍历收集现有 DOM 节点 id → HashSet，替代旧实现每可见节点
@@ -2356,7 +2073,7 @@ fn toggle_node_selection(node_id: &str) {
 // ── Bridge 辅助 ──
 
 /// 注入设计 Token CSS 到页面 :root。
-fn apply_tokens_css(css: &str) {
+pub(crate) fn apply_tokens_css(css: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -2478,7 +2195,7 @@ fn sanitize_css_color(raw: &str) -> String {
 }
 
 /// 选中节点（添加选中高亮 + resize handles）。
-fn select_node(node_id: &str) {
+pub(crate) fn select_node(node_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -2813,7 +2530,7 @@ fn update_node_size(el: &web_sys::Element, w: f32, h: f32) {
 
 /// MutateNode 命令处理：更新节点位置/尺寸/样式。
 #[allow(clippy::too_many_arguments)]
-fn mutate_node(
+pub(crate) fn mutate_node(
     node_id: &str,
     x: Option<f32>,
     y: Option<f32>,
@@ -2955,7 +2672,7 @@ fn mutate_node(
 }
 
 /// 设置节点可见性：隐藏时 display:none，显示时恢复 display。
-fn set_node_visibility(node_id: &str, visible: bool) {
+pub(crate) fn set_node_visibility(node_id: &str, visible: bool) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -2996,7 +2713,7 @@ fn set_node_visibility(node_id: &str, visible: bool) {
 }
 
 /// 设置节点锁定状态：锁定节点禁止拖拽，虚线边框视觉反馈。
-fn set_node_locked(node_id: &str, locked: bool) {
+pub(crate) fn set_node_locked(node_id: &str, locked: bool) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -3028,7 +2745,7 @@ fn set_node_locked(node_id: &str, locked: bool) {
 }
 
 /// 重排序节点：将指定节点 DOM 移动到新位置。
-fn reorder_node(node_id: &str, new_index: usize) {
+pub(crate) fn reorder_node(node_id: &str, new_index: usize) {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -3082,7 +2799,7 @@ fn reorder_node(node_id: &str, new_index: usize) {
 }
 
 /// 重置画布视图（缩放=1.0，平移=0,0）。
-fn reset_canvas_view() {
+pub(crate) fn reset_canvas_view() {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -3107,7 +2824,7 @@ fn reset_canvas_view() {
 }
 
 /// 清空画布（Canvas + DOM）。
-fn clear_canvas() {
+pub(crate) fn clear_canvas() {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -3136,11 +2853,11 @@ fn clear_canvas() {
 }
 
 /// Plan 预览：将 PenDocument 节点渲染为虚线叠加层。
-fn render_plan_preview(doc_json: &str) {
+pub(crate) fn render_plan_preview(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            web_sys::console::error_1(&format!("fd-host-web: PlanPreview 解析失败: {e}").into());
+            fd_log_error(&format!("fd-host-web: PlanPreview 解析失败: {e}"));
             return;
         }
     };
@@ -3216,7 +2933,7 @@ fn render_plan_preview(doc_json: &str) {
 }
 
 /// 移除 Plan 预览叠加层。
-fn remove_plan_preview() {
+pub(crate) fn remove_plan_preview() {
     let window = match web_sys::window() {
         Some(w) => w,
         None => return,
@@ -3232,11 +2949,11 @@ fn remove_plan_preview() {
 }
 
 /// 渲染 PenDocument JSON 到 Canvas。
-fn render_page(doc_json: &str) {
+pub(crate) fn render_page(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            web_sys::console::error_1(&format!("fd-host-web: PenDocument 解析失败: {e}").into());
+            fd_log_error(&format!("fd-host-web: PenDocument 解析失败: {e}"));
             return;
         }
     };
@@ -3247,6 +2964,8 @@ fn render_page(doc_json: &str) {
         let mut guard = shell_lock();
         if let Some(inner) = guard.as_mut() {
             inner.cached_doc_json = Some(doc_json.to_string());
+            // PERF-2：canvas 路径同步缓存已解析 PenDocument，与 DOM 路径对齐。
+            inner.cached_doc = Some(doc.clone());
             // P-7/R-17：canvas 重渲同 DOM 重渲，清空选中记录。
             inner.selected_id = None;
             inner.selected_ids.clear();
@@ -3259,7 +2978,7 @@ fn render_page(doc_json: &str) {
         match guard.as_ref() {
             Some(i) => i.canvas_id.clone(),
             None => {
-                web_sys::console::error_1(&"fd-host-web: WebShell 未初始化".into());
+                fd_log_error("fd-host-web: WebShell 未初始化");
                 return;
             }
         }
@@ -3277,7 +2996,7 @@ fn render_page(doc_json: &str) {
     let ctx = match ctx {
         Some(c) => c,
         None => {
-            web_sys::console::error_1(&"fd-host-web: 无法获取 2D 上下文".into());
+            fd_log_error("fd-host-web: 无法获取 2D 上下文");
             return;
         }
     };
@@ -3434,656 +3153,12 @@ fn get_canvas(canvas_id: &str) -> Option<web_sys::HtmlCanvasElement> {
         .ok()
 }
 
+// ── ARCH-10 TODO（v0.1.14 首维护版仅落 round 1 测试外移）──
+// round 2 自包含模块外移（bridge 消息派发 237-752）+ round 3 thread_local 重模块
+// （events 1443-2472 / render_canvas 3256-3555 / render_dom 752-1303，Closure 跨段全局态）
+// 回归风险高，独立 PR 拆。见 plans/jiggly-imagining-pnueli.md Phase 2。
+
 // ── 单元测试（宿主目标，非 wasm32）──
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pen_document_render_json_roundtrip() {
-        let mut doc = PenDocument::new();
-        let mut page = fd_canvas_core::Page::new("p1", "Test", 100.0, 100.0);
-        page.add(fd_canvas_core::PenNode::rect("n1", 10.0, 20.0, 50.0, 30.0));
-        doc.add_page(page);
-        let json = doc.to_json().unwrap();
-        let doc2 = PenDocument::from_json(&json).unwrap();
-        assert_eq!(doc2.pages.len(), 1);
-        assert_eq!(doc2.pages[0].nodes[0].id, "n1");
-    }
-
-    // E-39 回归：sanitize_css_color 剔除可逃逸 CSS 属性边界的 `;{}`（不触发 web_sys）。
-    // 危险 url()/expression() 路径走 web_sys console（原生测试不可用），仅验安全净化。
-    #[test]
-    fn sanitize_css_color_strips_escape_chars() {
-        assert_eq!(sanitize_css_color("#ff0000"), "#ff0000");
-        assert_eq!(sanitize_css_color("rgb(255, 0, 0)"), "rgb(255, 0, 0)");
-        // 逃逸字符 ; { } < > 应被剔除，保留颜色主体。
-        let out = sanitize_css_color("red;} * { background:#fff }");
-        assert!(!out.contains(';'), "应剔除分号防属性逃逸");
-        assert!(!out.contains('{'), "应剔除左花括号");
-        assert!(!out.contains('}'), "应剔除右花括号");
-        assert!(out.contains("red"), "保留合法颜色名");
-        assert!(out.contains("background:#fff"), "保留未逃逸的声明");
-    }
-
-    // E-40/P3 回归：sanitize_token_css 须剥 /* */ 注释后再匹配关键字，
-    // 防 `u/**/rl(` 等注释拆词绕过 url()/@import/expression()/javascript: 检测。
-    // 用 _inner 纯逻辑（不触发 web_sys::console，原生测试安全）。
-    #[test]
-    fn sanitize_token_css_strips_comment_obfuscated_danger() {
-        // 注释拆词的 url() 必须被剔除。
-        let bad = "--bg: u/**/rl(http://evil/x.png)";
-        let (out, stripped) = sanitize_token_css_inner(bad);
-        assert!(!out.contains("evil"), "注释拆词 url() 必须被剔除");
-        assert_eq!(stripped, 1, "危险行整体剔除，计 1 行");
-        assert!(out.is_empty(), "危险行整体剔除后应为空");
-        // 注释拆词的 @import 必须被剔除。
-        let bad2 = "@imp/**/ort url(http://evil.css)";
-        let (out2, s2) = sanitize_token_css_inner(bad2);
-        assert!(!out2.contains("evil"), "注释拆词 @import 必须被剔除");
-        assert_eq!(s2, 1);
-        // 注释拆词的 expression() 必须被剔除。
-        let bad3 = "--x: expr/**/ession(alert(1))";
-        let (out3, s3) = sanitize_token_css_inner(bad3);
-        assert!(!out3.contains("alert"), "注释拆词 expression() 必须被剔除");
-        assert_eq!(s3, 1);
-    }
-
-    #[test]
-    fn sanitize_token_css_preserves_safe_token_declarations() {
-        // E-40 正向：合法 token 声明（含合法注释说明）应保留，stripped=0。
-        let safe = "--color-bg: #ffffff; /* 背景白 */";
-        let (out, stripped) = sanitize_token_css_inner(safe);
-        assert!(
-            out.contains("--color-bg: #ffffff;"),
-            "合法声明应保留: {out}"
-        );
-        assert_eq!(stripped, 0, "无危险关键字不应剔除");
-        // 安全注释行可保留（不命中危险关键字）。
-        let safe2 = "/* 仅注释 */\n--space-1: 4px;";
-        let (out2, s2) = sanitize_token_css_inner(safe2);
-        assert!(out2.contains("--space-1: 4px;"), "合法声明应保留");
-        assert_eq!(s2, 0);
-    }
-
-    #[test]
-    fn sanitize_token_css_plain_danger_still_stripped() {
-        // E-40 回归：无注释的普通 url()/@import 仍被剔除（不破坏原有 C10 行为）。
-        let css = "--bg: url(http://evil.png);\n@import url(evil.css);\n--ok: #fff;";
-        let (out, stripped) = sanitize_token_css_inner(css);
-        assert!(!out.contains("evil"), "普通 url()/@import 仍被剔除");
-        assert!(out.contains("--ok: #fff;"), "合法声明保留");
-        assert_eq!(stripped, 2, "两行危险 CSS 被剔除");
-    }
-
-    // R-A22/E-41 回归：send_to_host 在原生测试环境（无 Window）不得 panic；
-    // 有效 payload 走完序列化后优雅返回；无效 payload（含 serde 无法序列化的
-    // 非 UTF-8 键）走 E-41 告警分支也不得 panic。
-    #[test]
-    fn send_to_host_valid_payload_no_panic_native() {
-        send_to_host("ai.generate", &serde_json::json!({"prompt": "登录页"}));
-    }
-
-    #[test]
-    fn send_to_host_empty_payload_no_panic_native() {
-        send_to_host("click", &serde_json::json!({}));
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[test]
-    fn send_to_host_handler_name_is_camelcase() {
-        // R-A22：桥 handler 名须为 WKWebView 惯例 camelCase，studio 侧据此注册。
-        // HOST_HANDLER_NAME 仅 wasm32 编译（非 wasm 构建不产出该常量）。
-        assert_eq!(HOST_HANDLER_NAME, "fdHost");
-    }
-
-    #[test]
-    fn handle_host_message_render_page() {
-        let doc_json = r#"{"pages":[{"id":"p1","name":"Test","width":100,"height":100,"nodes":[{"id":"n1","kind":"Rect","name":"Rect","x":0,"y":0,"w":50,"h":50,"style":{}}]}]}"#;
-        let payload = serde_json::json!({"document": doc_json});
-        let msg = serde_json::json!({
-            "kind": "page.render",
-            "payload": payload
-        });
-        let json = serde_json::to_string(&msg).unwrap();
-        // 验证 JSON 结构正确（不调用 handle_host_message，后者需浏览器环境）
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["kind"], "page.render");
-        assert!(parsed["payload"]["document"].is_string());
-    }
-
-    #[test]
-    fn handle_host_message_invalid_json_does_not_panic() {
-        // 仅验证 JSON 解析逻辑，不触发 web_sys console
-        assert!(serde_json::from_str::<serde_json::Value>("not json").is_err());
-        assert!(serde_json::from_str::<serde_json::Value>("").is_err());
-    }
-
-    #[test]
-    fn handle_host_message_unknown_kind_does_not_panic() {
-        let msg = serde_json::json!({"kind": "unknown", "payload": {}});
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["kind"], "unknown");
-    }
-
-    #[test]
-    fn mount_creates_shell() {
-        // 需要在浏览器环境运行，宿主目标仅验证结构
-        let _shell = WebShell {
-            inner: WebShellInner {
-                canvas_id: "canvas".into(),
-                ready: true,
-                cached_doc_json: None,
-                selected_id: None,
-                selected_ids: std::collections::HashSet::new(),
-            },
-        };
-    }
-
-    #[test]
-    fn send_to_host_builds_valid_json() {
-        let payload = serde_json::json!({"prompt": "hello"});
-        let msg = serde_json::json!({
-            "direction": "WebViewToBackend",
-            "kind": "ai.generate",
-            "payload": payload
-        });
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["kind"], "ai.generate");
-        assert_eq!(parsed["direction"], "WebViewToBackend");
-    }
-
-    #[test]
-    fn round_rect_math() {
-        // 验证圆角矩形路径计算：r 不应超过 w/2 或 h/2
-        let w = 50.0;
-        let h = 30.0;
-        let r: f64 = 20.0;
-        let clamped = r.min(w / 2.0).min(h / 2.0);
-        assert_eq!(clamped, 15.0);
-    }
-
-    // ── Bridge 类型测试 ──
-
-    #[test]
-    fn bridge_command_page_render_serde() {
-        let cmd = BridgeCommand::PageRender {
-            document_json: r#"{"pages":[]}"#.to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let cmd2: BridgeCommand = serde_json::from_str(&json).unwrap();
-        match cmd2 {
-            BridgeCommand::PageRender { document_json } => {
-                assert!(document_json.contains("pages"));
-            }
-            _ => panic!("期望 PageRender"),
-        }
-    }
-
-    #[test]
-    fn bridge_command_apply_tokens_serde() {
-        let cmd = BridgeCommand::ApplyTokens {
-            css: ":root { --color-bg: #FFF; }".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let cmd2: BridgeCommand = serde_json::from_str(&json).unwrap();
-        match cmd2 {
-            BridgeCommand::ApplyTokens { css } => {
-                assert!(css.contains("--color-bg"));
-            }
-            _ => panic!("期望 ApplyTokens"),
-        }
-    }
-
-    #[test]
-    fn bridge_command_select_node_serde() {
-        let cmd = BridgeCommand::SelectNode {
-            node_id: "btn_1".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let cmd2: BridgeCommand = serde_json::from_str(&json).unwrap();
-        match cmd2 {
-            BridgeCommand::SelectNode { node_id } => assert_eq!(node_id, "btn_1"),
-            _ => panic!("期望 SelectNode"),
-        }
-    }
-
-    #[test]
-    fn bridge_command_clear_canvas_serde() {
-        let cmd = BridgeCommand::ClearCanvas;
-        let json = serde_json::to_string(&cmd).unwrap();
-        let cmd2: BridgeCommand = serde_json::from_str(&json).unwrap();
-        match cmd2 {
-            BridgeCommand::ClearCanvas => {}
-            _ => panic!("期望 ClearCanvas"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_node_click_serde() {
-        let event = BridgeEvent::NodeClick {
-            node_id: "n1".to_string(),
-            x: 10.0,
-            y: 20.0,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::NodeClick { node_id, x, y } => {
-                assert_eq!(node_id, "n1");
-                assert_eq!(x, 10.0);
-                assert_eq!(y, 20.0);
-            }
-            _ => panic!("期望 NodeClick"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_node_drag_serde() {
-        let event = BridgeEvent::NodeDrag {
-            node_id: "n2".to_string(),
-            dx: 5.0,
-            dy: -3.0,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::NodeDrag { node_id, dx, dy } => {
-                assert_eq!(node_id, "n2");
-                assert_eq!(dx, 5.0);
-                assert_eq!(dy, -3.0);
-            }
-            _ => panic!("期望 NodeDrag"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_canvas_click_serde() {
-        let event = BridgeEvent::CanvasClick { x: 100.0, y: 200.0 };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::CanvasClick { x, y } => {
-                assert_eq!(x, 100.0);
-                assert_eq!(y, 200.0);
-            }
-            _ => panic!("期望 CanvasClick"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_ai_chat_serde() {
-        let event = BridgeEvent::AiChat {
-            message: "做一个登录页".to_string(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::AiChat { message } => assert_eq!(message, "做一个登录页"),
-            _ => panic!("期望 AiChat"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_canvas_zoom_serde() {
-        let event = BridgeEvent::CanvasZoom {
-            delta: -120.0,
-            x: 300.0,
-            y: 400.0,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::CanvasZoom { delta, x, y } => {
-                assert_eq!(delta, -120.0);
-                assert_eq!(x, 300.0);
-                assert_eq!(y, 400.0);
-            }
-            _ => panic!("期望 CanvasZoom"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_canvas_pan_serde() {
-        let event = BridgeEvent::CanvasPan {
-            dx: 50.0,
-            dy: -30.0,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::CanvasPan { dx, dy } => {
-                assert_eq!(dx, 50.0);
-                assert_eq!(dy, -30.0);
-            }
-            _ => panic!("期望 CanvasPan"),
-        }
-    }
-
-    #[test]
-    fn bridge_event_node_multi_select_serde() {
-        let event = BridgeEvent::NodeMultiSelect {
-            node_id: "btn_2".to_string(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::NodeMultiSelect { node_id } => assert_eq!(node_id, "btn_2"),
-            _ => panic!("期望 NodeMultiSelect"),
-        }
-    }
-
-    #[test]
-    fn parse_bridge_command_valid_json() {
-        let cmd = BridgeCommand::ClearCanvas;
-        let json = serde_json::to_string(&cmd).unwrap();
-        let parsed = parse_bridge_command(&json);
-        assert!(parsed.is_some());
-    }
-
-    #[test]
-    fn parse_bridge_command_invalid_json() {
-        assert!(parse_bridge_command("not json").is_none());
-    }
-
-    #[test]
-    fn track_to_css_fixed() {
-        let track = fd_canvas_core::TrackSizing::Fixed(100.0);
-        assert_eq!(track_to_css(&track), "100px");
-    }
-
-    #[test]
-    fn track_to_css_flex() {
-        let track = fd_canvas_core::TrackSizing::Flex(1.0);
-        assert_eq!(track_to_css(&track), "1fr");
-    }
-
-    #[test]
-    fn track_to_css_auto() {
-        let track = fd_canvas_core::TrackSizing::Auto;
-        assert_eq!(track_to_css(&track), "auto");
-    }
-
-    #[test]
-    fn bridge_event_node_select_serde() {
-        let event = BridgeEvent::NodeSelect {
-            node_id: "card_1".to_string(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
-        match event2 {
-            BridgeEvent::NodeSelect { node_id } => assert_eq!(node_id, "card_1"),
-            _ => panic!("期望 NodeSelect"),
-        }
-    }
-
-    // ── 吸附算法测试 ──
-
-    #[test]
-    fn snap_find_offset_within_threshold() {
-        let candidates = vec![100.0, 200.0, 300.0];
-        let (offset, snapped, line) = find_snap_offset(102.0, &candidates);
-        assert!(snapped);
-        assert_eq!(offset, -2.0);
-        assert_eq!(line, 100.0);
-    }
-
-    #[test]
-    fn snap_find_offset_beyond_threshold() {
-        let candidates = vec![100.0, 200.0, 300.0];
-        let (offset, snapped, _) = find_snap_offset(110.0, &candidates);
-        assert!(!snapped);
-        assert_eq!(offset, 0.0);
-    }
-
-    #[test]
-    fn snap_find_offset_exact_match() {
-        let candidates = vec![100.0, 200.0, 300.0];
-        let (offset, snapped, line) = find_snap_offset(200.0, &candidates);
-        assert!(snapped);
-        assert_eq!(offset, 0.0);
-        assert_eq!(line, 200.0);
-    }
-
-    #[test]
-    fn snap_find_offset_picks_closest() {
-        let candidates = vec![98.0, 103.0, 500.0];
-        let (offset, snapped, line) = find_snap_offset(100.0, &candidates);
-        assert!(snapped);
-        assert_eq!(offset, -2.0);
-        assert_eq!(line, 98.0);
-    }
-
-    #[test]
-    fn snap_threshold_boundary() {
-        let candidates = vec![100.0];
-        // 正好在阈值上
-        let (_, snapped, _) = find_snap_offset(105.0, &candidates);
-        assert!(snapped);
-        // 刚好超过阈值
-        let (_, snapped2, _) = find_snap_offset(105.1, &candidates);
-        assert!(!snapped2);
-    }
-
-    #[test]
-    fn snap_empty_candidates() {
-        let candidates: Vec<f32> = vec![];
-        let (offset, snapped, _) = find_snap_offset(100.0, &candidates);
-        assert!(!snapped);
-        assert_eq!(offset, 0.0);
-    }
-
-    #[test]
-    fn snap_4_direction_covers_edges_and_centers() {
-        // 模拟一个 100x50 的节点在 (50, 80)
-        // 吸附候选线来自另一个节点：x=[0, 150, 75], y=[0, 100, 50]
-        let snap_x_candidates = vec![0.0, 150.0, 75.0];
-        let _snap_y_candidates = [0.0, 100.0, 50.0];
-
-        // 节点左边缘 x=48 → 吸附到 50? 不，48 最近的是 50 → 偏移+2（在阈值内）
-        // 这里测试节点左边缘在 x=2 → 吸附到 x=0
-        let (off_left, sn_left, _) = find_snap_offset(2.0, &snap_x_candidates);
-        assert!(sn_left);
-        assert_eq!(off_left, -2.0); // 吸附到 x=0
-
-        // 节点右边缘 x=148 → 吸附到 x=150
-        let (off_right, sn_right, _) = find_snap_offset(148.0, &snap_x_candidates);
-        assert!(sn_right);
-        assert_eq!(off_right, 2.0); // 吸附到 x=150
-
-        // 节点中心 H x=73 → 吸附到 x=75
-        let (off_center, sn_center, _) = find_snap_offset(73.0, &snap_x_candidates);
-        assert!(sn_center);
-        assert_eq!(off_center, 2.0); // 吸附到 x=75
-    }
-
-    // ── 性能优化测试 ──
-
-    #[test]
-    fn viewport_margin_constant() {
-        assert_eq!(VIEWPORT_MARGIN, 200.0);
-    }
-
-    // E-38/P2-5 回归：节点几何护栏拒绝非有限/超限尺寸，防渲染崩溃/OOM。
-    #[test]
-    fn node_geom_guard_rejects_nonfinite() {
-        let mk = |x: f64, y: f64, w: f64, h: f64| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
-        // NaN/Inf 任一坐标 → 拒绝
-        assert!(!is_node_geom_valid(&mk(f64::NAN, 0.0, 10.0, 10.0), 1.0));
-        assert!(!is_node_geom_valid(
-            &mk(0.0, f64::INFINITY, 10.0, 10.0),
-            1.0
-        ));
-        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f64::NAN, 10.0), 1.0));
-        assert!(!is_node_geom_valid(
-            &mk(0.0, 0.0, 10.0, f64::NEG_INFINITY),
-            1.0
-        ));
-        // 负尺寸 → 拒绝
-        assert!(!is_node_geom_valid(&mk(0.0, 0.0, -1.0, 10.0), 1.0));
-        assert!(!is_node_geom_valid(&mk(0.0, 0.0, 10.0, -1.0), 1.0));
-        // 超大尺寸（f64::MAX / 超 MAX_NODE_DIM_PX）→ 拒绝
-        assert!(!is_node_geom_valid(&mk(0.0, 0.0, f64::MAX, 10.0), 1.0));
-        assert!(!is_node_geom_valid(
-            &mk(0.0, 0.0, 10.0, MAX_NODE_DIM_PX + 1.0),
-            1.0
-        ));
-    }
-
-    // E-38/P2-5 回归：zoom 护栏拒绝 0/负/超大，防算术崩。
-    #[test]
-    fn node_geom_guard_rejects_bad_zoom() {
-        let node = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 10.0, 10.0);
-        assert!(is_node_geom_valid(&node, 1.0), "正常 zoom 应通过");
-        assert!(!is_node_geom_valid(&node, 0.0), "zoom=0 应拒绝");
-        assert!(!is_node_geom_valid(&node, -2.0), "负 zoom 应拒绝");
-        assert!(!is_node_geom_valid(&node, f64::NAN), "NaN zoom 应拒绝");
-        assert!(
-            !is_node_geom_valid(&node, MAX_ZOOM + 1.0),
-            "超 MAX_ZOOM 应拒绝"
-        );
-        assert!(is_node_geom_valid(&node, MAX_ZOOM), "恰好 MAX_ZOOM 应通过");
-    }
-
-    // E-38/P2-5 回归：合法节点（正常尺寸 + 边界值）通过护栏。
-    #[test]
-    fn node_geom_guard_accepts_valid_nodes() {
-        let mk = |x: f64, y: f64, w: f64, h: f64| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
-        assert!(is_node_geom_valid(&mk(0.0, 0.0, 10.0, 10.0), 1.0));
-        assert!(
-            is_node_geom_valid(&mk(1e6, 1e6, 100.0, 100.0), 1.0),
-            "大坐标应通过"
-        );
-        assert!(
-            is_node_geom_valid(&mk(0.0, 0.0, MAX_NODE_DIM_PX, MAX_NODE_DIM_PX), 1.0),
-            "恰好 MAX_NODE_DIM_PX 应通过"
-        );
-        assert!(
-            is_node_geom_valid(&mk(0.0, 0.0, 0.0, 0.0), 1.0),
-            "零尺寸应通过"
-        );
-    }
-
-    #[test]
-    fn aabb_overlap_basic() {
-        // 两个重叠矩形
-        let a_left = 0.0f32;
-        let a_right = 100.0;
-        let a_top = 0.0f32;
-        let a_bottom = 100.0;
-        let b_left = 50.0f32;
-        let b_right = 150.0;
-        let b_top = 50.0f32;
-        let b_bottom = 150.0;
-        assert!(a_right > b_left && a_left < b_right && a_bottom > b_top && a_top < b_bottom);
-    }
-
-    #[test]
-    fn aabb_no_overlap() {
-        // 两个不重叠矩形
-        let a_left = 0.0f32;
-        let a_right = 100.0;
-        let a_top = 0.0f32;
-        let a_bottom = 100.0;
-        let b_left = 200.0f32;
-        let b_right = 300.0;
-        let b_top = 200.0f32;
-        let b_bottom = 300.0;
-        assert!(!(a_right > b_left && a_left < b_right && a_bottom > b_top && a_top < b_bottom));
-    }
-
-    #[test]
-    fn raf_atomic_flag_default() {
-        assert!(!RAF_SCHEDULED.load(std::sync::atomic::Ordering::Relaxed));
-    }
-
-    #[test]
-    fn large_document_100_nodes_serialization() {
-        let mut doc = PenDocument::new();
-        let mut page = fd_canvas_core::Page::new("p1", "Stress", 2000.0, 2000.0);
-        for i in 0..100 {
-            let x = (i % 10) as f64 * 200.0;
-            let y = (i / 10) as f64 * 100.0;
-            page.add(fd_canvas_core::PenNode::rect(
-                format!("n{i}"),
-                x,
-                y,
-                180.0,
-                80.0,
-            ));
-        }
-        doc.add_page(page);
-        let json = doc.to_json().unwrap();
-        let doc2 = PenDocument::from_json(&json).unwrap();
-        assert_eq!(doc2.pages[0].nodes.len(), 100);
-    }
-
-    #[test]
-    fn compute_resize_min_size_enforced() {
-        let (nx, ny, nw, nh) = compute_resize("se", 10.0, 20.0, 100.0, 50.0, -200.0, -200.0);
-        assert_eq!(nw, 10.0); // min_size
-        assert_eq!(nh, 10.0); // min_size
-        assert_eq!(nx, 10.0);
-        assert_eq!(ny, 20.0);
-    }
-
-    #[test]
-    fn listeners_installed_no_dom_is_safe() {
-        // L-15：无 window/DOM 时 mark_listeners_installed 返回 true（跳过安装），
-        // 避免反复尝试安装失败。幂等安全：多次调用一致返回 true。
-        assert!(
-            mark_listeners_installed("fusion-dom-root"),
-            "无 DOM 环境应跳过安装（返回 true）"
-        );
-        assert!(
-            mark_listeners_installed("fusion-dom-root"),
-            "重复调用应一致返回 true"
-        );
-    }
-
-    #[test]
-    fn render_depth_limit_constant_bounded() {
-        // P2-1：递归深度上限存在且合理，防深层嵌套文档栈溢出。
-        // 编译期校验常量边界（不触发 web_sys console，避免 native 目标 panic）。
-        const _: () = assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
-    }
-
-    #[test]
-    fn children_per_node_cap_constant_bounded() {
-        // E-38/P2-5：单节点子节点数渲染上限存在且合理。
-        // 上限须 > 合法设计稿单层扇出（数百），且与深度乘积低于 jetsam 阈值。
-        // 编译期校验（render 走 web_sys，native 目标不可调，校常量边界）。
-        const _: () = assert!(MAX_CHILDREN_PER_NODE >= 100 && MAX_CHILDREN_PER_NODE <= 10_000);
-    }
-
-    #[test]
-    fn children_take_cap_truncates_oversized_sibling_list() {
-        // E-38/P2-5：10 万扁平子节点深度=1 过深度检查，须扇出护栏截断。
-        // 复现渲染循环的 .take(MAX_CHILDREN_PER_NODE) 逻辑（纯逻辑，不触 DOM）：
-        // 构造超限 children，取前 N，断言截断且数量恰等于上限。
-        let oversized: Vec<u32> = (0..100_000).collect();
-        let rendered: Vec<u32> = oversized
-            .iter()
-            .take(MAX_CHILDREN_PER_NODE)
-            .copied()
-            .collect();
-        assert_eq!(rendered.len(), MAX_CHILDREN_PER_NODE, "超限须截断至上限");
-        assert_eq!(rendered[0], 0, "保留首批子节点顺序");
-        assert_eq!(
-            rendered[MAX_CHILDREN_PER_NODE - 1],
-            (MAX_CHILDREN_PER_NODE - 1) as u32,
-            "末元素为第 N 个子节点"
-        );
-    }
-
-    #[test]
-    fn children_take_cap_preserves_undersized_sibling_list() {
-        // E-38/P2-5：合法小扇出不受护栏影响。500 子节点 < 上限，全量保留。
-        let normal: Vec<u32> = (0..500).collect();
-        let rendered: Vec<u32> = normal.iter().take(MAX_CHILDREN_PER_NODE).copied().collect();
-        assert_eq!(rendered.len(), 500, "未超限须全量保留");
-    }
-}
+mod tests;
