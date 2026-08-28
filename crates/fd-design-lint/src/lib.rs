@@ -526,6 +526,17 @@ impl Linter {
     }
 
     fn check_overlapping_nodes(&self, siblings: &[PenNode], violations: &mut Vec<LintViolation>) {
+        // PERF-3：兄弟组节点数 > 阈值时降级——O(n²) worst-case 无界。
+        // 小文档（≤200）保持精确检测，大文档 warn + skip（fail visibly）。
+        const OVERLAP_CHECK_THRESHOLD: usize = 200;
+        if siblings.len() > OVERLAP_CHECK_THRESHOLD {
+            tracing::warn!(
+                count = siblings.len(),
+                threshold = OVERLAP_CHECK_THRESHOLD,
+                "节点过多跳过重叠检测（O(n²) 降级），worst-case 退化"
+            );
+            return;
+        }
         // E-25：旧实现 `a.z_index == b.z_index` 才检测 → 不同 z_index 的重叠（如弹层叠按钮）漏检。
         // 改为检测视觉重叠（bbox 相交）即报，z_index 差值大时降级为 Info（可能有意叠层）。
         for i in 0..siblings.len() {
@@ -1691,6 +1702,39 @@ mod tests {
             .violations
             .iter()
             .any(|v| v.rule == LintRule::OverlappingNodes));
+    }
+
+    #[test]
+    fn check_overlapping_skips_when_over_threshold() {
+        // PERF-3：>200 节点兄弟组应 warn + 跳过 O(n²) 重叠检测 → 0 OverlappingNodes 违规。
+        // 注：check_overlapping_nodes 为私有方法，经 Linter::new().lint(&doc) → lint_siblings 到达。
+        // 201 节点全重叠（同 bbox 同 z_index），无阈值会产 ~20100 对 OverlappingNodes。
+        let mut siblings = Vec::new();
+        for i in 0..201 {
+            siblings.push(PenNode {
+                id: format!("n{i}"),
+                name: format!("n{i}"),
+                kind: NodeKind::Rect,
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+                style: NodeStyle::default(),
+                text: None,
+                children: vec![],
+                rotation: 0.0,
+                z_index: 0,
+            });
+        }
+        let doc = make_doc(siblings);
+        let result = Linter::new().lint(&doc);
+        assert!(
+            !result
+                .violations
+                .iter()
+                .any(|v| v.rule == LintRule::OverlappingNodes),
+            ">200 节点应跳过重叠检测，不应产出 OverlappingNodes 违规"
+        );
     }
 
     #[test]

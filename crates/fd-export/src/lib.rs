@@ -464,6 +464,12 @@ fn sanitize_image_url(raw: &str) -> String {
         tracing::warn!(url = %trimmed, "SVG image href 拒绝出网/可执行协议");
         return String::new();
     }
+    // SEC-N3：无协议前缀路径放行前检查 .. 段防路径穿越。
+    // 离线 SVG 无出网，但相对路径可解析到文件系统敏感位置（理论风险）。
+    if trimmed.contains("/../") || trimmed.starts_with("../") || trimmed == ".." {
+        tracing::warn!(url = %trimmed, "SVG image href 拒绝含 .. 的路径穿越意图");
+        return String::new();
+    }
     // 无协议前缀：相对路径或纯文件名，放行（本地资源，不出网）
     trimmed.to_string()
 }
@@ -632,6 +638,22 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> Result<(), ExportError> {
                     continue;
                 }
                 ops.push(printpdf::ops::Op::SaveGraphicsState);
+                // FUNC-9：非 0 旋转 shape 在 PDF 用 CTM 旋转，否则丢旋转。
+                // CTM 累加，须在 SaveGraphicsState 域内（本 arm 末 RestoreGraphicsState 已复位）。
+                // pivot 取 shape 中心（与 SVG transform="rotate(r cx cy)" 对齐保视觉一致）。
+                if let Some(angle) = el.rotation {
+                    if angle != 0.0 {
+                        let cx = (el.x + el.w / 2.0) * px_to_mm;
+                        let cy = height_mm - (el.y + el.h / 2.0) * px_to_mm;
+                        ops.push(printpdf::ops::Op::SetTransformationMatrix {
+                            matrix: printpdf::CurTransMat::TranslateRotate(
+                                printpdf::Pt(cx as f32),
+                                printpdf::Pt(cy as f32),
+                                angle as f32,
+                            ),
+                        });
+                    }
+                }
                 let mode = match (&fill, &stroke) {
                     (Some(_), Some(_)) => printpdf::graphics::PaintMode::FillStroke,
                     (Some(_), None) => printpdf::graphics::PaintMode::Fill,
@@ -671,6 +693,20 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> Result<(), ExportError> {
                 let cy = el.y + el.h / 2.0;
                 let r = el.w.min(el.h) / 2.0;
                 ops.push(printpdf::ops::Op::SaveGraphicsState);
+                // FUNC-9：非 0 旋转 shape 在 PDF 用 CTM 旋转（circle 旋转视觉无变化但保一致）。
+                if let Some(angle) = el.rotation {
+                    if angle != 0.0 {
+                        let cx = (el.x + el.w / 2.0) * px_to_mm;
+                        let cy = height_mm - (el.y + el.h / 2.0) * px_to_mm;
+                        ops.push(printpdf::ops::Op::SetTransformationMatrix {
+                            matrix: printpdf::CurTransMat::TranslateRotate(
+                                printpdf::Pt(cx as f32),
+                                printpdf::Pt(cy as f32),
+                                angle as f32,
+                            ),
+                        });
+                    }
+                }
                 let mode = match (&fill, &stroke) {
                     (Some(_), Some(_)) => printpdf::graphics::PaintMode::FillStroke,
                     (Some(_), None) => printpdf::graphics::PaintMode::Fill,
@@ -728,8 +764,8 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> Result<(), ExportError> {
                 ops.push(printpdf::ops::Op::EndTextSection);
             }
             // L-12/R-11：不支持此元素类型不再静默丢弃——聚合到 skipped_kinds 供调用方打印。
-            // rotation：printpdf 0.12 Op 枚举无易用的 per-shape transform，
-            // 非 0 旋转的 shape 暂按未旋转输出并告警（TODO：后续接 printpdf Transform）。
+            // FUNC-9：rect/circle 的非 0 旋转已在上文各 arm 用 SetTransformationMatrix
+            // (CurTransMat::TranslateRotate) 处理，绕 shape 中心旋转，RestoreGraphicsState 自动复位 CTM。
             other => {
                 if !skipped_kinds.iter().any(|k| k == other) {
                     skipped_kinds.push(other.to_string());
@@ -1219,6 +1255,57 @@ mod tests {
         assert!(content.starts_with("%PDF"), "CJK 文本应产出合法 PDF");
     }
 
+    // FUNC-9：旋转 shape 导出 PDF 不应丢旋转。当前实现用 printpdf CTM
+    // (SetTransformationMatrix/TranslateRotate) 在 SaveGraphicsState 域内旋转。
+    // printpdf 0.12 serialize.rs 中 cm 算子未压缩（doc.compress() 被注释），
+    // 故可直接在 PDF 字节中检 " cm" 算子验证旋转矩阵已写入。
+    // pivot 取 shape 中心（与 SVG 路径 transform="rotate(r cx cy)" 对齐保视觉一致）。
+    #[test]
+    fn pdf_export_rotated_shape_not_skipped() {
+        let tmp = tempdir().unwrap();
+        let page = CanvasPage {
+            id: "rot".into(),
+            name: "Rot".into(),
+            width: 100.0,
+            height: 100.0,
+            elements: vec![CanvasElement {
+                kind: "rect".into(),
+                x: 10.0,
+                y: 10.0,
+                w: 40.0,
+                h: 40.0,
+                text: None,
+                fill: Some("#ff0000".into()),
+                stroke: None,
+                stroke_width: None,
+                radius: None,
+                opacity: None,
+                font_size: None,
+                font_family: None,
+                rotation: Some(45.0),
+            }],
+        };
+        let file = Exporter::export_page(&page, ExportFormat::Pdf, tmp.path()).unwrap();
+        assert!(file.exists(), "PDF 文件应已生成");
+        let data = std::fs::read(&file).unwrap();
+        assert!(data.starts_with(b"%PDF"), "PDF magic bytes");
+        assert!(
+            data.len() > 1000,
+            "旋转 rect PDF 应非平凡大小（>1000B），实际 {}B",
+            data.len()
+        );
+        let content = String::from_utf8_lossy(&data);
+        assert!(
+            content.contains(" re"),
+            "旋转 rect 仍应生成 re 矩形算子（未被跳过）"
+        );
+        assert!(
+            content.contains(" cm"),
+            "旋转 shape 应生成 cm CTM 算子（FUNC-9 旋转矩阵已写入）"
+        );
+        assert!(content.contains(" rg"), "fill #ff0000 应生成 rg 填充色算子");
+    }
+
     // R-11：跳过的不支持元素类型不再静默——PDF 仍生成但该元素缺失。
     // 验证未知类型不 panic 且产出合法 PDF（跳过清单经 tracing warn 打印）。
     #[test]
@@ -1664,6 +1751,22 @@ mod tests {
         assert_eq!(sanitize_image_url("https://evil.com/x.png"), "");
         assert_eq!(sanitize_image_url("http://10.0.0.1/exfil.png"), "");
         assert_eq!(sanitize_image_url("file:///etc/passwd"), "");
+    }
+
+    #[test]
+    fn sanitize_image_url_rejects_dotdot_traversal() {
+        assert_eq!(sanitize_image_url("../secret"), "");
+        assert_eq!(sanitize_image_url("a/../b"), "");
+        assert_eq!(sanitize_image_url("../../etc/passwd"), "");
+    }
+    #[test]
+    fn sanitize_image_url_allows_normal_relative() {
+        assert_eq!(sanitize_image_url("logo.png"), "logo.png");
+        assert_eq!(sanitize_image_url("assets/icon.svg"), "assets/icon.svg");
+        assert_eq!(
+            sanitize_image_url("data:image/png;base64,xxx"),
+            "data:image/png;base64,xxx"
+        );
     }
 
     #[test]
