@@ -11,5 +11,6 @@ pub mod design_system;
 pub mod export;
 pub mod generate;
 pub mod health;
+pub mod history;
 pub mod io_cmd;
 pub mod lint;

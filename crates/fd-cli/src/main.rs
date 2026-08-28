@@ -571,48 +571,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             component,
             out,
         } => commands::io_cmd::codegen(input, target, component, out).await,
-        Command::Undo { input } => {
-            // TODO A-3: 拆到 src/commands/
-            let history_path = input.with_extension("history.json");
-            if !history_path.exists() {
-                anyhow::bail!("历史文件不存在: {history_path:?}");
-            }
-            let hist_json = common::read_file_capped(&history_path)?;
-            let mut stack: fd_canvas_core::UndoRedoStack = serde_json::from_str(&hist_json)
-                .map_err(|e| anyhow::anyhow!("历史文件解析失败: {e}"))?;
-            match stack.undo() {
-                Some(doc) => {
-                    let out_json = serde_json::to_string_pretty(&doc)?;
-                    let hist_out = serde_json::to_string_pretty(&stack)?;
-                    tokio::fs::write(&history_path, &hist_out).await?;
-                    println!("{out_json}");
-                    tracing::info!("undo: 成功回退");
-                    Ok(())
-                }
-                None => anyhow::bail!("无法撤销：已到最早状态"),
-            }
-        }
-        Command::Redo { input } => {
-            // TODO A-3: 拆到 src/commands/
-            let history_path = input.with_extension("history.json");
-            if !history_path.exists() {
-                anyhow::bail!("历史文件不存在: {history_path:?}");
-            }
-            let hist_json = common::read_file_capped(&history_path)?;
-            let mut stack: fd_canvas_core::UndoRedoStack = serde_json::from_str(&hist_json)
-                .map_err(|e| anyhow::anyhow!("历史文件解析失败: {e}"))?;
-            match stack.redo() {
-                Some(doc) => {
-                    let out_json = serde_json::to_string_pretty(&doc)?;
-                    let hist_out = serde_json::to_string_pretty(&stack)?;
-                    tokio::fs::write(&history_path, &hist_out).await?;
-                    println!("{out_json}");
-                    tracing::info!("redo: 成功重做");
-                    Ok(())
-                }
-                None => anyhow::bail!("无法重做：已到最新状态"),
-            }
-        }
+        Command::Undo { input } => commands::history::undo(input).await,
+        Command::Redo { input } => commands::history::redo(input).await,
         Command::Health { endpoint } => commands::health::run(endpoint).await,
         Command::Diff { old, new } => commands::io_cmd::diff(old, new).await,
         Command::Theme {
