@@ -1,0 +1,29 @@
+[package]
+name = "fd-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fusion-Design AI 设计 Skill — trait 化能力 + 注册中心，解耦 inference client"
+
+[lib]
+name = "fd_skills"
+path = "src/lib.rs"
+
+# ARCH-11：fd-skills 是纯 trait + helper + 解析层，零 HTTP（inference 由 adapter
+# FusionMlxClient 实现 SkillContext trait 完成）。依赖仅 serde_json/tracing/base64/
+# tokio（encode_image_base64_async 用 tokio::fs）+ fd-canvas-core（PenDocument）+
+# fd-design-system（DesignSystem token_prompt_fragment）。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+tokio = { workspace = true }
+fd-canvas-core = { path = "../fd-canvas-core" }
+fd-design-system = { path = "../fd-design-system" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "macros"] }
