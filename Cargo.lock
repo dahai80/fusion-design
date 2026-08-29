@@ -560,7 +560,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fd-ai-adapter"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "fd-canvas-core"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "fd-css-utils",
  "serde",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "fd-cli"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "fd-codegen"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -630,14 +630,14 @@ dependencies = [
 
 [[package]]
 name = "fd-css-utils"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
 name = "fd-design-lint"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "fd-design-system"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "fd-canvas-core",
  "serde",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "fd-ecosystem"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "fd-export"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "fd-canvas-core",
  "fd-design-system",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "fd-host-desk"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "fd-host-web"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "base64",
  "console_error_panic_hook",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "fd-html-parser"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "fd-canvas-core",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "fd-skills"
-version = "0.1.12"
+version = "0.1.14-rc.1"
 dependencies = [
  "anyhow",
  "base64",
