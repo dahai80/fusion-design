@@ -20,6 +20,7 @@
 | J | model not found / cross-deploy drift | [Symptom J](#symptom-j-model-not-found--cross-deploy-model-list-drift) |
 | K | lint report / 13 rule meanings | [Symptom K](#symptom-k-lint-report-unclear-13-rule-meanings) |
 | L | XSS / injection / security guardrail | [Symptom L](#symptom-l-generated-content-contains-xss--injection-security-guardrail-triggered) |
+| M | no log file / field diagnostic / file log | [Symptom M](#symptom-m-no-log-file-on-disk--need-field-diagnostic-artifact) |
 
 ## Symptom A: MLX service unreachable (connection failed / health check failed)
 
@@ -281,6 +282,32 @@ fusion-design lint --input x.fusiondesign --fix
 
 **This is a feature**: 100% offline + XSS/injection protection is fusion-design's core security promise; do not "fix" it away as a bug.
 
+## Symptom M: No log file on disk / need field diagnostic artifact
+
+**Symptom**: fd-cli ran (via fusion-studio WKWebView embed or terminal direct) but no `fusion-design.log.*` file exists; or a field failure happened and there is no persistent diagnostic artifact.
+
+**Root cause**: fd-cli writes daily-rotated logs via `tracing-appender` (OPS-13, v0.1.14). The default location is `~/Library/Logs/fusion-design/` on macOS (`~/.local/share/fusion-design/logs` on Linux). A missing file means one of: disabled via env, the dir could not be created (permissions), or the process exited before flushing.
+
+**Fix**:
+- **Default location**: `ls ~/Library/Logs/fusion-design/` — look for `fusion-design.log.YYYY-MM-DD`.
+- **File disabled**: `FUSION_LOG_DISABLE_FILE=1` (or `=true`) forces stdout-only. Unset it to restore file logging:
+  ```sh
+  unset FUSION_LOG_DISABLE_FILE
+  ```
+- **Redirect to a custom dir** (useful for capturing a specific session):
+  ```sh
+  FUSION_LOG_DIR=/tmp/fd-session RUST_LOG=debug fusion-design --version
+  ls /tmp/fd-session/   # → fusion-design.log.YYYY-MM-DD
+  ```
+- **Raise verbosity**: default filter is `warn`. Set `RUST_LOG=info` (or `=debug`) to capture diagnostic detail in the file:
+  ```sh
+  RUST_LOG=info FUSION_LOG_DIR=/tmp/fd-session fusion-design list-design-systems
+  ```
+- **Dir creation failed → stdout fallback**: if `init_logging` cannot `mkdir -p` the log dir (permissions/disk full), it prints `日志目录创建失败 ...，回退 stdout` to stderr and falls back to stdout-only — the CLI still runs. Check the printed path and free space.
+- **Empty file**: `--version` / `--help` exit before any `tracing` event fires, so the rotated file may be 0 bytes. Run a real subcommand (`list-design-systems`, `health`, `check-mlx`) to capture events.
+
+**Guard lifetime**: the file writer flushes when `init_logging`'s `WorkerGuard` is dropped at process exit. Normal CLI shutdown flushes correctly; a `SIGKILL` can lose the last buffered line.
+
 ## Environment Variables Reference
 
 All optional. Unset = default. Complete table lives in `README.md` § Environment Variables; this is the troubleshooting-oriented quick reference (OPS-16).
@@ -294,5 +321,7 @@ All optional. Unset = default. Complete table lives in `README.md` § Environmen
 | `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | Total retry deadline. | Symptom B: raise if model load exceeds 5 min. |
 | `FUSION_MLX_SSE_BUFFER_CAP` | `8388608` | Max SSE buffer bytes before bail. | Symptom E: runaway output OOM guard. |
 | `FUSION_MLX_STREAM_IDLE_SECS` | `60` | Max idle seconds between SSE chunks (FAULT-1, v0.1.14). | Symptom E: mid-stream stall now fails visibly instead of hanging. |
+| `FUSION_LOG_DISABLE_FILE` | (unset) | `1`/`true` = stdout-only, no file log (OPS-13, v0.1.14). | Symptom M: unset to restore `~/Library/Logs/fusion-design/` file logging. |
+| `FUSION_LOG_DIR` | (platform default) | Override file-log dir (OPS-13, v0.1.14). | Symptom M: redirect a session's logs to `/tmp/...` for capture. |
 | `FUSION_VENV_ROOT` | (auto-detect) | Shared `.venv` root for ecosystem tool calls. | Symptom G: override when venv not co-located. |
 | `FUSION_TRAINER_BIN` | `fusion-trainer` | Path to fusion-trainer binary. | Symptom G: override when not on `PATH`. |

@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod common;
+mod logging;
 
 #[derive(Parser)]
 #[command(
@@ -364,12 +365,9 @@ impl From<ThemeModeArg> for fd_design_system::Theme {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    // OPS-13：文件日志 + stdout 双写。guard 须绑定持有至 main() 退出，
+    // drop 时 flush 关闭 file writer；裸调用会立即 drop 丢日志。
+    let _file_log_guard = logging::init_logging();
 
     let cli = Cli::parse();
     let rt = match tokio::runtime::Runtime::new() {

@@ -21,6 +21,10 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# OPS-13：文件日志日轮转 NonBlocking writer + WorkerGuard 保活。
+tracing-appender = { workspace = true }
+# OPS-13：解析平台日志目录（macOS ~/Library/Logs/fusion-design）。
+dirs = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
