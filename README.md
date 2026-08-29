@@ -139,10 +139,12 @@ All optional. Unset = default. Affects runtime behavior without code changes.
 | `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | Total deadline across all retry attempts. Exceeding bails even if attempts remain. | fd-ai-adapter |
 | `FUSION_MLX_SSE_BUFFER_CAP` | `8388608` (8 MB) | Max bytes buffered for a single SSE stream before bail. Guards against runaway model output OOM. | fd-ai-adapter |
 | `FUSION_MLX_STREAM_IDLE_SECS` | `60` | Max idle seconds between SSE chunks. Mid-stream stall beyond this emits error delta and fails visibly (no infinite hang). | fd-ai-adapter |
+| `FUSION_LOG_DISABLE_FILE` | (unset) | Set `1` (or `true`) to disable file logging (stdout-only). Default writes daily-rotated logs to `~/Library/Logs/fusion-design/` (macOS) or `~/.local/share/fusion-design/logs` (Linux). | fd-cli |
+| `FUSION_LOG_DIR` | (platform default) | Override the file-log directory. Default: `~/Library/Logs/fusion-design/` (macOS) / `~/.local/share/fusion-design/logs` (Linux). | fd-cli |
 | `FUSION_VENV_ROOT` | (auto-detect) | Root path of the shared `.venv` for ecosystem tool invocation. Falls back to workspace-relative discovery. | fd-ecosystem |
 | `FUSION_TRAINER_BIN` | `fusion-trainer` | Path to the fusion-trainer binary for ecosystem training IPC. Override when not on `PATH`. | fd-ecosystem |
 
-> Audit note: `FUSION_MLX_STREAM_IDLE_SECS` is introduced by P2 FAULT-1 (v0.1.14). The other eight were previously undocumented or inline-only; this table is the single source of truth (OPS-16). `FUSION_LOG_DISABLE_FILE` (file-log toggle) belongs to OPS-13, which is not yet landed and therefore omitted.
+> Audit note: `FUSION_MLX_STREAM_IDLE_SECS` is introduced by P2 FAULT-1 (v0.1.14). `FUSION_LOG_DISABLE_FILE` / `FUSION_LOG_DIR` (file-log toggle + dir override) belong to OPS-13 (v0.1.14, fd-cli 文件日志落地). The other env vars were previously undocumented or inline-only; this table is the single source of truth (OPS-16).
 
 ## 📄 License
 

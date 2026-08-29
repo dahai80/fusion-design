@@ -29,7 +29,7 @@ members = [
 exclude = ["vendor/openpencil"]
 
 [workspace.package]
-version = "0.1.14-rc.1"
+version = "0.1.14"
 edition = "2021"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -42,7 +42,11 @@ serde_json = "1"
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# OPS-13：fd-cli 文件日志。appender 0.2 日轮转 NonBlocking + WorkerGuard；
+# dirs 5 解析平台日志目录（macOS ~/Library/Logs/）。纯本地，不触发 deny-external-http。
+tracing-appender = "0.2"
+dirs = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "io-util"] }
 # E-5：default-features=false 砍掉 native-tls/openssl-sys 系统依赖，纯 Rust TLS
 # 后端 rustls-tls。离线约束下避免链接系统 OpenSSL（macOS/Linux 差异 + CI 镜像缺 libssl）。

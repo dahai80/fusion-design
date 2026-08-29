@@ -20,6 +20,7 @@
 | J | 模型不存在 / 跨部署漂移 | [现象 J](#现象-j模型不存在--跨部署模型列表漂移) |
 | K | lint 报告 / 13 规则含义 | [现象 K](#现象-klint-报告看不懂13-规则含义) |
 | L | XSS / 注入 / 安全护栏 | [现象 L](#现象-l生成内容含-xss--注入安全护栏触发) |
+| M | 无日志文件 / 现场诊断 / 文件日志 | [现象 M](#现象-m磁盘无日志文件--需现场诊断件) |
 
 ## 现象 A：MLX 服务不通（连接失败 / 健康检查失败）
 
@@ -281,6 +282,32 @@ fusion-design lint --input x.fusiondesign --fix
 
 **这是特性**：100% 离线 + XSS/注入防护是 fusion-design 的核心安全承诺，勿当作 bug 修掉。
 
+## 现象 M：磁盘无日志文件 / 需现场诊断件
+
+**现象**：fd-cli 跑过（经 fusion-studio WKWebView 内嵌或终端直跑），但无 `fusion-design.log.*` 文件；或现场故障已发生却无持久诊断件。
+
+**根因**：fd-cli 经 `tracing-appender` 写日轮转日志（OPS-13，v0.1.14）。默认路径 macOS `~/Library/Logs/fusion-design/`（Linux `~/.local/share/fusion-design/logs`）。无文件说明：env 禁用了、目录建不出来（权限）、或进程退出前未刷盘。
+
+**解决**：
+- **默认路径**：`ls ~/Library/Logs/fusion-design/` —— 找 `fusion-design.log.YYYY-MM-DD`。
+- **文件被禁**：`FUSION_LOG_DISABLE_FILE=1`（或 `=true`）强制 stdout-only。取消即恢复文件日志：
+  ```sh
+  unset FUSION_LOG_DISABLE_FILE
+  ```
+- **重定向到自定义目录**（捕获某次会话用）：
+  ```sh
+  FUSION_LOG_DIR=/tmp/fd-session RUST_LOG=debug fusion-design --version
+  ls /tmp/fd-session/   # → fusion-design.log.YYYY-MM-DD
+  ```
+- **调高日志级别**：默认过滤 `warn`。设 `RUST_LOG=info`（或 `=debug`）捕获诊断细节到文件：
+  ```sh
+  RUST_LOG=info FUSION_LOG_DIR=/tmp/fd-session fusion-design list-design-systems
+  ```
+- **目录创建失败 → 回退 stdout**：`init_logging` 若 `mkdir -p` 日志目录失败（权限/磁盘满），会往 stderr 打 `日志目录创建失败 ...，回退 stdout` 并回退 stdout-only —— CLI 照常跑。检查打印的路径与磁盘空间。
+- **文件为空**：`--version` / `--help` 在任何 `tracing` 事件触发前即退出，轮转文件可能 0 字节。跑真子命令（`list-design-systems`、`health`、`check-mlx`）才能捕获事件。
+
+**Guard 生命周期**：文件 writer 在 `init_logging` 的 `WorkerGuard` 进程退出时 drop 刷盘。正常 CLI 关机刷盘正常；`SIGKILL` 可能丢最后一行缓冲。
+
 ## 环境变量参考
 
 全部可选，未设即默认。完整表见 `README.md` § 环境变量；此处为排障导向速查（OPS-16）。
@@ -294,5 +321,7 @@ fusion-design lint --input x.fusiondesign --fix
 | `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | 重试总 deadline。 | 现象 B：模型加载超 5 分钟调大。 |
 | `FUSION_MLX_SSE_BUFFER_CAP` | `8388608` | SSE 缓冲上限字节，超即 bail。 | 现象 E：防模型输出失控 OOM。 |
 | `FUSION_MLX_STREAM_IDLE_SECS` | `60` | SSE chunk 间最大空闲秒数（FAULT-1，v0.1.14）。 | 现象 E：中途断流现以失败可见替代无限挂起。 |
+| `FUSION_LOG_DISABLE_FILE` | (未设) | `1`/`true` = stdout-only，不写文件（OPS-13，v0.1.14）。 | 现象 M：取消即恢复 `~/Library/Logs/fusion-design/` 文件日志。 |
+| `FUSION_LOG_DIR` | (平台默认) | 覆盖文件日志目录（OPS-13，v0.1.14）。 | 现象 M：把某会话日志重定向到 `/tmp/...` 捕获。 |
 | `FUSION_VENV_ROOT` | (自动探测) | ecosystem 工具调用的共享 `.venv` 根。 | 现象 G：venv 非同址时覆盖。 |
 | `FUSION_TRAINER_BIN` | `fusion-trainer` | fusion-trainer 二进制路径。 | 现象 G：不在 `PATH` 时覆盖。 |
