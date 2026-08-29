@@ -126,6 +126,24 @@ cargo run -p fd-cli -- --help                                  # CLI available
 
 > **集成说明**：fusion-studio 的 `Scripts/build.sh` 从本仓 `target/wasm32-unknown-unknown/{release,debug}/` 拉取 `fd_host_web_bg.wasm` + `fd_host_web.js`。`build.sh` 已补 wasm-bindgen 后处理步骤，确保 bindgen 产物落地该目录——缺此步则 studio 同步脚本找不到 `_bg.wasm`，回退陈旧内置件。
 
+## 🔧 Environment Variables
+
+All optional. Unset = default. Affects runtime behavior without code changes.
+
+| Variable | Default | 作用 / Effect | Set in |
+|----------|---------|---------------|--------|
+| `FUSION_MLX_BASE_URL` | `http://127.0.0.1:11432` (gateway) | fusion-mlx inference endpoint. CLI `--endpoint` overrides. Comma-separated multi-node failover supported (e.g. `http://a:11432,http://b:11432`). | fd-ai-adapter |
+| `FUSION_MLX_API_KEY` | (none) | Bearer auth key for gateway/MLX. Must match the key configured on the service. | fd-ai-adapter |
+| `FUSION_MLX_MODEL` | (list first) | Default model id for `check-mlx` probe (resolution: `--model` > env > `/v1/models` first entry). Pass an explicit local mlx id to avoid false-green on unloaded cloud models. | fd-cli |
+| `FUSION_MLX_RETRY_MAX` | `4` | Max attempts on 502/503 transient errors (exponential backoff 500ms→1s→2s→4s→8s capped). Set `1` to disable retry. 4xx permanent errors fail immediately. | fd-ai-adapter |
+| `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | Total deadline across all retry attempts. Exceeding bails even if attempts remain. | fd-ai-adapter |
+| `FUSION_MLX_SSE_BUFFER_CAP` | `8388608` (8 MB) | Max bytes buffered for a single SSE stream before bail. Guards against runaway model output OOM. | fd-ai-adapter |
+| `FUSION_MLX_STREAM_IDLE_SECS` | `60` | Max idle seconds between SSE chunks. Mid-stream stall beyond this emits error delta and fails visibly (no infinite hang). | fd-ai-adapter |
+| `FUSION_VENV_ROOT` | (auto-detect) | Root path of the shared `.venv` for ecosystem tool invocation. Falls back to workspace-relative discovery. | fd-ecosystem |
+| `FUSION_TRAINER_BIN` | `fusion-trainer` | Path to the fusion-trainer binary for ecosystem training IPC. Override when not on `PATH`. | fd-ecosystem |
+
+> Audit note: `FUSION_MLX_STREAM_IDLE_SECS` is introduced by P2 FAULT-1 (v0.1.14). The other eight were previously undocumented or inline-only; this table is the single source of truth (OPS-16). `FUSION_LOG_DISABLE_FILE` (file-log toggle) belongs to OPS-13, which is not yet landed and therefore omitted.
+
 ## 📄 License
 
 Licensed under the [Apache License 2.0](LICENSE).

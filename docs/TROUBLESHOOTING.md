@@ -280,3 +280,19 @@ fusion-design lint --input x.fusiondesign --fix
 - **To confirm the guardrail works**: deliberately pass a prompt containing `<script>alert(1)</script>`; the output should show `&lt;script&gt;`, not an executable tag.
 
 **This is a feature**: 100% offline + XSS/injection protection is fusion-design's core security promise; do not "fix" it away as a bug.
+
+## Environment Variables Reference
+
+All optional. Unset = default. Complete table lives in `README.md` § Environment Variables; this is the troubleshooting-oriented quick reference (OPS-16).
+
+| Variable | Default | Effect | Troubleshooting use |
+|----------|---------|--------|---------------------|
+| `FUSION_MLX_BASE_URL` | `http://127.0.0.1:11432` | Inference endpoint. CLI `--endpoint` overrides. Multi-node: comma-separated. | Symptom A/B/D: switch gateway→direct `11434`, or add failover node. |
+| `FUSION_MLX_API_KEY` | (none) | Bearer auth key. | Symptom D: must match gateway/MLX configured key. |
+| `FUSION_MLX_MODEL` | (list first) | Default model id for `check-mlx`. | Symptom C/J: pass explicit local mlx id to dodge false-green. |
+| `FUSION_MLX_RETRY_MAX` | `4` | Max attempts on 502/503. `1`=disable. | Symptom B: raise for slow-loading models, lower for fast error visibility. |
+| `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | Total retry deadline. | Symptom B: raise if model load exceeds 5 min. |
+| `FUSION_MLX_SSE_BUFFER_CAP` | `8388608` | Max SSE buffer bytes before bail. | Symptom E: runaway output OOM guard. |
+| `FUSION_MLX_STREAM_IDLE_SECS` | `60` | Max idle seconds between SSE chunks (FAULT-1, v0.1.14). | Symptom E: mid-stream stall now fails visibly instead of hanging. |
+| `FUSION_VENV_ROOT` | (auto-detect) | Shared `.venv` root for ecosystem tool calls. | Symptom G: override when venv not co-located. |
+| `FUSION_TRAINER_BIN` | `fusion-trainer` | Path to fusion-trainer binary. | Symptom G: override when not on `PATH`. |
