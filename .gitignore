@@ -7,6 +7,9 @@ node_modules/
 frontend/dist/
 /dist/
 *.wasm
+# OPS-11：wasm-bindgen 产物（docs/harness/pkg/）是构建输出，CI/本地 wasm-bindgen 步骤再生。
+# harness.js 运行时 import ./pkg/fd_host_web.js，pkg 由 bindgen 步骤生成，不纳版本控制。
+docs/harness/pkg/
 
 # 本地文件，不纳入版本控制
 CLAUDE.md

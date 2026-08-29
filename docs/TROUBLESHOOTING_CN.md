@@ -280,3 +280,19 @@ fusion-design lint --input x.fusiondesign --fix
 - **想确认护栏生效**：故意传含 `<script>alert(1)</script>` 的 prompt，产物应见 `&lt;script&gt;` 而非可执行标签。
 
 **这是特性**：100% 离线 + XSS/注入防护是 fusion-design 的核心安全承诺，勿当作 bug 修掉。
+
+## 环境变量参考
+
+全部可选，未设即默认。完整表见 `README.md` § 环境变量；此处为排障导向速查（OPS-16）。
+
+| 变量 | 默认值 | 作用 | 排障用途 |
+|------|--------|------|----------|
+| `FUSION_MLX_BASE_URL` | `http://127.0.0.1:11432` | 推理 endpoint。CLI `--endpoint` 覆盖。多节点逗号分隔。 | 现象 A/B/D：gateway→直连 `11434`，或加故障转移节点。 |
+| `FUSION_MLX_API_KEY` | (无) | Bearer 鉴权 key。 | 现象 D：须与 gateway/MLX 配置的 key 一致。 |
+| `FUSION_MLX_MODEL` | (列表首个) | `check-mlx` 默认模型 id。 | 现象 C/J：显式传本地 mlx id 破假绿。 |
+| `FUSION_MLX_RETRY_MAX` | `4` | 502/503 最大尝试次数。`1`=关。 | 现象 B：模型加载慢调大，想快速看错调小。 |
+| `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | 重试总 deadline。 | 现象 B：模型加载超 5 分钟调大。 |
+| `FUSION_MLX_SSE_BUFFER_CAP` | `8388608` | SSE 缓冲上限字节，超即 bail。 | 现象 E：防模型输出失控 OOM。 |
+| `FUSION_MLX_STREAM_IDLE_SECS` | `60` | SSE chunk 间最大空闲秒数（FAULT-1，v0.1.14）。 | 现象 E：中途断流现以失败可见替代无限挂起。 |
+| `FUSION_VENV_ROOT` | (自动探测) | ecosystem 工具调用的共享 `.venv` 根。 | 现象 G：venv 非同址时覆盖。 |
+| `FUSION_TRAINER_BIN` | `fusion-trainer` | fusion-trainer 二进制路径。 | 现象 G：不在 `PATH` 时覆盖。 |

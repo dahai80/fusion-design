@@ -36,7 +36,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 // 调用方（from_json）循环 `while v < SCHEMA_VERSION { v = migrate_schema(v, &mut value)? }`。
 // 在 serde_json::Value 层操作而非结构体层：迁移逻辑早于反序列化，能改字段名/结构，
 // 而结构体反序列化已按目标版本定型，无法兼容旧字段形态。
-pub fn migrate_schema(from: u32, doc: &mut serde_json::Value) -> anyhow::Result<u32> {
+pub fn migrate_schema(from: u32, doc: &mut serde_json::Value) -> Result<u32, CanvasError> {
     match from {
         // v0（无版本号旧文件）→ v1：无结构差异，直接提版本号。
         0 => {
@@ -379,13 +379,19 @@ fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::V
 }
 
 /// 递归统计节点最大嵌套深度与累计节点数。深度超限即 bail（短路，不继续遍历）。
-fn count_depth(node: &PenNode, depth: usize, total: &mut usize) -> anyhow::Result<usize> {
+fn count_depth(node: &PenNode, depth: usize, total: &mut usize) -> Result<usize, CanvasError> {
     *total += 1;
     if *total > MAX_NODE_TOTAL {
-        anyhow::bail!("节点总数超过安全上限 {MAX_NODE_TOTAL}");
+        return Err(CanvasError::NodeTotalExceeded {
+            total: *total,
+            limit: MAX_NODE_TOTAL,
+        });
     }
     if depth > MAX_NODE_DEPTH {
-        anyhow::bail!("节点嵌套深度超过安全上限 {MAX_NODE_DEPTH}");
+        return Err(CanvasError::DepthExceeded {
+            depth,
+            limit: MAX_NODE_DEPTH,
+        });
     }
     let mut max_d = depth;
     for child in &node.children {
@@ -542,19 +548,19 @@ impl PenDocument {
         serde_json::to_string_pretty(self)
     }
 
-    /// 从 JSON 反序列化（anyhow 友好入口）。
+    /// 从 JSON 反序列化（ARCH-13：返 CanvasError 而非 anyhow，下游可 downcast 区分 corrupt vs upgrade）。
     /// 安全护栏已由 `Deserialize` 实现强制（A4），此方法仅做错误类型转换。
     ///
     /// E-14：截断/损坏检测。`#[serde(default)]` 使被截断的文件"成功"解析成
     /// 残缺文档（缺失 pages → 空 Vec，缺失 schema_version → 默认 1），用户打开
     /// 看到空白画布却无任何告警，静默丢数据。此处对"原文非空但解析出全空文档"
     /// 的可疑情形显式 warn（fail visibly），不报错以免阻断合法的新建空文档。
-    pub fn from_json(json: &str) -> anyhow::Result<Self> {
+    pub fn from_json(json: &str) -> Result<Self, CanvasError> {
         let trimmed = json.trim();
         // ARCH-5：先解析为 serde_json::Value，跑 schema 迁移循环，再反序列化为结构体。
         // 迁移在 Value 层进行，能改字段名/结构；结构体 Deserialize 已按目标版本定型。
         let mut value: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| anyhow::anyhow!("反序列化失败（解析为 JSON Value）: {e}"))?;
+            .map_err(|e| CanvasError::ParseError(format!("解析为 JSON Value 失败: {e}")))?;
         let mut v = match &value {
             serde_json::Value::Object(obj) => obj
                 .get("schema_version")
@@ -567,15 +573,13 @@ impl PenDocument {
             v = SCHEMA_VERSION;
         }
         if v > SCHEMA_VERSION {
-            anyhow::bail!(
-                "文件 schema 版本 {v} 高于当前支持 {SCHEMA_VERSION}，请升级 fusion-design"
-            );
+            return Err(CanvasError::SchemaVersion(v));
         }
         while v < SCHEMA_VERSION {
             v = migrate_schema(v, &mut value)?;
         }
         let doc: PenDocument = serde_json::from_value(value)
-            .map_err(|e| anyhow::anyhow!("反序列化失败（含安全护栏校验）: {e}"))?;
+            .map_err(|e| CanvasError::ParseError(format!("含安全护栏校验的反序列化失败: {e}")))?;
         // 可疑截断：原文非空（非纯空白/空对象）但解析出零页面。提示用户文件可能损坏。
         if !trimmed.is_empty() && trimmed != "{}" && doc.pages.is_empty() {
             tracing::warn!(
@@ -588,18 +592,24 @@ impl PenDocument {
     }
 
     /// 校验节点嵌套深度与总数在安全阈值内。
-    pub fn validate_limits(&self) -> anyhow::Result<()> {
+    pub fn validate_limits(&self) -> Result<(), CanvasError> {
         let mut total: usize = 0;
         for page in &self.pages {
             for node in &page.nodes {
                 let depth = count_depth(node, 1, &mut total)?;
                 if depth > MAX_NODE_DEPTH {
-                    anyhow::bail!("节点嵌套深度 {depth} 超过安全上限 {MAX_NODE_DEPTH}");
+                    return Err(CanvasError::DepthExceeded {
+                        depth,
+                        limit: MAX_NODE_DEPTH,
+                    });
                 }
             }
         }
         if total > MAX_NODE_TOTAL {
-            anyhow::bail!("节点总数 {total} 超过安全上限 {MAX_NODE_TOTAL}");
+            return Err(CanvasError::NodeTotalExceeded {
+                total,
+                limit: MAX_NODE_TOTAL,
+            });
         }
         Ok(())
     }
@@ -1556,6 +1566,41 @@ mod security_tests {
         doc
     }
 
+    /// ARCH-13 测试辅助：构造深度超限的 PenDocument（直调 validate_limits 路径）。
+    fn build_deep_doc() -> PenDocument {
+        let mut doc = PenDocument::new();
+        let mut node = PenNode::rect("leaf", 0.0, 0.0, 1.0, 1.0);
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            let mut parent = PenNode::rect("n", 0.0, 0.0, 1.0, 1.0);
+            parent.children = vec![node];
+            node = parent;
+        }
+        doc.add_page(Page {
+            id: "p".into(),
+            name: "p".into(),
+            width: 1.0,
+            height: 1.0,
+            nodes: vec![node],
+        });
+        doc
+    }
+
+    /// ARCH-13 测试辅助：构造总数超限的 PenDocument（直调 validate_limits 路径）。
+    fn build_many_nodes_doc() -> PenDocument {
+        let mut doc = PenDocument::new();
+        let nodes: Vec<PenNode> = (0..(MAX_NODE_TOTAL + 5))
+            .map(|i| PenNode::rect(format!("n{i}"), 0.0, 0.0, 1.0, 1.0))
+            .collect();
+        doc.add_page(Page {
+            id: "p".into(),
+            name: "p".into(),
+            width: 1.0,
+            height: 1.0,
+            nodes,
+        });
+        doc
+    }
+
     #[test]
     fn from_json_rejects_deeply_nested() {
         // 恶意 .fusiondesign：深度嵌套 children 超过 MAX_NODE_DEPTH → 拒绝
@@ -1767,6 +1812,69 @@ mod security_tests {
             SCHEMA_VERSION + 1
         );
         let err = PenDocument::from_json(&json).unwrap_err();
-        assert!(format!("{err}").contains("高于当前支持"), "got: {err}");
+        // ARCH-13：返 CanvasError::SchemaVersion 变体，下游可 downcast 区分 upgrade-needed
+        assert!(matches!(err, CanvasError::SchemaVersion(_)), "got: {err:?}");
+    }
+
+    /// ARCH-13：from_json 返 CanvasError 变体，下游可按变体 match 区分
+    /// corrupt-file vs upgrade-needed，不再 anyhow opaque 字符串匹配。
+    #[test]
+    fn from_json_returns_canvas_error_variants() {
+        // 坏 JSON → ParseError
+        let err = PenDocument::from_json("{not valid json").unwrap_err();
+        assert!(
+            matches!(err, CanvasError::ParseError(_)),
+            "坏 JSON 应返 ParseError, got: {err:?}"
+        );
+
+        // schema 版本过高 → SchemaVersion
+        let json = format!(
+            "{{\"schema_version\": {}, \"pages\": []}}",
+            SCHEMA_VERSION + 1
+        );
+        let err = PenDocument::from_json(&json).unwrap_err();
+        assert!(
+            matches!(err, CanvasError::SchemaVersion(v) if v == SCHEMA_VERSION + 1),
+            "未来版本应返 SchemaVersion, got: {err:?}"
+        );
+
+        // 深度超限：from_json 经 custom Deserialize 折叠为 ParseError（validate_limits
+        // 经 serde::de::Error::custom）；变体区分需直调 validate_limits。
+        let mut deep =
+            String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
+        let mut node = String::from(
+            r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#,
+        );
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            node.push_str(
+                r#"{"id":"n","kind":"rect","name":"n","x":0,"y":0,"w":1,"h":1,"children":["#,
+            );
+        }
+        for _ in 0..(MAX_NODE_DEPTH + 5) {
+            node.push_str("]}");
+        }
+        deep.push_str(&node);
+        deep.push_str("]}],\"variables\":null,\"active_design_system\":null}");
+        // from_json 路径：ParseError（描述含校验失败信息）
+        let err = PenDocument::from_json(&deep).unwrap_err();
+        assert!(
+            matches!(err, CanvasError::ParseError(_)),
+            "from_json 深度超限折叠为 ParseError, got: {err:?}"
+        );
+        // validate_limits 直调：保留 DepthExceeded 变体（ARCH-13 下游 downcast 面）
+        let deep_doc = build_deep_doc();
+        let err = deep_doc.validate_limits().unwrap_err();
+        assert!(
+            matches!(err, CanvasError::DepthExceeded { depth, limit } if depth > limit && limit == MAX_NODE_DEPTH),
+            "validate_limits 深度超限应返 DepthExceeded, got: {err:?}"
+        );
+
+        // 总数超限：同上，from_json 折叠 ParseError，validate_limits 保留变体
+        let many_doc = build_many_nodes_doc();
+        let err = many_doc.validate_limits().unwrap_err();
+        assert!(
+            matches!(err, CanvasError::NodeTotalExceeded { total, limit } if total > limit && limit == MAX_NODE_TOTAL),
+            "validate_limits 总数超限应返 NodeTotalExceeded, got: {err:?}"
+        );
     }
 }

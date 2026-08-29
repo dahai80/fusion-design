@@ -15,7 +15,6 @@ path = "src/lib.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 # A-5：CSS 安全工具下沉为独立叶子 crate，此处 re-export 保持下游调用方不变。
 fd-css-utils = { path = "../fd-css-utils" }
