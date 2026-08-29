@@ -28,6 +28,9 @@ use std::sync::{Arc, LazyLock};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+mod stream;
+pub use stream::parse_sse_line;
+
 // ── fusion-mlx 本地推理客户端 ──
 //
 // fusion-mlx 以本地 HTTP 服务（127.0.0.1:port）暴露 chat completions 接口，
@@ -904,32 +907,10 @@ pub async fn chat_stream_messages(
                                 .trim()
                                 .to_string();
                             buffer.drain(..=line_end);
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    return Some((
-                                        Ok(MlxStreamDelta {
-                                            token: String::new(),
-                                            finished: true,
-                                        }),
-                                        (stream, buffer, idle, idle_secs),
-                                    ));
-                                }
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
-                                {
-                                    let content = parsed["choices"][0]["delta"]["content"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if !content.is_empty() {
-                                        return Some((
-                                            Ok(MlxStreamDelta {
-                                                token: content,
-                                                finished: false,
-                                            }),
-                                            (stream, buffer, idle, idle_secs),
-                                        ));
-                                    }
-                                }
+                            // ARCH-10 round-2：strip-data/[DONE]/JSON/抽 content 逻辑
+                            // 外移至 stream::parse_sse_line（单一真相源），此处仅消费 delta。
+                            if let Some(delta) = parse_sse_line(&line) {
+                                return Some((Ok(delta), (stream, buffer, idle, idle_secs)));
                             }
                         }
                         // R-12：while-drain 后残留 = 跨 chunk 半截行（无换行）。
@@ -967,32 +948,9 @@ pub async fn chat_stream_messages(
                                 .trim()
                                 .to_string();
                             buffer.drain(..=line_end);
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    return Some((
-                                        Ok(MlxStreamDelta {
-                                            token: String::new(),
-                                            finished: true,
-                                        }),
-                                        (stream, buffer, idle, idle_secs),
-                                    ));
-                                }
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
-                                {
-                                    let content = parsed["choices"][0]["delta"]["content"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if !content.is_empty() {
-                                        return Some((
-                                            Ok(MlxStreamDelta {
-                                                token: content,
-                                                finished: false,
-                                            }),
-                                            (stream, buffer, idle, idle_secs),
-                                        ));
-                                    }
-                                }
+                            // ARCH-10 round-2：复用 stream::parse_sse_line 单一真相源。
+                            if let Some(delta) = parse_sse_line(&line) {
+                                return Some((Ok(delta), (stream, buffer, idle, idle_secs)));
                             }
                         }
                         // 无换行的尾部残行（上游没补换行就关连接）：按整行解析。
@@ -1000,32 +958,9 @@ pub async fn chat_stream_messages(
                         let tail = String::from_utf8_lossy(&buffer).trim().to_string();
                         if !tail.is_empty() {
                             buffer.clear();
-                            if let Some(data) = tail.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    return Some((
-                                        Ok(MlxStreamDelta {
-                                            token: String::new(),
-                                            finished: true,
-                                        }),
-                                        (stream, buffer, idle, idle_secs),
-                                    ));
-                                }
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
-                                {
-                                    let content = parsed["choices"][0]["delta"]["content"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if !content.is_empty() {
-                                        return Some((
-                                            Ok(MlxStreamDelta {
-                                                token: content,
-                                                finished: false,
-                                            }),
-                                            (stream, buffer, idle, idle_secs),
-                                        ));
-                                    }
-                                }
+                            // ARCH-10 round-2：尾残行同样复用 parse_sse_line（单一真相源）。
+                            if let Some(delta) = parse_sse_line(&tail) {
+                                return Some((Ok(delta), (stream, buffer, idle, idle_secs)));
                             }
                         }
                         return None;
