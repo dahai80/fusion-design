@@ -80,7 +80,9 @@ echo "==> 打包 tar.gz"
 tar -czf "$DIST/${PKG}.tar.gz" -C "$DIST" "$PKG"
 
 # OPS-7：SHA256 校验件（无需 Apple secret，始终生成）。
-shasum -a 256 "$DIST/${PKG}.tar.gz" > "$DIST/${PKG}.tar.gz.sha256"
+# 在 $DIST 内对相对文件名跑 shasum，否则 .sha256 记录绝对路径，
+# 用户解压后 shasum -c 因路径不存在而失败（已发布件路径为 CI /Users/runner/...）。
+( cd "$DIST" && shasum -a 256 "${PKG}.tar.gz" ) > "$DIST/${PKG}.tar.gz.sha256"
 echo "  已生成 ${PKG}.tar.gz.sha256"
 echo "  校验：shasum -a 256 -c ${PKG}.tar.gz.sha256"
 
@@ -112,7 +114,7 @@ if [ -n "${APPLE_DEV_ID:-}" ] && [ -n "${APP_SPECIFIC_PW:-}" ] && [ -n "${TEAM_I
     fi
     # 签名后重新打包（codesign 改了二进制）+ 刷新 SHA256。
     tar -czf "$DIST/${PKG}.tar.gz" -C "$DIST" "$PKG"
-    shasum -a 256 "$DIST/${PKG}.tar.gz" > "$DIST/${PKG}.tar.gz.sha256"
+    ( cd "$DIST" && shasum -a 256 "${PKG}.tar.gz" ) > "$DIST/${PKG}.tar.gz.sha256"
     echo "  签名后重打包 + 刷新 sha256"
 else
     echo "==> OPS-7: [warn] 跳过签名（缺 APPLE_DEV_ID/APP_SPECIFIC_PW/TEAM_ID secret）" >&2
