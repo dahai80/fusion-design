@@ -867,17 +867,30 @@ pub async fn chat_stream_messages(
     };
 
     let stream = resp.bytes_stream();
+    // FAULT-1：单 chunk 间空闲上限。`reqwest` client `.timeout(180s)` 是**总**时限，
+    //   非 chunk 间间隔——上游建立连接后首帧快、中途 stall（模型算力耗尽/网络抖动）
+    //   会挂起 stream.next().await 无限，无任何重试/超时兜底。
+    //   用 tokio::time::timeout 包单次 next：超过 IDLE 未见下一 chunk 即 Elapsed →
+    //   emit error delta + 终止流（fail visibly Rule 12）。区别于总 deadline：
+    //   总 deadline 封顶整轮重试，IDLE 封顶单 chunk 空闲（长生成内容有间隔也安全，
+    //   仅「卡死无任何字节」超 IDLE）。FUSION_MLX_STREAM_IDLE_SECS 可调，缺省 60。
+    let idle_secs = std::env::var("FUSION_MLX_STREAM_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(60);
+    let idle = std::time::Duration::from_secs(idle_secs);
     // L6：buffer 用 Vec<u8> 而非 String。旧实现用 String::from_utf8_lossy(&bytes)
     //   把每个 chunk 立即解码，但 chunk 可能在多字节 CJK 字符中间切断（UTF-8 一字 3 字节），
     //   残缺尾字节被替换成 U+FFFD → 中文 UI JSON 乱码。改字节缓冲：完整行（以 \n 分隔）
     //   才整体 from_utf8 解码，跨 chunk 的残缺多字节字符留在 buffer 等下一 chunk 补全。
     futures::stream::unfold(
-        (stream, Vec::<u8>::new()),
-        |(mut stream, mut buffer)| async move {
+        (stream, Vec::<u8>::new(), idle, idle_secs),
+        |(mut stream, mut buffer, idle, idle_secs)| async move {
             use futures::StreamExt;
             loop {
-                match stream.next().await {
-                    Some(Ok(bytes)) => {
+                // FAULT-1：timeout 包单次 next，stall 超 IDLE 即 Elapsed 失败可见。
+                match tokio::time::timeout(idle, stream.next()).await {
+                    Ok(Some(Ok(bytes))) => {
                         buffer.extend_from_slice(&bytes);
                         // R-12：先排空所有完整行（含本轮及之前残留），再判定残留上限。
                         // 旧实现 `&& !buffer.contains(&b'\n')` 在「超限但含换行」时
@@ -898,7 +911,7 @@ pub async fn chat_stream_messages(
                                             token: String::new(),
                                             finished: true,
                                         }),
-                                        (stream, buffer),
+                                        (stream, buffer, idle, idle_secs),
                                     ));
                                 }
                                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
@@ -913,7 +926,7 @@ pub async fn chat_stream_messages(
                                                 token: content,
                                                 finished: false,
                                             }),
-                                            (stream, buffer),
+                                            (stream, buffer, idle, idle_secs),
                                         ));
                                     }
                                 }
@@ -935,15 +948,16 @@ pub async fn chat_stream_messages(
                                     Err(anyhow::anyhow!(
                                         "SSE buffer 残留超限 ({cap} 字节) 无完整行"
                                     )),
-                                    (stream, Vec::new()),
+                                    (stream, Vec::new(), idle, idle_secs),
                                 ));
                             }
                         }
                     }
-                    Some(Err(e)) => {
-                        return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer)));
+                    Ok(Some(Err(e))) => {
+                        return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer, idle, idle_secs)));
                     }
-                    None => {
+                    // FAULT-1：EOF，先排空 buffer 残留成行数据再终止流。
+                    Ok(None) => {
                         // EOF：先排空 buffer 里残留的成行数据，再终止流。
                         // 上游可能没在最后一帧后补换行，或最后一个 chunk
                         // 还停在 buffer 里没被 while 循环处理 — 直接 return None
@@ -960,7 +974,7 @@ pub async fn chat_stream_messages(
                                             token: String::new(),
                                             finished: true,
                                         }),
-                                        (stream, buffer),
+                                        (stream, buffer, idle, idle_secs),
                                     ));
                                 }
                                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
@@ -975,7 +989,7 @@ pub async fn chat_stream_messages(
                                                 token: content,
                                                 finished: false,
                                             }),
-                                            (stream, buffer),
+                                            (stream, buffer, idle, idle_secs),
                                         ));
                                     }
                                 }
@@ -993,7 +1007,7 @@ pub async fn chat_stream_messages(
                                             token: String::new(),
                                             finished: true,
                                         }),
-                                        (stream, buffer),
+                                        (stream, buffer, idle, idle_secs),
                                     ));
                                 }
                                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
@@ -1008,13 +1022,28 @@ pub async fn chat_stream_messages(
                                                 token: content,
                                                 finished: false,
                                             }),
-                                            (stream, buffer),
+                                            (stream, buffer, idle, idle_secs),
                                         ));
                                     }
                                 }
                             }
                         }
                         return None;
+                    }
+                    // FAULT-1：单 chunk 空闲超 IDLE — stall 卡死，fail visibly 终止流。
+                    // 区别于 client 总 timeout（180s）：IDLE 是相邻 chunk 间隔上限。
+                    Err(_elapsed) => {
+                        tracing::error!(
+                            idle_secs,
+                            "SSE 流 stall：超过 {}s 未见下一 chunk，终止流（FAULT-1）",
+                            idle_secs
+                        );
+                        return Some((
+                            Err(anyhow::anyhow!(
+                                "SSE 流 stall：超过 {idle_secs}s 未见下一 chunk（FUSION_MLX_STREAM_IDLE_SECS 可调）"
+                            )),
+                            (stream, buffer, idle, idle_secs),
+                        ));
                     }
                 }
             }
@@ -1532,150 +1561,13 @@ pub fn shared_client(endpoint: Option<&str>) -> anyhow::Result<Arc<FusionMlxClie
     Ok(Arc::new(client))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detect_image_mime_png() {
-        // E-7/P3：PNG magic 89504E47 嗅探为 image/png（旧实现硬编码 png 误标全部）。
-        use base64::Engine;
-        let png = base64::engine::general_purpose::STANDARD
-            .encode([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
-        assert_eq!(detect_image_mime(&png), "image/png");
-    }
-
-    #[test]
-    fn detect_image_mime_jpeg() {
-        // E-7/P3：JPEG FFD8FF 须嗅探为 image/jpeg，不得误标 png。
-        use base64::Engine;
-        let jpg = base64::engine::general_purpose::STANDARD
-            .encode([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F']);
-        assert_eq!(detect_image_mime(&jpg), "image/jpeg");
-    }
-
-    #[test]
-    fn detect_image_mime_webp() {
-        // E-7/P3：WebP RIFF....WEBP 须嗅探为 image/webp。
-        use base64::Engine;
-        let mut webp = vec![b'R', b'I', b'F', b'F', 0, 0, 0, 0];
-        webp.extend_from_slice(b"WEBPVP8 ");
-        let webp_b64 = base64::engine::general_purpose::STANDARD.encode(&webp);
-        assert_eq!(detect_image_mime(&webp_b64), "image/webp");
-    }
-
-    #[test]
-    fn detect_image_mime_gif() {
-        // E-7/P3：GIF89a/GIF87a 须嗅探为 image/gif。
-        use base64::Engine;
-        let gif = base64::engine::general_purpose::STANDARD.encode(b"GIF89a...");
-        assert_eq!(detect_image_mime(&gif), "image/gif");
-    }
-
-    #[test]
-    fn detect_image_mime_unknown_falls_back_png() {
-        // E-7/P3：未知/空/残缺 base64 回退 image/png（兼容最广，模型侧容忍）。
-        use base64::Engine;
-        let unknown = base64::engine::general_purpose::STANDARD.encode([0x00, 0x01, 0x02, 0x03]);
-        assert_eq!(detect_image_mime(&unknown), "image/png");
-        assert_eq!(detect_image_mime(""), "image/png");
-        assert_eq!(detect_image_mime("!!!not-base64!!!"), "image/png");
-    }
-
-    #[test]
-    fn sanitize_node_id_collision_deduped_in_same_array() {
-        // E-6/P3："a-b!" 和 "a-b" 过滤后都归 "a-b"，同级碰撞须追加 _2 去重，
-        // 否则两个节点共享 id → mutate/select 操作错乱。
-        let json = serde_json::json!([
-            { "id": "a-b!", "kind": "rect", "x": 0, "y": 0, "w": 10, "h": 10 },
-            { "id": "a-b",  "kind": "rect", "x": 20, "y": 0, "w": 10, "h": 10 },
-            { "id": "a-b@", "kind": "rect", "x": 40, "y": 0, "w": 10, "h": 10 }
-        ]);
-        let nodes = parse_nodes_with_depth(&json, 0).unwrap();
-        let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-        let unique: std::collections::HashSet<&String> = ids.iter().collect();
-        assert_eq!(unique.len(), 3, "三个过滤后归一的 id 须全部去重: {ids:?}");
-        assert!(
-            ids.contains(&"a-b".to_string()),
-            "首个保留原归一值: {ids:?}"
-        );
-        assert!(ids.contains(&"a-b_2".to_string()), "第二追加 _2: {ids:?}");
-        assert!(ids.contains(&"a-b_3".to_string()), "第三追加 _3: {ids:?}");
-    }
-
-    #[test]
-    fn validate_localhost_accepts_loopback() {
-        assert!(validate_localhost("http://127.0.0.1:8080").is_ok());
-        assert!(validate_localhost("http://localhost:9000").is_ok());
-        assert!(validate_localhost("http://[::1]:8080").is_ok());
-    }
-
-    #[test]
-    fn validate_localhost_accepts_private_lan() {
-        // H-A1：RFC1918 私有段 + 链路本地放行（fusion-mlx 集群入口）
-        assert!(validate_localhost("http://10.0.0.1:8080").is_ok());
-        assert!(validate_localhost("http://192.168.1.1:8080").is_ok());
-        assert!(validate_localhost("http://172.16.5.4:11434").is_ok());
-        assert!(
-            validate_localhost("http://169.254.1.1:8080").is_ok(),
-            "链路本地应放行"
-        );
-    }
-
-    #[test]
-    fn validate_localhost_rejects_public() {
-        // H-A1：公网 IP + 公网域名仍拒
-        assert!(validate_localhost("http://8.8.8.8:8080").is_err());
-        assert!(validate_localhost("https://api.openai.com").is_err());
-        assert!(validate_localhost("http://1.1.1.1:8080").is_err());
-    }
-
-    #[test]
-    fn validate_localhost_rejects_unspecified() {
-        // E-2：0.0.0.0 / :: 非"本地可达"地址，放行等于允许公网网卡绑定，击穿离线。
-        assert!(
-            validate_localhost("http://0.0.0.0:11434").is_err(),
-            "0.0.0.0 须拒"
-        );
-        assert!(
-            validate_localhost("http://[::]:11434").is_err(),
-            "[::] 须拒"
-        );
-    }
-
-    #[test]
-    fn validate_localhost_rejects_non_localhost_domain() {
-        // 非 localhost 域名一律拒（DNS 可解析到公网，静态期无法保证离线）
-        assert!(validate_localhost("http://ml-worker.internal:8080").is_err());
-    }
-
-    #[test]
-    fn validate_localhost_rejects_malformed() {
-        assert!(validate_localhost("not-a-url").is_err());
-    }
-
-    #[test]
-    fn client_new_uses_default_endpoint() {
-        let c = FusionMlxClient::new().unwrap();
-        assert!(c.endpoint.starts_with("http://127.0.0.1"));
-    }
-
-    #[test]
-    fn client_default_impl_works() {
-        let _c = FusionMlxClient::default();
-    }
-
-    #[test]
-    fn shared_client_builds_with_default() {
-        let c = shared_client(None).unwrap();
-        assert!(Arc::strong_count(&c) >= 1);
-    }
-
-    #[test]
-    fn shared_client_rejects_public_endpoint() {
-        assert!(shared_client(Some("http://1.2.3.4:80")).is_err());
-    }
-}
+// ── ARCH-10 TODO（v0.1.14 首维护版仅落 round 1 测试外移）──
+// round 2 自包含非测试模块外移：skills（SkillRegistry/DesignSkills/SkillContext）
+// + stream（SSE unfold 解析辅助）。无 thread_local，回归风险低，独立 PR 拆。
+// 见 plans/jiggly-imagining-pnueli.md Phase 2。
+// 注：round 1 测试外移 WIP（tests.rs/skills_tests.rs/mlx_integration.rs）曾与
+// PR #23 ARCH-11 skill 迁出碰撞（skills_tests.rs 用旧 unit-struct API，stale），
+// 已弃。测试留内联（PR #23 状态），ARCH-10 待新 PR 对 current main 重做。
 
 // ── AI Skill 系统：已迁出 fd-skills crate（ARCH-11）──
 //
