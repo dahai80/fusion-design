@@ -42,6 +42,24 @@ jobs:
       - name: WASM build (fd-host-web)
         run: cargo build -p fd-host-web --target wasm32-unknown-unknown
 
+      # OPS-11：WASM E2E harness 入 CI（headless chromium）。
+      # 复用 docs/harness/ 8 用例（harness.js 加载即 runAll 写 #summary）。
+      # 产品码 100% 离线约束不受影响——playwright 是 CI 工具链依赖非产品依赖。
+      - name: WASM bindgen post-step (harness pkg)
+        run: |
+          cargo install wasm-bindgen-cli --locked --version 0.2.126
+          wasm-bindgen --target web --out-dir docs/harness/pkg \
+            target/wasm32-unknown-unknown/debug/fd_host_web.wasm
+
+      - name: Install Playwright
+        run: |
+          npm init -y >/dev/null
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: WASM E2E harness (headless)
+        run: node Scripts/wasm-harness-check.mjs
+
   # 修复 E-35：macOS 盲区。main/PR 只跑 ubuntu，macOS 原生工具链
   # （链接器/libsystem/大小写敏感文件系统/临时目录布局）差异到 tag 才暴露。
   # 源码无 macOS 特定 cfg，但 release bin 是 aarch64-apple-darwin，须在
@@ -155,10 +173,18 @@ jobs:
         run: cargo install wasm-bindgen-cli --locked --version 0.2.126
 
       - name: Build release tarball
+        env:
+          # OPS-7：可选全签名管线。三个 secret 齐全 → codesign+notarytool+stapler；
+          # 缺任一（未配置时 GitHub 注入空串）→ build.sh warn+skip 出未签名件，不阻断。
+          APPLE_DEV_ID: ${{ secrets.APPLE_DEV_ID }}
+          APP_SPECIFIC_PW: ${{ secrets.APP_SPECIFIC_PW }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
         run: ./Scripts/build.sh
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
           name: fusion-design-release
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256

@@ -39,3 +39,6 @@ fd-host-desk = { path = "../fd-host-desk" }
 
 [dev-dependencies]
 tempfile = "3"
+# OPS-10：集成测试需 TcpListener 起 mock 127.0.0.1 health 端点（不引 mock server crate）。
+# multi_thread runtime：output() 阻塞当前 worker，单线程会饿死 mock accept 任务。
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }

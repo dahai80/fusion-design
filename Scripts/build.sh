@@ -55,6 +55,9 @@ cp "$ROOT/README.md" "$STAGE/README.md" 2>/dev/null || echo "（无 README.md，
 cat > "$STAGE/INSTALL.md" <<EOF
 # Fusion-Design ${VERSION} (Apple Silicon, offline)
 
+## 校验完整性（可选，tarball 同目录附 .sha256）
+  shasum -a 256 -c ${PKG}.tar.gz.sha256
+
 ## 安装
   sudo tar -xzf ${PKG}.tar.gz -C /usr/local
   ln -sf /usr/local/${PKG}/fusion-design /usr/local/bin/fusion-design
@@ -63,6 +66,11 @@ cat > "$STAGE/INSTALL.md" <<EOF
   启动 fusion-mlx 本地推理（127.0.0.1:11434）或 fusion-gateway（11432）。
   经 FUSION_MLX_BASE_URL 覆盖 endpoint；FUSION_MLX_API_KEY 设鉴权 key。
 
+## Gatekeeper 说明
+  独立 tarball 未签名公证时，首次运行可能被 Gatekeeper 拦截：
+  xattr -d com.apple.quarantine /usr/local/${PKG}/fusion-design
+  主渠道经 fusion-studio DMG（已签名公证）安装则无此限。
+
 ## 验证
   fusion-design --version
   fusion-design check-mlx
@@ -70,6 +78,46 @@ EOF
 
 echo "==> 打包 tar.gz"
 tar -czf "$DIST/${PKG}.tar.gz" -C "$DIST" "$PKG"
+
+# OPS-7：SHA256 校验件（无需 Apple secret，始终生成）。
+shasum -a 256 "$DIST/${PKG}.tar.gz" > "$DIST/${PKG}.tar.gz.sha256"
+echo "  已生成 ${PKG}.tar.gz.sha256"
+echo "  校验：shasum -a 256 -c ${PKG}.tar.gz.sha256"
+
+# OPS-7：可选全签名管线（env-gated，缺 secret 时 warn+skip 不阻断）。
+# 主渠道 fd-cli 继承 fusion-studio 已签名公证容器；独立 tarball 受 Gatekeeper 限。
+# 三个 secret 齐全 → codesign + notarytool + stapler；缺任一 → 跳过出未签名件。
+if [ -n "${APPLE_DEV_ID:-}" ] && [ -n "${APP_SPECIFIC_PW:-}" ] && [ -n "${TEAM_ID:-}" ]; then
+    echo "==> OPS-7: 签名管线启用（APPLE_DEV_ID/APP_SPECIFIC_PW/TEAM_ID 齐全）"
+    BIN="$STAGE/fusion-design"
+    echo "  [1/3] codesign --options runtime"
+    if codesign --force --options runtime --sign "$APPLE_DEV_ID" "$BIN"; then
+        echo "    codesign OK"
+    else
+        echo "    [warn] codesign 失败，回退未签名件" >&2
+    fi
+    echo "  [2/3] notarytool submit --wait"
+    if xcrun notarytool submit "$DIST/${PKG}.tar.gz" \
+        --apple-id "$APPLE_DEV_ID" --password "$APP_SPECIFIC_PW" \
+        --team-id "$TEAM_ID" --wait; then
+        echo "    notarytool OK"
+    else
+        echo "    [warn] notarytool 失败（网络/凭证问题），继续" >&2
+    fi
+    echo "  [3/3] stapler staple"
+    if xcrun stapler staple "$BIN"; then
+        echo "    stapler OK"
+    else
+        echo "    [warn] stapler 失败，继续（已签名未装订）" >&2
+    fi
+    # 签名后重新打包（codesign 改了二进制）+ 刷新 SHA256。
+    tar -czf "$DIST/${PKG}.tar.gz" -C "$DIST" "$PKG"
+    shasum -a 256 "$DIST/${PKG}.tar.gz" > "$DIST/${PKG}.tar.gz.sha256"
+    echo "  签名后重打包 + 刷新 sha256"
+else
+    echo "==> OPS-7: [warn] 跳过签名（缺 APPLE_DEV_ID/APP_SPECIFIC_PW/TEAM_ID secret）" >&2
+    echo "    独立 tarball 受 Gatekeeper 限，主渠道经 fusion-studio 已签名公证容器" >&2
+fi
 
 echo "==> 完成: dist/${PKG}.tar.gz"
 ls -lh "$DIST/${PKG}.tar.gz"
