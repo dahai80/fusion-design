@@ -215,8 +215,26 @@ impl Exporter {
         format: ExportFormat,
         out_dir: &Path,
     ) -> Result<Vec<PathBuf>, ExportError> {
-        let pages: Vec<CanvasPage> = doc.pages.iter().map(CanvasPage::from_page).collect();
-        Self::export_batch(&pages, format, out_dir)
+        // PERF-4：逐页转换+导出+释放，避免一次性 collect 全部 CanvasPage 占峰值内存。
+        // 大文档（validate_limits 上限 100k 节点）多页时，旧 collect 把所有页同时驻留。
+        let mut files = Vec::with_capacity(doc.pages.len());
+        let mut errors: Vec<String> = Vec::new();
+        for page in &doc.pages {
+            let canvas_page = CanvasPage::from_page(page);
+            match Self::export_page(&canvas_page, format, out_dir) {
+                Ok(f) => files.push(f),
+                Err(e) => errors.push(format!("页面 '{}' 导出失败: {e}", canvas_page.name)),
+            }
+            // canvas_page 循环末释放，下一页不叠加上一页内存。
+        }
+        if !errors.is_empty() {
+            tracing::error!(count = errors.len(), "from_pen_document: 部分页面导出失败");
+            return Err(ExportError::BatchPartial {
+                count: errors.len(),
+                detail: errors.join("\n"),
+            });
+        }
+        Ok(files)
     }
 
     /// 从 PenDocument 导出，导出前用当前激活设计规范解析 `var(--token)` / `token:` 颜色引用。
@@ -227,11 +245,28 @@ impl Exporter {
         out_dir: &Path,
         reg: &DesignSystemRegistry,
     ) -> Result<Vec<PathBuf>, ExportError> {
-        let mut pages: Vec<CanvasPage> = doc.pages.iter().map(CanvasPage::from_page).collect();
-        for page in &mut pages {
-            resolve_page_token_vars(page, reg);
+        // PERF-4：逐页转换+token 解析+导出+释放，避免一次性 collect 全部 CanvasPage 占峰值内存。
+        let mut files = Vec::with_capacity(doc.pages.len());
+        let mut errors: Vec<String> = Vec::new();
+        for page in &doc.pages {
+            let mut canvas_page = CanvasPage::from_page(page);
+            resolve_page_token_vars(&mut canvas_page, reg);
+            match Self::export_page(&canvas_page, format, out_dir) {
+                Ok(f) => files.push(f),
+                Err(e) => errors.push(format!("页面 '{}' 导出失败: {e}", canvas_page.name)),
+            }
         }
-        Self::export_batch(&pages, format, out_dir)
+        if !errors.is_empty() {
+            tracing::error!(
+                count = errors.len(),
+                "from_pen_document_with_tokens: 部分页面导出失败"
+            );
+            return Err(ExportError::BatchPartial {
+                count: errors.len(),
+                detail: errors.join("\n"),
+            });
+        }
+        Ok(files)
     }
 
     /// 导出单页到指定格式。
@@ -1534,6 +1569,34 @@ mod tests {
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
         assert!(content.contains("world"));
+    }
+
+    #[test]
+    fn from_pen_document_multi_page_streams() {
+        // PERF-4：多页逐页流式导出，每页产出独立文件，无全量 collect 峰值。
+        // 回归锁定：多页 from_pen_document 须逐页导出全部页（不漏页）。
+        let tmp = tempdir().unwrap();
+        let mut doc = fd_canvas_core::PenDocument::new();
+        for i in 0..5 {
+            let mut page =
+                fd_canvas_core::Page::new(&format!("p{i}"), &format!("Page{i}"), 100.0, 100.0);
+            page.add(fd_canvas_core::PenNode::text(
+                "n",
+                10.0,
+                10.0,
+                &format!("mark{i}"),
+            ));
+            doc.add_page(page);
+        }
+        let files = Exporter::from_pen_document(&doc, ExportFormat::Svg, tmp.path()).unwrap();
+        assert_eq!(files.len(), 5, "5 页须全导出");
+        for (i, f) in files.iter().enumerate() {
+            let content = std::fs::read_to_string(f).unwrap();
+            assert!(
+                content.contains(&format!("mark{i}")),
+                "第 {i} 页内容须对应: {content}"
+            );
+        }
     }
 
     #[test]
