@@ -57,8 +57,9 @@ pub(crate) use render_canvas::{
 // 零逻辑改，仅迁位置 + 必要可见性 pub(crate)。模块名 events 与迁入 fn 无重名。
 // re-export 集：6 setup_*_listener（render_dom.rs 调）+ 6 CSS helper（lib.rs node ops 调）
 // 共 12 项经 pub(crate) use 消解跨模块可见性，render_dom.rs/tests.rs 调用站不动。
-// thread_local (ACTIVE_DRAG_MOVE/PENDING_DRAG_UP/RESIZE_HANDLES) + DragMoveClosure +
-// cleanup_pending_drag + 3 const + 6 snap/selector helper 留 lib.rs 加 pub(crate)。
+// ARCH-10 round-3：拖拽 thread_local（ACTIVE_DRAG_MOVE/PENDING_DRAG_UP/RESIZE_HANDLES）+
+// DragMoveClosure + cleanup_pending_drag 迁 events.rs（主消费方归位）。lib.rs select_node
+// 路径经反向 use 消费。R-1 注释随迁。
 pub(crate) mod events;
 #[allow(unused_imports)]
 pub(crate) use events::{
@@ -67,6 +68,9 @@ pub(crate) use events::{
     setup_delegated_click_listener, setup_delegated_mousedown_listener, setup_marquee_listener,
     strip_css_prop, update_node_position, RAF_SCHEDULED,
 };
+// ARCH-10 round-3：拖拽全局态反向导入（定义已迁 events.rs，本 crate select_node 路径消费）。
+#[allow(unused_imports)]
+pub(crate) use events::{cleanup_pending_drag, ACTIVE_DRAG_MOVE, PENDING_DRAG_UP, RESIZE_HANDLES};
 
 fn css_escape_attr_value(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -80,71 +84,6 @@ pub(crate) fn node_selector(node_id: &str) -> String {
 
 pub(crate) static SHELL: LazyLock<Mutex<Option<WebShellInner>>> =
     LazyLock::new(|| Mutex::new(None));
-
-// R-1：拖拽/平移/框选/resize 的 on_move Closure 暂存（替代 forget 泄漏）。
-// 旧实现 .forget() 导致每次拖拽泄漏一个 FnMut Closure，长会话线性内存增长。
-// mousedown 存入，mouseup take() + remove_event_listener → Closure drop 回收内存。
-// thread_local 规避 Send 约束（Closure<dyn FnMut> 非 Send，wasm 单线程安全）。
-pub(crate) type DragMoveClosure = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>;
-thread_local! {
-    pub(crate) static ACTIVE_DRAG_MOVE: std::cell::RefCell<Option<DragMoveClosure>> =
-        const { std::cell::RefCell::new(None) };
-    // R-1 backfill：拖拽/平移/框选/resize 的 on_up Closure 暂存。
-    // 旧 .forget() 在 mouseup 未触发（鼠标拖拽中途离开窗口）时永久泄漏该 Closure。
-    // 每次 mousedown 前调 cleanup_pending_drag() 回收上一轮残留的 on_up + on_move，
-    // 消除"漏 mouseup 即泄漏"路径。on_up 触发时也 take + drop。
-    pub(crate) static PENDING_DRAG_UP: std::cell::RefCell<Option<DragMoveClosure>> =
-        const { std::cell::RefCell::new(None) };
-    // R-1 backfill：resize handle 的 on_handle_mousedown Closure 暂存（每选中节点 8 个）。
-    // 旧 .forget() 每次 select_node 切换选中泄漏 8 个 Closure（长会话线性增长）。
-    // select_node 重建前 clear() 丢弃上一批 8 个。
-    pub(crate) static RESIZE_HANDLES: std::cell::RefCell<Vec<DragMoveClosure>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-// R-1 backfill：拖拽开始前回收上一轮残留监听。
-// 处理"mouseup 漏触发"场景——鼠标拖拽中途离开窗口，mouseup 永不到达，
-// 旧 on_up（PENDING_DRAG_UP）+ on_move（ACTIVE_DRAG_MOVE）成为悬空监听 + 泄漏 Closure。
-// 此处 remove_event_listener 后 drop Closure，避免下一轮拖拽叠加 + 线性内存增长。
-// 失败仅 .ok()：监听器可能已被 on_up 触发时移除，重复移除无碍。
-pub(crate) fn cleanup_pending_drag() {
-    if let Some(w) = web_sys::window() {
-        ACTIVE_DRAG_MOVE.with(|c| {
-            if let Some(cl) = c.borrow_mut().take() {
-                let mv_ref: &js_sys::Function = cl.as_ref().unchecked_ref();
-                w.remove_event_listener_with_callback("mousemove", mv_ref)
-                    .ok();
-                drop(cl);
-                web_sys::console::warn_1(
-                    &"fd-host-web: R-1 回收上一轮残留 on_move（mouseup 漏触发）".into(),
-                );
-            }
-        });
-        PENDING_DRAG_UP.with(|c| {
-            if let Some(cl) = c.borrow_mut().take() {
-                let up_ref: &js_sys::Function = cl.as_ref().unchecked_ref();
-                w.remove_event_listener_with_callback("mouseup", up_ref)
-                    .ok();
-                drop(cl);
-                web_sys::console::warn_1(
-                    &"fd-host-web: R-1 回收上一轮残留 on_up（mouseup 漏触发）".into(),
-                );
-            }
-        });
-    }
-}
-
-// R-1 余 forget 站点审计裁定回溯：
-// 剩余 .forget() 站点为容器级委托监听器（setup_delegated_* / setup_* 的 click/mousedown/
-// wheel/message）——mount 一次即应用生命周期常驻，经 mark_listeners_installed 幂等保护防重复
-// attach。事件委托模式下非逐节点绑定，节点增删不新增监听器。常驻监听器 forget 是 web_sys 惯例，
-// 不随会话长度增长，无线性内存泄漏。
-// 拖拽热路径（on_move / on_up / resize handle）已全部转 stored-thread_local：
-//   - on_move → ACTIVE_DRAG_MOVE（mouseup take 回收）
-//   - on_up   → PENDING_DRAG_UP（mouseup take + 漏触发时 cleanup_pending_drag 回收）
-//   - resize handle → RESIZE_HANDLES（select_node 重建前 clear 回收上一批 8 个）
-// 若未来需 unmount 全量回收，可在此 thread_local 旁加 Vec<Closure> + unmount() drop——
-// 当前无 unmount 调用方，stored-Vec 增复杂度不解决现存泄漏，按 Rule 2 不引入。
 
 // 容器级监听器幂等保护。
 // L-15：旧实现用进程级全局 AtomicBool，容器重建（新 mount）后标志仍 true →

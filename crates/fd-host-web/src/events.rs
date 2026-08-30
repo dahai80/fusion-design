@@ -10,11 +10,82 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::{
-    cleanup_pending_drag, collect_snap_candidates, find_snap_offset, hide_snap_lines,
-    node_selector, read_attr_f32, select_node, send_bridge_event, shell_lock, show_snap_lines,
-    viewport_cull_update, BridgeEvent, ACTIVE_DRAG_MOVE, DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH,
-    MIN_MARQUEE_SIZE, PENDING_DRAG_UP,
+    collect_snap_candidates, find_snap_offset, hide_snap_lines, node_selector, read_attr_f32,
+    select_node, send_bridge_event, shell_lock, show_snap_lines, viewport_cull_update, BridgeEvent,
+    DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, MIN_MARQUEE_SIZE,
 };
+
+// ── 拖拽全局态（ARCH-10 round-3 从 lib.rs 迁入，主消费方归位）──
+// ARCH-10 round-3：3 个 thread_local + DragMoveClosure + cleanup_pending_drag 原集中
+// 定义于 lib.rs god-file，被本模块（events.rs 拖拽 on_move/on_up 存储与 take 回收）
+// 跨模块引用。主消费方在此——状态就近定义。lib.rs select_node/create_resize_handle
+// 路径经反向 pub(crate) use 消费（见 lib.rs use events::{...}）。零逻辑改，仅迁位置。
+// 可见性 pub(crate) 不变（lib.rs 仍要读）。
+
+// R-1：拖拽/平移/框选/resize 的 on_move Closure 暂存（替代 forget 泄漏）。
+// 旧实现 .forget() 导致每次拖拽泄漏一个 FnMut Closure，长会话线性内存增长。
+// mousedown 存入，mouseup take() + remove_event_listener → Closure drop 回收内存。
+// thread_local 规避 Send 约束（Closure<dyn FnMut> 非 Send，wasm 单线程安全）。
+pub(crate) type DragMoveClosure = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>;
+thread_local! {
+    pub(crate) static ACTIVE_DRAG_MOVE: std::cell::RefCell<Option<DragMoveClosure>> =
+        const { std::cell::RefCell::new(None) };
+    // R-1 backfill：拖拽/平移/框选/resize 的 on_up Closure 暂存。
+    // 旧 .forget() 在 mouseup 未触发（鼠标拖拽中途离开窗口）时永久泄漏该 Closure。
+    // 每次 mousedown 前调 cleanup_pending_drag() 回收上一轮残留的 on_up + on_move，
+    // 消除"漏 mouseup 即泄漏"路径。on_up 触发时也 take + drop。
+    pub(crate) static PENDING_DRAG_UP: std::cell::RefCell<Option<DragMoveClosure>> =
+        const { std::cell::RefCell::new(None) };
+    // R-1 backfill：resize handle 的 on_handle_mousedown Closure 暂存（每选中节点 8 个）。
+    // 旧 .forget() 每次 select_node 切换选中泄漏 8 个 Closure（长会话线性增长）。
+    // select_node 重建前 clear() 丢弃上一批 8 个。
+    pub(crate) static RESIZE_HANDLES: std::cell::RefCell<Vec<DragMoveClosure>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// R-1 backfill：拖拽开始前回收上一轮残留监听。
+// 处理"mouseup 漏触发"场景——鼠标拖拽中途离开窗口，mouseup 永不到达，
+// 旧 on_up（PENDING_DRAG_UP）+ on_move（ACTIVE_DRAG_MOVE）成为悬空监听 + 泄漏 Closure。
+// 此处 remove_event_listener 后 drop Closure，避免下一轮拖拽叠加 + 线性内存增长。
+// 失败仅 .ok()：监听器可能已被 on_up 触发时移除，重复移除无碍。
+pub(crate) fn cleanup_pending_drag() {
+    if let Some(w) = web_sys::window() {
+        ACTIVE_DRAG_MOVE.with(|c| {
+            if let Some(cl) = c.borrow_mut().take() {
+                let mv_ref: &js_sys::Function = cl.as_ref().unchecked_ref();
+                w.remove_event_listener_with_callback("mousemove", mv_ref)
+                    .ok();
+                drop(cl);
+                web_sys::console::warn_1(
+                    &"fd-host-web: R-1 回收上一轮残留 on_move（mouseup 漏触发）".into(),
+                );
+            }
+        });
+        PENDING_DRAG_UP.with(|c| {
+            if let Some(cl) = c.borrow_mut().take() {
+                let up_ref: &js_sys::Function = cl.as_ref().unchecked_ref();
+                w.remove_event_listener_with_callback("mouseup", up_ref)
+                    .ok();
+                drop(cl);
+                web_sys::console::warn_1(
+                    &"fd-host-web: R-1 回收上一轮残留 on_up（mouseup 漏触发）".into(),
+                );
+            }
+        });
+    }
+}
+
+// R-1 余 forget 站点审计裁定回溯：
+// 剩余 .forget() 站点为容器级委托监听器（setup_delegated_* / setup_* 的 click/mousedown/
+// wheel/message）——mount 一次即应用生命周期常驻，经 mark_listeners_installed 幂等保护防重复
+// attach。事件委托模式下非逐节点绑定，节点增删不新增监听器。常驻监听器 forget 是 web_sys 惯例，
+// 不随会话长度增长，无线性内存泄漏。
+// 拖拽热路径（on_move / on_up / resize handle）已全部转 stored-thread_local：
+//   - on_move → ACTIVE_DRAG_MOVE（mouseup take 回收）
+//   - on_up   → PENDING_DRAG_UP（mouseup take + 漏触发时 cleanup_pending_drag 回收）
+//   - resize handle → RESIZE_HANDLES（select_node 重建前 clear 回收上一批 8 个）
+// 若未来需 unmount 全量回收，可在此 thread_local 旁加 Vec<Closure> + unmount() drop——
+// 当前无 unmount 调用方，stored-Vec 增复杂度不解决现存泄漏，按 Rule 2 不引入。
 
 // ── 交互事件 ──
 
