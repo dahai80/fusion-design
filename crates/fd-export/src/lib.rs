@@ -407,8 +407,21 @@ fn render_element_svg(el: &CanvasElement) -> String {
                 .map(|f| format!("font-family=\"{}\"", xml_escape(f)))
                 .unwrap_or_default();
             let text = xml_escape(el.text.as_deref().unwrap_or(""));
+            // FUNC-9：text 旋转——基点对齐 rect/circle（el.x+w/2, el.y+h/2），
+            // 非用共用 attrs（text 的 fill/stroke/opacity 语义独立，arm 不消费 attrs）。
+            let transform = el
+                .rotation
+                .filter(|r| *r != 0.0)
+                .map(|r| {
+                    format!(
+                        "transform=\"rotate({r} {} {})\"",
+                        el.x + el.w / 2.0,
+                        el.y + el.h / 2.0
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "<text x=\"{}\" y=\"{}\" fill=\"{fill}\" {fs} {ff}>{text}</text>\n",
+                "<text x=\"{}\" y=\"{}\" fill=\"{fill}\" {fs} {ff} {transform}>{text}</text>\n",
                 el.x, el.y
             )
         }
@@ -752,12 +765,28 @@ fn render_pdf(page: &CanvasPage, file: &Path) -> Result<(), ExportError> {
                     font: font_handle,
                     size: printpdf::Pt(fs as f32),
                 });
-                ops.push(printpdf::ops::Op::SetTextCursor {
-                    pos: printpdf::graphics::Point::new(
-                        printpdf::Mm((el.x * px_to_mm) as f32),
-                        printpdf::Mm((height_mm - el.y * px_to_mm - fs * px_to_mm) as f32),
-                    ),
-                });
+                // FUNC-9：text 非 0 旋转——SetTextMatrix(Tm) 绕文本基点旋转。
+                // Tm 重置文本矩阵（含定位），故旋转路径不再用 SetTextCursor（会被 Tm 覆盖）。
+                // 非旋转路径沿用 SetTextCursor 定位（保持原行为）。基点对齐 rect/circle 用 shape 中心。
+                let rotate_angle = el.rotation.filter(|r| *r != 0.0);
+                if let Some(angle) = rotate_angle {
+                    let tx = (el.x + el.w / 2.0) * px_to_mm;
+                    let ty = height_mm - (el.y + el.h / 2.0) * px_to_mm;
+                    ops.push(printpdf::ops::Op::SetTextMatrix {
+                        matrix: printpdf::TextMatrix::TranslateRotate(
+                            printpdf::Pt(tx as f32),
+                            printpdf::Pt(ty as f32),
+                            angle as f32,
+                        ),
+                    });
+                } else {
+                    ops.push(printpdf::ops::Op::SetTextCursor {
+                        pos: printpdf::graphics::Point::new(
+                            printpdf::Mm((el.x * px_to_mm) as f32),
+                            printpdf::Mm((height_mm - el.y * px_to_mm - fs * px_to_mm) as f32),
+                        ),
+                    });
+                }
                 ops.push(printpdf::ops::Op::ShowText {
                     items: vec![printpdf::text::TextItem::Text(text.to_string())],
                 });
@@ -1613,6 +1642,65 @@ mod tests {
         };
         let svg = render_element_svg(&el);
         assert!(svg.contains("rotate(45"));
+    }
+
+    #[test]
+    fn rotation_in_svg_text() {
+        // FUNC-9：text arm 原独立分支不消费 attrs，丢旋转。修后须带 transform。
+        let el = CanvasElement {
+            kind: "text".into(),
+            x: 10.0,
+            y: 20.0,
+            w: 50.0,
+            h: 30.0,
+            text: Some("hello".into()),
+            fill: Some("#000".into()),
+            stroke: None,
+            stroke_width: None,
+            radius: None,
+            opacity: None,
+            font_size: Some(14.0),
+            font_family: None,
+            rotation: Some(30.0),
+        };
+        let svg = render_element_svg(&el);
+        assert!(
+            svg.contains("rotate(30"),
+            "text 旋转须输出 transform: {svg}"
+        );
+        assert!(svg.contains("hello"), "text 内容须保留: {svg}");
+    }
+
+    #[test]
+    fn rotation_zero_svg_text_no_transform() {
+        // rotation=0 或 None 不应输出 transform（避免无意义旋转属性）。
+        let mut el = CanvasElement {
+            kind: "text".into(),
+            x: 10.0,
+            y: 20.0,
+            w: 50.0,
+            h: 30.0,
+            text: Some("hi".into()),
+            fill: Some("#000".into()),
+            stroke: None,
+            stroke_width: None,
+            radius: None,
+            opacity: None,
+            font_size: Some(12.0),
+            font_family: None,
+            rotation: Some(0.0),
+        };
+        let svg = render_element_svg(&el);
+        assert!(
+            !svg.contains("transform"),
+            "rotation=0 不应输出 transform: {svg}"
+        );
+        el.rotation = None;
+        let svg = render_element_svg(&el);
+        assert!(
+            !svg.contains("transform"),
+            "rotation=None 不应输出 transform: {svg}"
+        );
     }
 
     #[test]
