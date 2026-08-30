@@ -1496,14 +1496,6 @@ pub fn shared_client(endpoint: Option<&str>) -> anyhow::Result<Arc<FusionMlxClie
     Ok(Arc::new(client))
 }
 
-// ── ARCH-10 TODO（v0.1.14 首维护版仅落 round 1 测试外移）──
-// round 2 自包含非测试模块外移：skills（SkillRegistry/DesignSkills/SkillContext）
-// + stream（SSE unfold 解析辅助）。无 thread_local，回归风险低，独立 PR 拆。
-// 见 plans/jiggly-imagining-pnueli.md Phase 2。
-// 注：round 1 测试外移 WIP（tests.rs/skills_tests.rs/mlx_integration.rs）曾与
-// PR #23 ARCH-11 skill 迁出碰撞（skills_tests.rs 用旧 unit-struct API，stale），
-// 已弃。测试留内联（PR #23 状态），ARCH-10 待新 PR 对 current main 重做。
-
 // ── AI Skill 系统：已迁出 fd-skills crate（ARCH-11）──
 //
 // SkillContext trait + 7 skill impl + SkillRegistry + SkillOutput/SpecDocument 类型

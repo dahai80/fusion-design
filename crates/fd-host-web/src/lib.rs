@@ -1178,11 +1178,6 @@ pub(crate) fn reorder_node(node_id: &str, new_index: usize) {
     }
 }
 
-// ── ARCH-10 TODO（v0.1.14 首维护版仅落 round 1 测试外移）──
-// round 2 自包含模块外移（bridge 消息派发 237-752）+ round 3 thread_local 重模块
-// （events 1443-2472 / render_canvas 3256-3555 / render_dom 752-1303，Closure 跨段全局态）
-// 回归风险高，独立 PR 拆。见 plans/jiggly-imagining-pnueli.md Phase 2。
-
 // ── 单元测试（宿主目标，非 wasm32）──
 
 #[cfg(test)]
