@@ -88,7 +88,10 @@ echo "  校验：shasum -a 256 -c ${PKG}.tar.gz.sha256"
 
 # OPS-7：可选全签名管线（env-gated，缺 secret 时 warn+skip 不阻断）。
 # 主渠道 fd-cli 继承 fusion-studio 已签名公证容器；独立 tarball 受 Gatekeeper 限。
-# 三个 secret 齐全 → codesign + notarytool + stapler；缺任一 → 跳过出未签名件。
+# 三个 secret 齐全 → codesign + notarytool + stapler + 签后真验；缺任一 → 跳过出未签名件。
+# secret 齐全时签名/公证/装订任一失败 = 致命（outward-facing 交付物失败须红，对齐
+# ci.yml release-pack 注释「release 是 outward-facing 交付物，失败必须红」）。
+# 无 secret 时 warn+skip 出未签名件不阻断——本行为正确，不动。
 if [ -n "${APPLE_DEV_ID:-}" ] && [ -n "${APP_SPECIFIC_PW:-}" ] && [ -n "${TEAM_ID:-}" ]; then
     echo "==> OPS-7: 签名管线启用（APPLE_DEV_ID/APP_SPECIFIC_PW/TEAM_ID 齐全）"
     BIN="$STAGE/fusion-design"
@@ -96,7 +99,8 @@ if [ -n "${APPLE_DEV_ID:-}" ] && [ -n "${APP_SPECIFIC_PW:-}" ] && [ -n "${TEAM_I
     if codesign --force --options runtime --sign "$APPLE_DEV_ID" "$BIN"; then
         echo "    codesign OK"
     else
-        echo "    [warn] codesign 失败，回退未签名件" >&2
+        echo "    [error] codesign 失败，签名管线中止（outward-facing 交付物失败须红）" >&2
+        exit 1
     fi
     echo "  [2/3] notarytool submit --wait"
     if xcrun notarytool submit "$DIST/${PKG}.tar.gz" \
@@ -104,18 +108,36 @@ if [ -n "${APPLE_DEV_ID:-}" ] && [ -n "${APP_SPECIFIC_PW:-}" ] && [ -n "${TEAM_I
         --team-id "$TEAM_ID" --wait; then
         echo "    notarytool OK"
     else
-        echo "    [warn] notarytool 失败（网络/凭证问题），继续" >&2
+        echo "    [error] notarytool 失败（网络/凭证问题），签名管线中止" >&2
+        exit 1
     fi
     echo "  [3/3] stapler staple"
     if xcrun stapler staple "$BIN"; then
         echo "    stapler OK"
     else
-        echo "    [warn] stapler 失败，继续（已签名未装订）" >&2
+        echo "    [error] stapler 失败，签名管线中止（已签名未装订不可交付）" >&2
+        exit 1
     fi
-    # 签名后重新打包（codesign 改了二进制）+ 刷新 SHA256。
+    # 签后真验：codesign --verify --strict 验签名完整性，spctl --assess 验 Gatekeeper
+    # 公证装订。任一失败 = 伪签名件，致命（闭合 P3 伪签名缺口：原 warn 回退会出伪签件）。
+    echo "  [verify] codesign --verify --strict"
+    if codesign --verify --strict --verbose=2 "$BIN" 2>&1; then
+        echo "    codesign verify OK"
+    else
+        echo "    [error] codesign verify 失败（签名无效或被篡改）" >&2
+        exit 1
+    fi
+    echo "  [verify] spctl --assess (Gatekeeper)"
+    if spctl --assess --type execute -vv "$BIN" 2>&1; then
+        echo "    spctl assess OK"
+    else
+        echo "    [error] spctl assess 失败（公证未装订/未通过 Gatekeeper）" >&2
+        exit 1
+    fi
+    # 签名+真验后重新打包（codesign 改了二进制）+ 刷新 SHA256。
     tar -czf "$DIST/${PKG}.tar.gz" -C "$DIST" "$PKG"
     ( cd "$DIST" && shasum -a 256 "${PKG}.tar.gz" ) > "$DIST/${PKG}.tar.gz.sha256"
-    echo "  签名后重打包 + 刷新 sha256"
+    echo "  签名+真验后重打包 + 刷新 sha256"
 else
     echo "==> OPS-7: [warn] 跳过签名（缺 APPLE_DEV_ID/APP_SPECIFIC_PW/TEAM_ID secret）" >&2
     echo "    独立 tarball 受 Gatekeeper 限，主渠道经 fusion-studio 已签名公证容器" >&2
