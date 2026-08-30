@@ -1,18 +1,26 @@
 //! A-3：Chat 子命令 handler（从 main.rs 拆出）。
 //!
-//! 机器可读流式 chat：CLI/脚本管道用的流式 NDJSON 推理接口。
+//! 机器可读流式 chat：流式推理接口，供 fusion-studio subprocess 与 CLI 管道共用。
 //! 鉴权 / X-Fusion-Route header / endpoint 解析复用 fd-ai-adapter，调用方不重实现。
 //!
-//! 消费方声明（issue #17 诚实回溯）：issue #17 设想此子命令为 fusion-studio
-//! subprocess 入口取代直连 MLX，但经核实 studio 实际走 fusion-gateway TCP
-//! NDJSON（StreamingBridge.swift，帧 schema 为 chat_event/chat_done/error +
-//! session_id/event），**不经 fd-cli chat**。故本子命令当前无 studio 消费方，
-//! 供 CLI 管道/脚本/测试消费。NDJSON 帧 schema（delta/chat_done/error）为
-//! 本子命令自洽契约，非对齐 studio（studio 用 chat_event 非 delta）。
+//! 消费方声明（issue #17 → issue #20 演进）：issue #17 原设想此子命令为 studio
+//! subprocess 入口取代直连 MLX，早期核实认为 studio 走 fusion-gateway TCP 故无
+//! studio 消费方。后核实 studio DesignBridge.sendDesignChat 实为内联 URLSession
+//! HTTP（自管 Bearer + SSE 解析 + X-Fusion-Route），重复实现 adapter 保护逻辑。
+//! issue #20 闭合方向：studio 改调本子命令，鉴权/RouteGuard/validate_localhost/
+//! false-green(check_generate) 复用 adapter，调用方不重实现。为兼容 studio 现有
+//! runFusionDesignStream 子进程解析器（按 `data: ` 前缀取 choices[0].delta.content，
+//! 遇 `data: [DONE]` 结束），新增 `--format sse` 输出 raw OpenAI text/event-stream。
+//! `--format ndjson`（默认）保留 issue #17 既有契约（每行一帧 delta/chat_done/error）。
 
+use std::io::Write;
 use std::path::PathBuf;
 
-use crate::common::{ndjson_frame_delta, ndjson_frame_done, ndjson_frame_error, read_file_capped};
+use crate::common::{
+    ndjson_frame_delta, ndjson_frame_done, ndjson_frame_error, read_file_capped, sse_frame_delta,
+    sse_frame_done, sse_frame_error,
+};
+use crate::ChatStreamFormatArg;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -25,6 +33,7 @@ pub async fn run(
     max_tokens: u32,
     stream: bool,
     json: bool,
+    format: ChatStreamFormatArg,
 ) -> anyhow::Result<()> {
     use fd_ai_adapter::{MlxChatMessage, MlxStreamDelta};
     use futures::StreamExt;
@@ -84,26 +93,51 @@ pub async fn run(
     }
     tracing::info!(model = %model, count = messages.len(), "chat: 流式推理开始");
 
-    // NDJSON 成帧输出：delta / chat_done / error（本子命令自洽契约）。
-    // H-A16/P1-8 回溯：issue #17 设想 studio 经此契约接 fd-cli，但核实 studio
-    // 走 gateway TCP chat_event/chat_done/error，不经 fd-cli。此 schema 供
-    // CLI 管道消费，非对齐 studio。
+    // 成帧输出：--format 选 ndjson（issue #17 契约）或 sse（raw OpenAI
+    // text/event-stream，对齐 fusion-studio runFusionDesignStream 解析器）。
+    // 子进程管道 block-buffered，每帧须 flush stdout，否则 studio readabilityHandler
+    // 攒块到缓冲满才收，流式体验退化。H-A16/P1-8 回溯已废：studio 经本子命令消费。
     if stream && json {
         let s = fd_ai_adapter::chat_stream_messages(client, model, messages, max_tokens).await;
         futures::pin_mut!(s);
         let mut stream_failed: Option<String> = None;
+        let mut stdout = std::io::stdout();
         while let Some(item) = s.next().await {
             match item {
                 Ok(MlxStreamDelta { token, finished }) => {
                     if finished {
-                        println!("{}", ndjson_frame_done());
+                        match format {
+                            ChatStreamFormatArg::Ndjson => {
+                                println!("{}", ndjson_frame_done());
+                            }
+                            ChatStreamFormatArg::Sse => {
+                                print!("{}", sse_frame_done());
+                            }
+                        }
+                        stdout.flush()?;
                         break;
                     } else if !token.is_empty() {
-                        println!("{}", ndjson_frame_delta(&token));
+                        match format {
+                            ChatStreamFormatArg::Ndjson => {
+                                println!("{}", ndjson_frame_delta(&token));
+                            }
+                            ChatStreamFormatArg::Sse => {
+                                print!("{}", sse_frame_delta(&token));
+                            }
+                        }
+                        stdout.flush()?;
                     }
                 }
                 Err(e) => {
-                    println!("{}", ndjson_frame_error(&e.to_string()));
+                    match format {
+                        ChatStreamFormatArg::Ndjson => {
+                            println!("{}", ndjson_frame_error(&e.to_string()));
+                        }
+                        ChatStreamFormatArg::Sse => {
+                            print!("{}", sse_frame_error(&e.to_string()));
+                        }
+                    }
+                    let _ = stdout.flush();
                     tracing::error!(error = %e, "chat: 流式错误");
                     stream_failed = Some(e.to_string());
                     break;
@@ -114,7 +148,7 @@ pub async fn run(
             anyhow::bail!("chat 流式失败: {e}");
         }
     } else {
-        anyhow::bail!("chat: 当前仅支持 --stream --json NDJSON 输出");
+        anyhow::bail!("chat: 当前仅支持 --stream --json 流式输出（--format ndjson|sse 选成帧）");
     }
     Ok(())
 }
