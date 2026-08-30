@@ -1877,4 +1877,32 @@ mod security_tests {
             "validate_limits 总数超限应返 NodeTotalExceeded, got: {err:?}"
         );
     }
+
+    /// ARCH-13：NodeNotFound / PageNotFound 无生产 Err 站（find_node / page 返 Option
+    /// 非 Result），仅 fd-cli report_error downcast 消费。直构造断言变体存在 + Display
+    /// 文案，闭合变体覆盖盲区（其余 4 变体已由 from_json_returns_canvas_error_variants 覆盖）。
+    /// 不验 downcast：fd-canvas-core 已移除 anyhow 依赖（库 crate 不暴露 anyhow），
+    /// downcast 消费面在 fd-cli（report_error 已覆盖），此 crate 侧无 downcast 路径可验。
+    #[test]
+    fn canvas_error_dead_variants_display() {
+        let e1 = CanvasError::NodeNotFound(String::from("node-42"));
+        assert!(
+            matches!(e1, CanvasError::NodeNotFound(_)),
+            "NodeNotFound 变体应可构造, got: {e1:?}"
+        );
+        assert!(
+            format!("{e1}").contains("node-42"),
+            "NodeNotFound Display 应含 id: {e1}"
+        );
+
+        let e2 = CanvasError::PageNotFound(String::from("page-7"));
+        assert!(
+            matches!(e2, CanvasError::PageNotFound(_)),
+            "PageNotFound 变体应可构造, got: {e2:?}"
+        );
+        assert!(
+            format!("{e2}").contains("page-7"),
+            "PageNotFound Display 应含 id: {e2}"
+        );
+    }
 }

@@ -2066,6 +2066,32 @@ mod mlx_integration {
         format!("http://{}", addr)
     }
 
+    /// FAULT-1 stall mock server：建连 200 + 发 SSE headers 后不接任何 data 帧，
+    /// 长时间 sleep 不再写，模拟建连后无 chunk 卡死。chat_stream_messages 的
+    /// tokio::time::timeout(idle, stream.next()) 应在 IDLE 内以 Err 终结。
+    async fn spawn_sse_stall_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let mut resp = String::new();
+            resp.push_str("HTTP/1.1 200 OK\r\n");
+            resp.push_str("Content-Type: text/event-stream\r\n");
+            resp.push_str("Connection: close\r\n\r\n");
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.flush().await;
+            // 建连后不发任何 data 帧，长时间 sleep 模拟 stall 卡死。
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        format!("http://{}", addr)
+    }
+
     fn write_fixture_png() -> String {
         // 67 字节最小合法 PNG（1x1 灰度）。
         const MIN_PNG: &[u8] = &[
@@ -2805,6 +2831,45 @@ mod mlx_integration {
             .expect("502 重试后应在 5 秒内建连并完成流");
         assert_eq!(tokens, "Hi", "重试后应正常产出 delta");
         assert!(saw_done, "流应正常以 [DONE] 结束");
+    }
+
+    /// FAULT-1：建连 200 后无任何 data 帧卡死（stall）→ chat_stream_messages 的
+    /// tokio::time::timeout(idle, stream.next()) 应在 IDLE 内以 Err 终结，非无限挂起。
+    /// env 全局竞态（FUSION_MLX_STREAM_IDLE_SECS 进程级 set_var），标 #[ignore] +
+    /// 手动 --test-threads=1 运行，对齐同 crate retry_max_attempts_env_override 约定。
+    #[tokio::test]
+    #[ignore = "env 全局竞态，手动 --test-threads=1 运行：cargo test -p fd-ai-adapter chat_stream_messages_stall_timeout -- --ignored --test-threads=1"]
+    async fn chat_stream_messages_stall_timeout() {
+        std::env::set_var("FUSION_MLX_STREAM_IDLE_SECS", "1");
+        let url = spawn_sse_stall_server().await;
+        let client = mock_client(&url);
+        let messages = vec![MlxChatMessage {
+            role: String::from("user"),
+            content: String::from("hi"),
+        }];
+        let drain = async {
+            let mut stream =
+                chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
+            use futures::StreamExt;
+            let mut errored = false;
+            // stall server 不发任何 delta，首个 stream.next() 即应超时返 Err。
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(_) => {}
+                    Err(_) => {
+                        errored = true;
+                        break;
+                    }
+                }
+            }
+            errored
+        };
+        // 外层 timeout 兜底：FAULT-1 应在 IDLE(1s) 内终结，非依赖此 10s 兜底。
+        let errored = tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+            .await
+            .expect("stall 流应在 10 秒内以 Err 终结，非无限挂起");
+        assert!(errored, "stall 流应以 Err 终结（FAULT-1 fail visibly）");
+        std::env::remove_var("FUSION_MLX_STREAM_IDLE_SECS");
     }
 
     /// 捕获完整请求体（大缓冲，用于多模态 base64 负载）。
