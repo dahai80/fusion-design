@@ -70,15 +70,18 @@ pub enum Command {
         #[arg(long)]
         stream: bool,
     },
-    /// 机器可读流式 chat：CLI/脚本管道用的流式 NDJSON 推理接口。
+    /// 机器可读流式 chat：流式推理接口，供 fusion-studio subprocess 与 CLI 管道共用。
     /// 鉴权 / X-Fusion-Route header / endpoint 解析复用 fd-ai-adapter，调用方不重实现。
     ///
-    /// 消费方声明（issue #17 诚实回溯）：issue #17 设想此子命令为 fusion-studio
-    /// subprocess 入口取代直连 MLX，但经核实 studio 实际走 fusion-gateway TCP
-    /// NDJSON（StreamingBridge.swift，帧 schema 为 chat_event/chat_done/error +
-    /// session_id/event），**不经 fd-cli chat**。故本子命令当前无 studio 消费方，
-    /// 供 CLI 管道/脚本/测试消费。NDJSON 帧 schema（delta/chat_done/error）为
-    /// 本子命令自洽契约，非对齐 studio（studio 用 chat_event 非 delta）。
+    /// 消费方声明（issue #17 → issue #20 演进）：issue #17 原设想此子命令为 studio
+    /// subprocess 入口取代直连 MLX，早期核实认为 studio 走 fusion-gateway TCP 故无
+    /// studio 消费方。后核实 studio DesignBridge.sendDesignChat 实为内联 URLSession
+    /// HTTP（自管 Bearer + SSE 解析 + X-Fusion-Route），重复实现 adapter 保护逻辑。
+    /// issue #20 闭合方向：studio 改调本子命令，鉴权/RouteGuard/validate_localhost/
+    /// false-green(check_generate) 复用 adapter，调用方不重实现。为兼容 studio 现有
+    /// runFusionDesignStream 子进程解析器（按 `data: ` 前缀取 choices[0].delta.content，
+    /// 遇 `data: [DONE]` 结束），新增 `--format sse` 输出 raw OpenAI text/event-stream。
+    /// `--format ndjson`（默认）保留 issue #17 既有契约（每行一帧 delta/chat_done/error）。
     ///
     /// 流式与 gateway：默认 endpoint 经 fusion-gateway(11432)。gateway 流式转发
     /// 502 bug（fusion-gateway#108：stream=true 连接拒绝）已于 2026-08-25 修复（PR #111
@@ -105,12 +108,16 @@ pub enum Command {
         rag_context_file: Option<PathBuf>,
         #[arg(long, default_value = "4096")]
         max_tokens: u32,
-        /// 流式 NDJSON 输出（每行一帧 delta/done/error），默认开启
+        /// 流式输出，默认开启
         #[arg(long, default_value = "true")]
         stream: bool,
-        /// 输出 NDJSON 成帧（当前唯一格式，保留参数供未来纯文本模式）
+        /// 成帧（保留参数；--format 取代其职责，true 时按 --format 成帧）
         #[arg(long, default_value = "true")]
         json: bool,
+        /// issue #20：流式输出格式。ndjson（默认，issue #17 契约）/ sse（raw OpenAI
+        /// text/event-stream，对齐 fusion-studio runFusionDesignStream 解析器）
+        #[arg(long, value_enum, default_value_t = ChatStreamFormatArg::Ndjson)]
+        format: ChatStreamFormatArg,
     },
     /// 图生 UI：草图/参考图 → PenDocument JSON
     ImageToUi {
@@ -349,6 +356,16 @@ impl From<ExportFormatArg> for fd_export::ExportFormat {
     }
 }
 
+// issue #20：chat 流式输出格式枚举。
+// ndjson = 既有契约（issue #17），每行一帧 delta/chat_done/error，CLI 管道/脚本消费。
+// sse = raw OpenAI text/event-stream（data: {...} + data: [DONE]），对齐 fusion-studio
+// DesignBridge.runFusionDesignStream 的 stdout 解析器——studio 子进程管道零改动可消费。
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum ChatStreamFormatArg {
+    Ndjson,
+    Sse,
+}
+
 #[derive(Clone, clap::ValueEnum)]
 pub enum ThemeModeArg {
     Light,
@@ -504,6 +521,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             max_tokens,
             stream,
             json,
+            format,
         } => {
             commands::chat::run(
                 model,
@@ -515,6 +533,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 max_tokens,
                 stream,
                 json,
+                format,
             )
             .await
         }
@@ -740,6 +759,7 @@ mod tests {
                 max_tokens,
                 stream,
                 json,
+                format,
                 ..
             } => {
                 assert_eq!(model, "mlx-community--Qwen3.5-4B-4bit");
@@ -747,6 +767,35 @@ mod tests {
                 assert_eq!(max_tokens, 4096);
                 assert!(stream, "stream 默认 true");
                 assert!(json, "json 默认 true");
+                // issue #20：format 默认 ndjson
+                assert!(
+                    matches!(format, ChatStreamFormatArg::Ndjson),
+                    "format 默认 ndjson"
+                );
+            }
+            _ => panic!("应为 Chat"),
+        }
+    }
+
+    // issue #20：--format sse 显式解析（raw OpenAI text/event-stream，对齐 studio）
+    #[test]
+    fn parse_chat_format_sse() {
+        let cli = Cli::parse_from([
+            "fusion-design",
+            "chat",
+            "--model",
+            "mlx-community--Qwen3.5-4B-4bit",
+            "--messages-file",
+            "/tmp/m.json",
+            "--format",
+            "sse",
+        ]);
+        match cli.command {
+            Command::Chat { format, .. } => {
+                assert!(
+                    matches!(format, ChatStreamFormatArg::Sse),
+                    "--format sse 须解析为 Sse"
+                );
             }
             _ => panic!("应为 Chat"),
         }

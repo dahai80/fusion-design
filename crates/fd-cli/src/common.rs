@@ -126,8 +126,7 @@ pub fn build_registry(doc: &fd_canvas_core::PenDocument) -> fd_cli::design::Desi
 }
 
 // H-A16/P1-8：NDJSON 成帧函数抽出为纯函数，便于回归测试本子命令自洽契约。
-// 三帧 schema：delta / chat_done / error。注：studio 走 gateway TCP 用 chat_event
-// 非 delta，此 schema 供 CLI 管道消费，非对齐 studio（见 Chat 子命令 doc）。
+// 三帧 schema：delta / chat_done / error。供 CLI 管道/脚本消费（issue #17）。
 pub fn ndjson_frame_delta(token: &str) -> serde_json::Value {
     serde_json::json!({"type":"delta","token":token})
 }
@@ -138,6 +137,32 @@ pub fn ndjson_frame_done() -> serde_json::Value {
 
 pub fn ndjson_frame_error(message: &str) -> serde_json::Value {
     serde_json::json!({"type":"error","message":message})
+}
+
+// issue #20：SSE 成帧（raw OpenAI text/event-stream 格式），对齐 fusion-studio
+// DesignBridge.runFusionDesignStream 的 stdout 解析器——按 `data: ` 前缀逐行解析，
+// 取 choices[0].delta.content 为 token，遇 `data: [DONE]` 结束。studio 现有子进程管道
+// 基础设施（readabilityHandler）零改动即可消费此格式。鉴权 / RouteGuard / endpoint
+// 解析仍复用 fd-ai-adapter，调用方不重实现。
+pub fn sse_frame_delta(token: &str) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({"choices":[{"index":0,"delta":{"content":token}}]})
+    )
+}
+
+pub fn sse_frame_done() -> String {
+    format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+    )
+}
+
+pub fn sse_frame_error(message: &str) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({"error":{"message":message}})
+    )
 }
 
 #[cfg(test)]
@@ -155,5 +180,53 @@ mod tests {
         full.push(0xAD); // 拼「中中」
         let got = decode_stdin_bytes(full).unwrap();
         assert_eq!(got, "中中");
+    }
+
+    #[test]
+    fn sse_frame_delta_shape() {
+        let f = sse_frame_delta("hello");
+        assert!(
+            f.starts_with("data: "),
+            "delta must start with data: prefix"
+        );
+        assert!(f.contains("choices"), "delta must contain choices array");
+        assert!(f.contains("hello"), "delta must carry token content");
+        assert_eq!(
+            f.lines().count(),
+            2,
+            "delta = one data line + trailing blank line"
+        );
+    }
+
+    #[test]
+    fn sse_frame_done_shape() {
+        let f = sse_frame_done();
+        assert!(f.contains("finish_reason"), "done must carry finish_reason");
+        assert!(f.contains("stop"), "done finish_reason must be stop");
+        assert!(
+            f.contains("[DONE]"),
+            "done must terminate with data: [DONE]"
+        );
+        assert_eq!(
+            f.lines().count(),
+            4,
+            "done = json line + blank + [DONE] line + blank"
+        );
+    }
+
+    #[test]
+    fn sse_frame_error_shape() {
+        let f = sse_frame_error("boom");
+        assert!(
+            f.starts_with("data: "),
+            "error must start with data: prefix"
+        );
+        assert!(f.contains("error"), "error must contain error object");
+        assert!(f.contains("boom"), "error must carry message");
+        assert_eq!(
+            f.lines().count(),
+            2,
+            "error = one data line + trailing blank line"
+        );
     }
 }
