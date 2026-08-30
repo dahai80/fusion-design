@@ -94,7 +94,7 @@ const LISTENERS_ATTR: &str = "data-fd-listeners";
 // ── OPS-13：WASM 日志环形缓冲 ──
 // 审计裁定：WKWebView 内现场故障零诊断件。WASM 沙箱无文件系统，console.* 仅开发者
 // 工具可见，企业运维无门。加环形缓冲捕获最近 N 条 error/warn，host 经消息桥
-// `log.capture.dump` 拉取 → Swift 侧落盘（host 侧 handler 留 TODO+issue，非本工程范围）。
+// `log.capture.dump` 拉取 → Swift 侧落盘（host 侧 handler 跟踪于 fusion-studio#372，非本工程范围）。
 // 容量 200 条平衡诊断覆盖与线性内存占用（每条 ~数百字节，封顶 ~100KB）。
 
 const LOG_RING_CAPACITY: usize = 200;

@@ -761,7 +761,8 @@ pub async fn chat_stream_messages(
     let bearer = client.bearer_token();
     let http = client.http;
     // M-5：建连阶段（send + status）指数退避重试 502/503。拿到 2xx 即进流消费。
-    // 流已建立后的中途断流不重试（语义复杂，见 TODO）。
+    // 流已建立后的中途断流不重试（语义复杂——已消费部分 delta，盲目重发致重复输出，
+    // 须上游提供 Last-Event-ID/断点续传原语，见 fusion-gateway#139）。
     // RequestBuilder 消耗性，每次重试重建；bearer 保留 owned，闭包按引用取用。
     // A-1：每 attempt 轮询选 endpoint 拼 url（failover）。
     let max = retry_max_attempts();
