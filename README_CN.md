@@ -4,11 +4,9 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：v0.1.12 — 11 个 crate + vendored op-ai，419 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
+**状态**：v0.1.15 — 13 个 crate + vendored op-ai，495 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
 
-v0.1.12：对抗安全审计全量修复（2 致命 + 13 关键 + 12 逻辑 + 8 架构 + 3 性能）—— codegen XSS 实体转义、离线 allowlist 强制（回环+RFC1918+链路本地，拒公网）、validate_limits 进反序列化边界、递归/图像/PNG/SSE/stdin 资源上限、IPC 路径遍历防护+原子写、reqwest 超时、CSS 注入净化、web_sys unwrap 降级、schema 版本号（文件+桥协议）、max_tokens 常量化、fd-host-desk 去 reqwest 依赖、CJK SSE 跨 chunk 切分修复（字节缓冲，无 U+FFFD）；死代码清理（fd-asset 整 crate、Taffy compute_layout、apply_patch、fd-ecosystem MCP+watch_async、VersionedDocument/NamedVersion）；chat NDJSON 自洽契约（delta/chat_done/error，CLI/脚本管道消费，非对齐 studio——studio 走 gateway TCP chat_event）；CI 三道零越界门禁（deny-panic + deny-unwrap-expect allowlist 基线 + deny-external-http 仅限 fd-ai-adapter 出站 HTTP）；P2/P3 收尾：E-14 截断文件告警、P2-3/R-A2 IPC consume 非破坏（解析失败保留文件不静默吞错）、H-A11 resolve_tokens 递归子节点 token 解析 + CLI codegen 接线、H-A17 离线分工文档化 + CI 出站 HTTP 审计门禁、TC-4 gateway 假绿真推理探针回归测试；含 XSS/超深/路径遍历/javascript: URL/CJK SSE 切分/离线边界/截断文件/IPC 非破坏/假绿探针对抗回归测试。
-
-v0.1.12 生产就绪加固：M-5 重试退避（`fd-ai-adapter` 三处 HTTP 路径对 502/503 指数退避，详见下方集成说明）；macOS CI 补齐（`build-test-macos` job 消除 main 分支盲区，`--locked` 防依赖漂移）；死 `image="0.25"` workspace 声明移除；H-A16 诚实回溯（fd-cli chat 无 studio 消费方，见下方集成说明）。
+v0.1.15：发布件刷新——闭合 post-v0.1.14 三项 P3 真缺口（FUNC-9 SVG+PDF text 旋转 / PERF-4 PDF 逐页流式降内存峰值 / ARCH-10 r4 三 god-file 拆完）+ #26 ARCH-10 round-3 drag thread_local 迁移 + FAULT-1/ARCH-13 单测 + OPS-7 签名失败致命化 + #20 chat SSE 格式统一 studio。生产审计 91/100 Strong，零残留计划项。详见 `docs/changes/v0.1.15.md`。
 
 ## 📋 概览
 
