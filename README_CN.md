@@ -4,9 +4,9 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：v0.1.15 — 13 个 crate + vendored op-ai，495 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
+**状态**：v0.1.16 — 13 个 crate + vendored op-ai，495 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
 
-v0.1.15：发布件刷新——闭合 post-v0.1.14 三项 P3 真缺口（FUNC-9 SVG+PDF text 旋转 / PERF-4 PDF 逐页流式降内存峰值 / ARCH-10 r4 三 god-file 拆完）+ #26 ARCH-10 round-3 drag thread_local 迁移 + FAULT-1/ARCH-13 单测 + OPS-7 签名失败致命化 + #20 chat SSE 格式统一 studio。生产审计 91/100 Strong，零残留计划项。详见 `docs/changes/v0.1.15.md`。
+v0.1.16：v0.1.16-rc.1 转正发版——相对 v0.1.15 无功能变更（仅文档/治理：跨项目边界 upstream issue 链接、陈旧 TODO 清理、issue #29 配置变量治理验证闭合，check-env 0 发现项）。零开放 issue、零开放 PR、无残留分支。详见 `docs/changes/v0.1.16.md`。
 
 ## 📋 概览
 

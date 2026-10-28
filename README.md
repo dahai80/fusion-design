@@ -4,7 +4,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.15 — 13 crates + vendored op-ai, 495 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.15：发布件刷新——闭合 post-v0.1.14 三项 P3 真缺口（FUNC-9 SVG+PDF text 旋转 / PERF-4 PDF 逐页流式降内存峰值 / ARCH-10 r4 三 god-file 拆完）+ #26 ARCH-10 round-3 drag thread_local 迁移 + FAULT-1/ARCH-13 单测 + OPS-7 签名失败致命化 + #20 chat SSE 格式统一 studio。生产审计 91/100 Strong，零残留计划项。详见 `docs/changes/v0.1.15.md`。
+**Status**: v0.1.16 — 13 crates + vendored op-ai, 495 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.16: promotes release candidate v0.1.16-rc.1 to stable — no functional change vs v0.1.15 (docs/governance only: upstream issue links for cross-project boundaries, stale TODO cleanup, issue #29 config-variable governance verified closed with 0 check-env findings). Zero open issues, zero open PRs, no stale branches. See `docs/changes/v0.1.16.md`.
 
 ## 📋 Overview
 
