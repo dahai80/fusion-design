@@ -96,7 +96,7 @@ cargo run -p fd-cli -- --help                                  # CLI available
 ./Scripts/build.sh                                             # Release tarball → dist/
 ```
 
-**Endpoint 覆盖**：CLI `--endpoint` 默认经 `FUSION_MLX_BASE_URL` 解析（优先级：显式 `--endpoint` > env > 默认 gateway 11432），可切回直连 fusion-mlx 11434。鉴权 key 经 `FUSION_MLX_API_KEY`。
+**Endpoint 覆盖**：CLI `--endpoint` 默认经 `FUSION_MLX_BASE_URL` 解析（优先级：显式 `--endpoint` > env > 默认 gateway 11432），可切回直连 fusion-mlx 11434。鉴权 key 经 `FUSION_CLIENT_KEY`。
 
 **服务可用性校验**：`fusion-design check-mlx` 做三段真探测——endpoint 解析 → `/v1/models` 鉴权 + 模型列表 → 1-token 真推理探针。gateway 的 `/v1/models` 会「假绿」（列了云端/本地模型名但 MLX 未加载，generate 实返 502），故最终判定用真 chat 调用。探针模型解析：`--model` > `FUSION_MLX_MODEL` > 列表首个（建议显式传本地 mlx 模型 id）。不可用时以非零退出码 + 诊断文案 fail visibly。
 
@@ -133,7 +133,7 @@ All optional. Unset = default. Affects runtime behavior without code changes.
 | Variable | Default | 作用 / Effect | Set in |
 |----------|---------|---------------|--------|
 | `FUSION_MLX_BASE_URL` | `http://127.0.0.1:11432` (gateway) | fusion-mlx inference endpoint. CLI `--endpoint` overrides. Comma-separated multi-node failover supported (e.g. `http://a:11432,http://b:11432`). | fd-ai-adapter |
-| `FUSION_MLX_API_KEY` | (none) | Bearer auth key for gateway/MLX. Must match the key configured on the service. | fd-ai-adapter |
+| `FUSION_CLIENT_KEY` | (none) | Bearer auth key for gateway/MLX. Must match the key configured on the service. Legacy alias `FUSION_MLX_API_KEY` still honored during migration (warns on use, removed 2027-01-01, issue #30). | fd-ai-adapter |
 | `FUSION_MLX_MODEL` | (list first) | Default model id for `check-mlx` probe (resolution: `--model` > env > `/v1/models` first entry). Pass an explicit local mlx id to avoid false-green on unloaded cloud models. | fd-cli |
 | `FUSION_MLX_RETRY_MAX` | `4` | Max attempts on 502/503 transient errors (exponential backoff 500ms→1s→2s→4s→8s capped). Set `1` to disable retry. 4xx permanent errors fail immediately. | fd-ai-adapter |
 | `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | Total deadline across all retry attempts. Exceeding bails even if attempts remain. | fd-ai-adapter |

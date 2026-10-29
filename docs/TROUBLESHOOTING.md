@@ -39,7 +39,7 @@ lsof -i :11434    # fusion-mlx
 lsof -i :11432    # fusion-gateway
 
 # 3. Direct-connect probe
-curl -s -m 5 http://127.0.0.1:11434/v1/models -H "Authorization: Bearer $FUSION_MLX_API_KEY" | head -c 100
+curl -s -m 5 http://127.0.0.1:11434/v1/models -H "Authorization: Bearer $FUSION_CLIENT_KEY" | head -c 100
 ```
 
 **Fix**:
@@ -95,23 +95,23 @@ fusion-design check-mlx
 
 **Symptom**: returns 401 / "Unauthorized" / "invalid api key".
 
-**Root cause**: `FUSION_MLX_API_KEY` unset / wrong / inconsistent with the key configured on gateway/MLX. fd-ai-adapter authenticates via `Authorization: Bearer <key>`.
+**Root cause**: `FUSION_CLIENT_KEY` unset / wrong / inconsistent with the key configured on gateway/MLX. fd-ai-adapter authenticates via `Authorization: Bearer <key>`. Resolution order: `FUSION_CLIENT_KEY` (canonical) first, then legacy alias `FUSION_MLX_API_KEY` (migration-period fallback, warns on use, removed 2027-01-01, issue #30).
 
 **Diagnose**:
 
 ```bash
-echo "env key: $FUSION_MLX_API_KEY"
+echo "env key: $FUSION_CLIENT_KEY"
 # Direct MLX key check
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:11434/v1/models \
-  -H "Authorization: Bearer $FUSION_MLX_API_KEY"
+  -H "Authorization: Bearer $FUSION_CLIENT_KEY"
 # Gateway key check
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:11432/v1/models \
-  -H "Authorization: Bearer $FUSION_MLX_API_KEY"
+  -H "Authorization: Bearer $FUSION_CLIENT_KEY"
 ```
 
 **Fix**:
 ```bash
-export FUSION_MLX_API_KEY=fg-admin-key   # replace with the actually configured key
+export FUSION_CLIENT_KEY=fg-admin-key   # replace with the actually configured key
 ```
 
 **Mechanism**: 401 is a 4xx permanent error; M-5 retry **does not retry**, it fails immediately (retrying only wastes time). A key mismatch bails at once, with an auth-failure diagnostic in the log.
@@ -315,7 +315,7 @@ All optional. Unset = default. Complete table lives in `README.md` § Environmen
 | Variable | Default | Effect | Troubleshooting use |
 |----------|---------|--------|---------------------|
 | `FUSION_MLX_BASE_URL` | `http://127.0.0.1:11432` | Inference endpoint. CLI `--endpoint` overrides. Multi-node: comma-separated. | Symptom A/B/D: switch gateway→direct `11434`, or add failover node. |
-| `FUSION_MLX_API_KEY` | (none) | Bearer auth key. | Symptom D: must match gateway/MLX configured key. |
+| `FUSION_CLIENT_KEY` | (none) | Bearer auth key. | Symptom D: must match gateway/MLX configured key. |
 | `FUSION_MLX_MODEL` | (list first) | Default model id for `check-mlx`. | Symptom C/J: pass explicit local mlx id to dodge false-green. |
 | `FUSION_MLX_RETRY_MAX` | `4` | Max attempts on 502/503. `1`=disable. | Symptom B: raise for slow-loading models, lower for fast error visibility. |
 | `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | Total retry deadline. | Symptom B: raise if model load exceeds 5 min. |

@@ -458,7 +458,7 @@ fn report_error(e: &anyhow::Error) {
     } else if msg.contains("HTTP 401") || msg.contains("Unauthorized") {
         (
             "鉴权失败".into(),
-            "检查 FUSION_MLX_API_KEY 是否为 gateway master_key 或 fusion-mlx backend key".into(),
+            "检查 FUSION_CLIENT_KEY 是否为 gateway master_key 或 fusion-mlx backend key".into(),
         )
     } else if msg.contains("HTTP 404") || msg.contains("connection refused") {
         (

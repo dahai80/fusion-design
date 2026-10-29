@@ -7,7 +7,8 @@
 //!
 //! 【RouteGuard 鉴权】所有出站请求附加 `X-Fusion-Route: fusion-design` 头
 //! （fusion-mlx v0.7.0+ 默认强制，缺失则 403 missing_route），并在
-//! `FUSION_MLX_API_KEY` 设置时附加 `Authorization: Bearer <key>`。
+//! `FUSION_CLIENT_KEY`（或迁移期 legacy 兜底 `FUSION_MLX_API_KEY`）设置时
+//! 附加 `Authorization: Bearer <key>`。
 //!
 //! 【M-5 重试退避】fusion-mlx 模型加载期间返回 503、节点模型被驱逐回 502/503。
 //! 三处 HTTP 路径（`blocking_post` / `chat_stream_messages` / `check_generate`）
@@ -124,7 +125,8 @@ impl FusionMlxClient {
     /// 用默认 endpoint 构造；优先读 `FUSION_MLX_BASE_URL` 环境变量
     /// （支持显式指回 fusion-mlx 直连 11434 等本地端点），缺省回退
     /// `http://127.0.0.1:11432`（方案B：经 fusion-gateway 统一网关）。
-    /// 鉴权：gateway 需 `FUSION_MLX_API_KEY` 设为 gateway key（如 master_key）。
+    /// 鉴权：gateway 需 `FUSION_CLIENT_KEY` 设为 gateway key（如 master_key）；
+    /// 迁移期兜底读 legacy 名 `FUSION_MLX_API_KEY`（2027-01-01 起删除）。
     pub fn new() -> anyhow::Result<Self> {
         let endpoint = match std::env::var("FUSION_MLX_BASE_URL") {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
@@ -293,14 +295,26 @@ impl Default for FusionMlxClient {
 
 /// fusion-mlx RouteGuard 鉴权：所有出站请求附加 X-Fusion-Route + Bearer。
 impl FusionMlxClient {
-    /// 读取 `FUSION_MLX_API_KEY` 构造 Bearer token；未设置则 WARN（fail visibly）。
+    /// 鉴权 key 别名链解析（config-conventions §4）：
+    /// `FUSION_CLIENT_KEY`（规范名）→ `FUSION_MLX_API_KEY`（legacy 兜底，
+    /// Phase 3 于 2027-01-01 删除，issue #30）→ 未设置 WARN（fail visibly）。
     /// 不在构造时缓存：支持运行期 Key 轮换与测试隔离。
     fn bearer_token(&self) -> Option<String> {
+        if let Ok(k) = std::env::var("FUSION_CLIENT_KEY") {
+            if !k.trim().is_empty() {
+                return Some(format!("Bearer {}", k.trim()));
+            }
+        }
         match std::env::var("FUSION_MLX_API_KEY") {
-            Ok(k) if !k.trim().is_empty() => Some(format!("Bearer {}", k.trim())),
+            Ok(k) if !k.trim().is_empty() => {
+                tracing::warn!(
+                    "FUSION_MLX_API_KEY 为 legacy 名（迁移期兜底，2027-01-01 起删除），请改设 FUSION_CLIENT_KEY"
+                );
+                Some(format!("Bearer {}", k.trim()))
+            }
             _ => {
                 tracing::warn!(
-                    "FUSION_MLX_API_KEY 未设置或为空；若 fusion-mlx 启用 API Key 鉴权，请求将被拒绝"
+                    "FUSION_CLIENT_KEY 未设置或为空；若 fusion-mlx 启用 API Key 鉴权，请求将被拒绝"
                 );
                 None
             }
@@ -998,7 +1012,7 @@ pub struct HealthStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<String>,
     /// 鉴权是否通过。None=未鉴权或无法判定；Some(true)=已通过；
-    /// Some(false)=401/403 被拒（FUSION_MLX_API_KEY 缺失或错误）。
+    /// Some(false)=401/403 被拒（FUSION_CLIENT_KEY 缺失或错误）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_ok: Option<bool>,
     /// /v1/models 返回的模型 id 列表。空列表 = gateway 挂了模型名但 MLX 未加载，
@@ -1065,7 +1079,7 @@ impl FusionMlxClient {
                         status: Some(status),
                     })
                 } else if status_code.as_u16() == 401 || status_code.as_u16() == 403 {
-                    tracing::warn!(status = %status_code, "health_check: 鉴权被拒，检查 FUSION_MLX_API_KEY");
+                    tracing::warn!(status = %status_code, "health_check: 鉴权被拒，检查 FUSION_CLIENT_KEY");
                     Ok(HealthStatus {
                         available: false,
                         model: None,
@@ -1073,7 +1087,7 @@ impl FusionMlxClient {
                         auth_ok: Some(false),
                         models: vec![],
                         status: Some(format!(
-                            "鉴权失败（{status_code}）：FUSION_MLX_API_KEY 缺失或无效"
+                            "鉴权失败（{status_code}）：FUSION_CLIENT_KEY 缺失或无效"
                         )),
                     })
                 } else {
@@ -1204,7 +1218,7 @@ impl FusionMlxClient {
                         return Ok(GenerateProbeStatus {
                             model_loaded: false,
                             available: false,
-                            status: Some(format!("鉴权失败（{code}）：FUSION_MLX_API_KEY 无效")),
+                            status: Some(format!("鉴权失败（{code}）：FUSION_CLIENT_KEY 无效")),
                             http_code: Some(code),
                         });
                     } else {
@@ -2667,6 +2681,38 @@ mod mlx_integration {
             "坏值视为缺省"
         );
         std::env::remove_var("FUSION_MLX_RETRY_MAX");
+    }
+
+    /// issue #30：bearer_token 别名链（FUSION_CLIENT_KEY 规范名优先 →
+    /// FUSION_MLX_API_KEY legacy 兜底 → 皆未设 None）。env 全局竞态，标 #[ignore]，
+    /// 手动验证：`cargo test -p fd-ai-adapter bearer_token_alias_chain -- --ignored --test-threads=1`。
+    #[test]
+    #[ignore = "env 全局竞态，手动 --test-threads=1 运行"]
+    fn bearer_token_alias_chain() {
+        let c = FusionMlxClient::default();
+        std::env::remove_var("FUSION_CLIENT_KEY");
+        std::env::remove_var("FUSION_MLX_API_KEY");
+        assert_eq!(c.bearer_token(), None, "两者皆未设 → None");
+        std::env::set_var("FUSION_MLX_API_KEY", "legacy-key");
+        assert_eq!(
+            c.bearer_token().as_deref(),
+            Some("Bearer legacy-key"),
+            "legacy 兜底生效"
+        );
+        std::env::set_var("FUSION_CLIENT_KEY", "canon-key");
+        assert_eq!(
+            c.bearer_token().as_deref(),
+            Some("Bearer canon-key"),
+            "规范名优先于 legacy"
+        );
+        std::env::set_var("FUSION_CLIENT_KEY", "   ");
+        assert_eq!(
+            c.bearer_token().as_deref(),
+            Some("Bearer legacy-key"),
+            "规范名空白串视为未设，回退 legacy"
+        );
+        std::env::remove_var("FUSION_CLIENT_KEY");
+        std::env::remove_var("FUSION_MLX_API_KEY");
     }
 
     /// blocking_post：先 503 两次再 200 → 重试成功，调用 3 次。

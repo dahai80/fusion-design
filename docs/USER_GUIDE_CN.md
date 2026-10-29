@@ -12,7 +12,7 @@
 | fusion-mlx | 本地推理服务运行中（端口 11434） | `~/claude-home/fusion-mlx/start.sh status` |
 | fusion-gateway | 默认经 gateway 11432 转发（可选，直连也可） | `curl -s -m 5 http://127.0.0.1:11432/v1/models -H "Authorization: Bearer fg-admin-key" \| head -c 80` |
 | CLI 二进制 | `fusion-design` 已构建 | `fusion-design --version` |
-| 鉴权 key | 环境变量 `FUSION_MLX_API_KEY` | `echo $FUSION_MLX_API_KEY`（应非空，如 `fg-admin-key`） |
+| 鉴权 key | 环境变量 `FUSION_CLIENT_KEY` | `echo $FUSION_CLIENT_KEY`（应非空，如 `fg-admin-key`） |
 
 **起停 fusion-mlx**：
 
@@ -35,7 +35,7 @@ HF_MIRROR=https://hf-mirror.com huggingface-cli download <model-id>
 
 **目标**：一句自然语言 → `.fusiondesign` 画布文件。
 
-**前提**：fusion-mlx 已起 + `FUSION_MLX_API_KEY` 已设（见前置条件）。
+**前提**：fusion-mlx 已起 + `FUSION_CLIENT_KEY` 已设（见前置条件）。
 
 ```bash
 # 1. 先验 MLX 真可用（真推理探针，非仅列表）

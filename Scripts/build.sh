@@ -64,7 +64,7 @@ cat > "$STAGE/INSTALL.md" <<EOF
 
 ## 前置
   启动 fusion-mlx 本地推理（127.0.0.1:11434）或 fusion-gateway（11432）。
-  经 FUSION_MLX_BASE_URL 覆盖 endpoint；FUSION_MLX_API_KEY 设鉴权 key。
+  经 FUSION_MLX_BASE_URL 覆盖 endpoint；FUSION_CLIENT_KEY 设鉴权 key。
 
 ## Gatekeeper 说明
   独立 tarball 未签名公证时，首次运行可能被 Gatekeeper 拦截：

@@ -39,7 +39,7 @@ lsof -i :11434    # fusion-mlx
 lsof -i :11432    # fusion-gateway
 
 # 3. 直连探活
-curl -s -m 5 http://127.0.0.1:11434/v1/models -H "Authorization: Bearer $FUSION_MLX_API_KEY" | head -c 100
+curl -s -m 5 http://127.0.0.1:11434/v1/models -H "Authorization: Bearer $FUSION_CLIENT_KEY" | head -c 100
 ```
 
 **解决**：
@@ -95,23 +95,23 @@ fusion-design check-mlx
 
 **现象**：返 401 / "Unauthorized" / "invalid api key"。
 
-**根因**：`FUSION_MLX_API_KEY` 未设 / 设错 / 与 gateway/MLX 配置的 key 不一致。fd-ai-adapter 经 `Authorization: Bearer <key>` 鉴权。
+**根因**：`FUSION_CLIENT_KEY` 未设 / 设错 / 与 gateway/MLX 配置的 key 不一致。fd-ai-adapter 经 `Authorization: Bearer <key>` 鉴权。解析顺序：`FUSION_CLIENT_KEY`（规范名）优先，legacy 别名 `FUSION_MLX_API_KEY` 迁移期兜底（使用时 WARN，2027-01-01 起删除，issue #30）。
 
 **排查**：
 
 ```bash
-echo "env key: $FUSION_MLX_API_KEY"
+echo "env key: $FUSION_CLIENT_KEY"
 # 直连 MLX 验 key
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:11434/v1/models \
-  -H "Authorization: Bearer $FUSION_MLX_API_KEY"
+  -H "Authorization: Bearer $FUSION_CLIENT_KEY"
 # gateway 验 key
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:11432/v1/models \
-  -H "Authorization: Bearer $FUSION_MLX_API_KEY"
+  -H "Authorization: Bearer $FUSION_CLIENT_KEY"
 ```
 
 **解决**：
 ```bash
-export FUSION_MLX_API_KEY=fg-admin-key   # 换成实际配置的 key
+export FUSION_CLIENT_KEY=fg-admin-key   # 换成实际配置的 key
 ```
 
 **机制**：401 属 4xx 永久错误，M-5 重试**不重试**直接失败（重试只会浪费时间）。key 不匹配即立刻 bail，日志含鉴权失败诊断。
@@ -315,7 +315,7 @@ fusion-design lint --input x.fusiondesign --fix
 | 变量 | 默认值 | 作用 | 排障用途 |
 |------|--------|------|----------|
 | `FUSION_MLX_BASE_URL` | `http://127.0.0.1:11432` | 推理 endpoint。CLI `--endpoint` 覆盖。多节点逗号分隔。 | 现象 A/B/D：gateway→直连 `11434`，或加故障转移节点。 |
-| `FUSION_MLX_API_KEY` | (无) | Bearer 鉴权 key。 | 现象 D：须与 gateway/MLX 配置的 key 一致。 |
+| `FUSION_CLIENT_KEY` | (无) | Bearer 鉴权 key。 | 现象 D：须与 gateway/MLX 配置的 key 一致。 |
 | `FUSION_MLX_MODEL` | (列表首个) | `check-mlx` 默认模型 id。 | 现象 C/J：显式传本地 mlx id 破假绿。 |
 | `FUSION_MLX_RETRY_MAX` | `4` | 502/503 最大尝试次数。`1`=关。 | 现象 B：模型加载慢调大，想快速看错调小。 |
 | `FUSION_MLX_RETRY_DEADLINE_SECS` | `300` | 重试总 deadline。 | 现象 B：模型加载超 5 分钟调大。 |

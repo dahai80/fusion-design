@@ -12,7 +12,7 @@
 | fusion-mlx | Local inference service running (port 11434) | `~/claude-home/fusion-mlx/start.sh status` |
 | fusion-gateway | Default via gateway 11432 (optional, direct also works) | `curl -s -m 5 http://127.0.0.1:11432/v1/models -H "Authorization: Bearer fg-admin-key" \| head -c 80` |
 | CLI binary | `fusion-design` built | `fusion-design --version` |
-| Auth key | env var `FUSION_MLX_API_KEY` set | `echo $FUSION_MLX_API_KEY` (non-empty, e.g. `fg-admin-key`) |
+| Auth key | env var `FUSION_CLIENT_KEY` set | `echo $FUSION_CLIENT_KEY` (non-empty, e.g. `fg-admin-key`) |
 
 **Start/stop fusion-mlx**:
 
@@ -35,7 +35,7 @@ HF_MIRROR=https://hf-mirror.com huggingface-cli download <model-id>
 
 **Goal**: one natural-language sentence → `.fusiondesign` canvas file.
 
-**Precondition**: fusion-mlx running + `FUSION_MLX_API_KEY` set (see Prerequisites).
+**Precondition**: fusion-mlx running + `FUSION_CLIENT_KEY` set (see Prerequisites).
 
 ```bash
 # 1. Verify MLX truly available (real inference probe, not just list)
