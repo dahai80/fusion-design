@@ -4,7 +4,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.16 — 13 crates + vendored op-ai, 495 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.16: promotes release candidate v0.1.16-rc.1 to stable — no functional change vs v0.1.15 (docs/governance only: upstream issue links for cross-project boundaries, stale TODO cleanup, issue #29 config-variable governance verified closed with 0 check-env findings). Zero open issues, zero open PRs, no stale branches. See `docs/changes/v0.1.16.md`.
+**Status**: v0.1.17 — 13 crates + vendored op-ai, 495 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.17: auth key adopts canonical `FUSION_CLIENT_KEY` with legacy `FUSION_MLX_API_KEY` alias-chain fallback (issue #30, config Phase 3; alias removed 2027-01-01); check-env 0 findings for this repo. Zero open issues, zero open PRs, no stale branches. See `docs/changes/v0.1.17.md`.
 
 ## 📋 Overview
 
