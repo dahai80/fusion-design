@@ -26,6 +26,11 @@ cargo build --release -p fd-cli
 cp "target/release/fusion-design" "$STAGE/fusion-design"
 chmod +x "$STAGE/fusion-design"
 
+echo "==> 编译 release server 二进制（fd-server，issue#31 D1 工作台）"
+cargo build --release -p fd-server
+cp "target/release/fusion-design-server" "$STAGE/fusion-design-server"
+chmod +x "$STAGE/fusion-design-server"
+
 echo "==> 编译 fd-host-web wasm"
 cargo build -p fd-host-web --release --target wasm32-unknown-unknown
 # wasm-bindgen 后处理：cargo 只产出原始 fd_host_web.wasm，
@@ -74,6 +79,11 @@ cat > "$STAGE/INSTALL.md" <<EOF
 ## 验证
   fusion-design --version
   fusion-design check-mlx
+
+## Web 工作台（fusion-design-server，127.0.0.1:11493）
+  ./fusion-design-server          # 浏览器打开 http://127.0.0.1:11493
+  # WASM 画布资产与二进制同目录自动发现；或设 FUSION_DESIGN_WASM_DIR。
+  # 端口经 FUSION_DESIGN_PORT 覆盖。
 EOF
 
 echo "==> 打包 tar.gz"

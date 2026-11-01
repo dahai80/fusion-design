@@ -768,6 +768,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fd-server"
+version = "0.1.17"
+dependencies = [
+ "anyhow",
+ "base64",
+ "fd-ai-adapter",
+ "fd-canvas-core",
+ "fd-codegen",
+ "fd-design-system",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fd-skills"
 version = "0.1.17"
 dependencies = [
@@ -1052,6 +1074,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1073,6 +1101,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",

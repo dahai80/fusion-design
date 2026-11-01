@@ -21,6 +21,9 @@ members = [
     "crates/fd-design-lint",
     # H-A12/P1-6：fd-asset 已移除（整 crate 死代码，零生产调用，占"九端"宣传位无功能）。
     "crates/fd-cli",
+    # issue#31/DS-0：Design web 服务面（生成/迭代/还原/导出 API + WASM 画布托管 + D1 工作台）。
+    # hyper 仅作入站监听（127.0.0.1:11493），出站推理全部经 fd-ai-adapter，离线约束不破。
+    "crates/fd-server",
     # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
     "vendor/openpencil/crates/op-ai",
 ]
@@ -54,6 +57,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 url = "2"
 futures = "0.3"
 base64 = "0.22"
+# issue#31/DS-0：fd-server 入站 HTTP 监听栈。版本与既有 lock 一致（reqwest 传递依赖已解析
+# hyper 1.x），声明为直接依赖不引入新版本行。仅 server/http1 特性，零客户端能力——
+# 出站仍只走 fd-ai-adapter（deny-external-http 对 fd-server 白名单入站栈，禁 reqwest）。
+http = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
+http-body-util = "0.1"
 # image 已从 workspace.dependencies 移除（E-35：零 crate 引用 workspace=true，死声明；
 # 且 caret 0.25.x 子版本行为漂移风险因无引用而不存在）。
 

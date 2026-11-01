@@ -1341,6 +1341,8 @@ pub async fn chat_with_image(
             },
         },
     ];
+    // temperature 0.6：MLX 缺省 temperature=0 时 4-bit VL 模型确定性退化
+    //（重复 token / 结构崩坏成片），采样温度显著降结构性损坏率（实测）。
     let payload = serde_json::json!({
         "model": model,
         "messages": [
@@ -1348,6 +1350,7 @@ pub async fn chat_with_image(
             { "role": "user", "content": content },
         ],
         "max_tokens": max_tokens,
+        "temperature": 0.6,
     });
     let url = format!("{}/v1/chat/completions", client.endpoint);
     let resp = client

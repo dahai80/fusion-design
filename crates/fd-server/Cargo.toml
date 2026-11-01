@@ -1,0 +1,37 @@
+[package]
+name = "fd-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Fusion-Design web 服务面 — 生成/迭代/还原/导出 API + WASM 画布托管 + D1 工作台（issue#31/DS-0）"
+
+[lib]
+name = "fd_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fusion-design-server"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+base64 = { workspace = true }
+# 入站监听栈（127.0.0.1 only）。出站 HTTP 禁止——模型调用一律经 fd-ai-adapter。
+http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+fd-ai-adapter = { path = "../fd-ai-adapter" }
+fd-canvas-core = { path = "../fd-canvas-core" }
+fd-codegen = { path = "../fd-codegen" }
+fd-design-system = { path = "../fd-design-system" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -468,3 +468,77 @@ fn text_to_ui_skill_prompt_constructed() {
         calls[0]
     );
 }
+
+#[test]
+fn repair_model_json_fixes_missing_element_open_brace() {
+    // 4B 模型实测缺陷类：nodes 数组元素漏写 `{`，闭 `}` 仍在。
+    let broken = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"g1","kind":"group","x":0,"y":0,"w":100,"h":100},"id":"t1","kind":"text","x":10,"y":10,"w":50,"h":20,"text":"欢迎登录"}]}},"#;
+    let repaired = repair_model_json(broken);
+    let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+    let nodes = v["page"]["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes.len(), 2, "两个元素都须保留: {repaired}");
+    assert_eq!(nodes[1]["id"], "t1");
+    assert_eq!(nodes[1]["text"], "欢迎登录");
+}
+
+#[test]
+fn repair_model_json_strips_trailing_comma_at_eof() {
+    let broken = r#"{"page":{"width":10,"height":20,"nodes":[]}},"#;
+    let repaired = repair_model_json(broken);
+    let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+    assert_eq!(v["page"]["width"], 10);
+}
+
+#[test]
+fn parse_ui_json_recovers_missing_element_open_brace() {
+    // 端到端：坏输出经修复链后应成功产出 PenDocument（fail visibly 不触发）。
+    let broken = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"g1","kind":"group","x":0,"y":0,"w":100,"h":100},"id":"t1","kind":"text","x":10,"y":10,"w":50,"h":20,"text":"标题"}]}}"#;
+    let doc = parse_ui_json(broken, "page-1").expect("修复链应兜住漏开括号");
+    let page = doc.pages.first().expect("page exists");
+    assert_eq!(page.nodes.len(), 2);
+    assert!(page.nodes.iter().any(|n| n.id == "t1"));
+}
+
+#[test]
+fn repair_model_json_fixes_vision_value_garbage() {
+    // 视觉模型实测缺陷类：悬空引号 / 重复数字 / 字符串后垃圾段 / 尾逗号。
+    let broken = r##"{
+  "page": {
+    "width": 1480,
+    "nodes": [
+      {"id": "n0", "kind": "rect", "x": 0", "y": 60", "w": 480, "h": 60 16, "fill": "# "#6b4e9a",}
+    ]
+  }
+"##;
+    let repaired = repair_model_json(broken);
+    let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+    let n = &v["page"]["nodes"][0];
+    assert_eq!(n["x"], 0, "悬空引号删除后 x=0: {repaired}");
+    assert_eq!(n["y"], 60, "悬空引号删除后 y=60");
+    assert_eq!(n["h"], 60, "重复数字删除后 h=60");
+    assert_eq!(n["fill"], "# ", "垃圾段删除后 fill 可解析");
+}
+
+#[test]
+fn repair_model_json_keeps_multi_digit_tokens() {
+    // 回归护栏：数字 token 内部（100/400/16.5）不可被重复数字规则误删。
+    let ok = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"n0","kind":"rect","x":100,"y":400,"w":16.5,"h":900}]}}"#;
+    let v: serde_json::Value = serde_json::from_str(&repair_model_json(ok)).expect("parses");
+    assert_eq!(v["page"]["nodes"][0]["x"], 100);
+    assert_eq!(v["page"]["nodes"][0]["y"], 400);
+    assert_eq!(v["page"]["nodes"][0]["w"], 16.5);
+}
+
+#[test]
+fn parse_ui_json_recovers_vl7b_output() {
+    // Qwen2.5-VL-7B 实测输出（登录页截图还原）：键位孤儿串/双冒号等缺陷，
+    // 修复链应兜住并产出完整 PenDocument。
+    let raw = r##"{"page":{"width":1440,"height":900,"nodes":[{"id":"1","kind":"group","x":280,"y":150,"w":980,"h":600,"text":"","fill":"#f9f9f99","stroke":"#f9f999"},{"id":"2","kind":"text","x":412,"y":189,"w":320,"h":50,"text":"User Login","text-align":"center","font-family":"Arial","font-size":30,"font-weight":"bold"},{"id":"3","kind":"":"text","x":412,"y":229,"w":400,"h":50,"text":"Sign in to continue","text-align":"center","font-family":"Arial","font-size":15,"font-weight":"normal"},{"id":"4","kind":"image","x":412,"y":280,"w":400,"h":50,"text":"","fill":"#f9f9f9","stroke":"#f9f9f9","children":[{"id":"5","kind":"text","x":412,"y":280,"w":320,"h":50,"text":"Email address","text-align":"left","font-family":"Arial","font-size":15,"font-weight":"normal"},{"id":"6","kind":"text","x":412,"y":330,"w":3200,"h":50","text":"Password","text-align":"left","left","font-family-family":"Arial","Arial","font-size":15015,"font-weight":"normal"},{"id":"7","kind":"image","x":41412,"y":380,"w":4000,"h":50,"text":"","fill":"#f9f9f999","stroke":"#f9999","children":[{"id":"8","kind":"text","":"text","x":411412,"y":380,"w400":"0h":5050,"text":"Sign In","text-align":"center","font-family":"Arial","":"Arial","font-size":150,"":"font-weight":"bold"},{"id":"9","kind":"image","x":41412,"y":"0w":"0h50":"50"text":"","fill":"#f99","stroke":"#999","children":[{"id":"10","kind":"text","x412":"y380":"w400":"h50":"50"text":"Forgot password? Create account","text-align":"left","font-family":"Arial","font-size":15,"font-weight":"normal"},{"id":"11","kind":"image","x412y":"380w400":"h500":"50"text":"","fill":"#f99999","stroke":"#99999","children":[{"id":"12","kind":"text","":"text","x412y380w4000h50"text":"Remember me","text-align":"left","font-family-familyArial":"Arialfont-size15":"15font-weight":"normal"}]}]}]}}"##;
+    let doc = parse_ui_json(raw, "restored").expect("VL 输出修复链应兜住");
+    let page = doc.pages.first().expect("page exists");
+    assert!(!page.nodes.is_empty(), "节点不可为空");
+    assert!(page
+        .nodes
+        .iter()
+        .any(|n| n.text.as_deref() == Some("User Login")));
+}

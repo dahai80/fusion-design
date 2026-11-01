@@ -19,3 +19,6 @@ docs/claude-design-insight.md
 docs/design-insight.md
 docs/design-plan-ar.md
 docs/figma-import-feasibility.md
+
+# fusion-design-server 运行时 pid 文件
+.server.pid

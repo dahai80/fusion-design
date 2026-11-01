@@ -16,6 +16,10 @@ cd "$(dirname "$0")/.."
 
 # 出站 HTTP 库清单（小写匹配 Cargo.toml 依赖名）。
 HTTP_LIBS="reqwest|ureq|hyper|attohttpc|isahc|surf|minreq"
+# issue#31/DS-0：fd-server 是入站监听 crate（127.0.0.1 only），允许声明 hyper 入站栈
+# （hyper/hyper-util/http-body-util/http，仅 server/http1 特性）。reqwest 等出站客户端
+# 库在 fd-server 依然禁止——出站推理只经 fd-ai-adapter，离线约束不破。
+OUTBOUND_LIBS="reqwest|ureq|attohttpc|isahc|surf|minreq"
 
 status=0
 
@@ -24,6 +28,13 @@ violating_tomls=$(
     for toml in crates/*/Cargo.toml; do
         crate=$(basename "$(dirname "$toml")")
         if [ "$crate" = "fd-ai-adapter" ]; then
+            continue
+        fi
+        # fd-server：入站栈白名单放行，出站客户端库照常拦截。
+        if [ "$crate" = "fd-server" ]; then
+            if grep -qE "^[[:space:]]*(${OUTBOUND_LIBS})([[:space:]]*=|\")" "$toml"; then
+                echo "$toml"
+            fi
             continue
         fi
         # 匹配依赖段中的库名（行首空白 + 库名 = "版本" 或库名 = { ... }）
@@ -45,6 +56,14 @@ violating_srcs=$(
     while IFS= read -r src; do
         crate=$(basename "$(dirname "$(dirname "$src")")")
         if [ "$crate" = "fd-ai-adapter" ]; then
+            continue
+        fi
+        # fd-server：允许 use hyper/hyper-util/http-body_util/http（入站监听），
+        # 其余 HTTP 库（含 reqwest）照常拦截。
+        if [ "$crate" = "fd-server" ]; then
+            if grep -qE "(use[[:space:]]+(${OUTBOUND_LIBS})(::|[[:space:]])|(${OUTBOUND_LIBS})::)" "$src"; then
+                echo "$src"
+            fi
             continue
         fi
         # use reqwest / reqwest:: / reqwest! 等

@@ -994,7 +994,7 @@ pub async fn encode_image_base64_async(path: &std::path::Path) -> anyhow::Result
 /// 避免 7B 模型自行发明 components/type 等不匹配 schema 的结构。
 pub fn ui_generator_system_prompt() -> String {
     "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字与 markdown 围栏。\
+只输出 JSON，禁止额外文字与 markdown 围栏。输出单行紧凑 JSON，禁止换行与缩进。\
 page 含 width/height（默认 1440×900），nodes 列表每项 \
 {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
 示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
@@ -1020,7 +1020,15 @@ pub fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument>
                 // R-2：修复仍失败 → fail visibly，不再静默回退合成占位文档
                 // （审计 R-2：伪成功占位掩盖模型输出错误，用户须看到真实失败）。
                 Err(e2) => {
+                    // 节点级抢救：模型输出中途损坏时，逐节点解析抢救完好节点，
+                    // 丢弃损坏节点（还原草稿语义——部分节点仍可用，fail visibly 降级为 warn）。
+                    if let Some(doc) = salvage_pen_document(&repaired) {
+                        tracing::warn!(error = %e2, "parse_ui_json: 整体解析失败，节点级抢救成功（部分节点丢弃）");
+                        return Ok(doc);
+                    }
                     tracing::error!(error = %e2, "parse_ui_json: JSON 修复仍失败，拒绝伪成功");
+                    // 原始输出留档（截断 2KB）：缺陷类定位必需，否则无法分析模型坏输出形状。
+                    tracing::error!(raw = %String::from_utf8_lossy(&cleaned.as_bytes()[..cleaned.len().min(2048)]), "parse_ui_json: 修复失败原始输出留档");
                     anyhow::bail!("模型输出非合法 JSON，修复失败: {e2}");
                 }
             }
@@ -1087,8 +1095,9 @@ pub fn repair_model_json(s: &str) -> String {
     let mut rebuilt = String::with_capacity(out.len());
     let mut i = 0;
     while i < bytes.len() {
-        // 检测模式：空格 + `"` + ASCII 字母 + ... + `":`，且前一非空字符非 `, : [ {`
-        if bytes[i] == b' '
+        // 检测模式：空白（空格/制表/换行，多行缩进输出同样命中）+ `"` + ASCII 字母
+        // + ... + `":`，且前一非空字符非 `, : [ {`
+        if (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
             && i + 3 < bytes.len()
             && bytes[i + 1] == b'"'
             && bytes[i + 2].is_ascii_alphabetic()
@@ -1125,6 +1134,13 @@ pub fn repair_model_json(s: &str) -> String {
         }
         i = end;
     }
+    // 数组元素漏 `{`（`},"id":` 形态）+ 尾逗号：4B 模型实测缺陷类。
+    // 须先于 balance_json_braces：孤儿元素闭 `}` 会触发 balance 的负深度截断，
+    // 先补开括号才能保住后续内容。
+    // 值级垃圾先修：悬空引号/垃圾段会在结构扫描中制造假字符串态，
+    // 须先清理再做元素开括号/尾逗号结构修复。
+    rebuilt = fix_value_garbage(&rebuilt);
+    rebuilt = fix_element_open_brace(&rebuilt);
     // 括号失衡修复：7B 模型常输出尾部多余 `}` 或中途截断。
     balance_json_braces(&mut rebuilt);
     rebuilt
@@ -1198,6 +1214,369 @@ fn balance_json_braces(s: &mut String) {
         tracing::info!(missing = tail.len(), "balance_json_braces: 补齐缺失闭括号");
         s.push_str(&tail);
     }
+}
+
+/// 数组元素漏开括号修复（4B 模型实测缺陷类）：`},"id":` → `},{"id":`。
+/// 模型在 nodes 数组中漏写元素的 `{`，但其闭 `}` 存在——补开括号即可配平。
+/// 伴生尾逗号剔除：`,` 紧跟 `]`/`}`/EOF 时删除（模型输出尾部悬空逗号）。
+/// 仅在严格解析失败后的修复路径运行，合法 JSON 不进本函数。
+fn fix_element_open_brace(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut stack: Vec<u8> = Vec::new();
+    let mut in_str = false;
+    let mut escape = false;
+    // 数组上下文中：`}` 后紧跟 `,` 时置位，若下一非空白是 `"` 则补 `{`。
+    let mut pending_elem = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let char_len = utf8_char_len(b);
+        let end = (i + char_len).min(bytes.len());
+        let slice = match std::str::from_utf8(&bytes[i..end]) {
+            Ok(v) => v,
+            Err(_) => {
+                i = end;
+                continue;
+            }
+        };
+        if in_str {
+            out.push_str(slice);
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            i = end;
+            continue;
+        }
+        match b {
+            b'"' => {
+                if pending_elem {
+                    // 数组元素以字符串键开头 = 漏 `{`，补开括号压栈。
+                    out.push('{');
+                    stack.push(b'{');
+                    pending_elem = false;
+                    tracing::info!("fix_element_open_brace: 补数组元素缺失开括号");
+                }
+                in_str = true;
+                out.push_str(slice);
+            }
+            b'{' | b'[' => {
+                pending_elem = false;
+                stack.push(b);
+                out.push_str(slice);
+            }
+            b'}' | b']' => {
+                pending_elem = false;
+                let opener = if b == b'}' { b'{' } else { b'[' };
+                if stack.last() == Some(&opener) {
+                    stack.pop();
+                }
+                // 尾逗号剔除：闭括号前最近非空白字符是 `,` 则删之（连同其后空白）。
+                let trimmed = out.trim_end();
+                if trimmed.ends_with(',') {
+                    let keep = trimmed.len() - 1;
+                    out.truncate(keep);
+                    tracing::info!("fix_element_open_brace: 剔除闭括号前尾逗号");
+                }
+                out.push_str(slice);
+            }
+            b',' => {
+                // 仅数组上下文且前一非空白字符是 `}` 时视为元素边界。
+                let prev_ok = out.trim_end().ends_with('}');
+                pending_elem = stack.last() == Some(&b'[') && prev_ok;
+                out.push_str(slice);
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                out.push_str(slice);
+            }
+            _ => {
+                pending_elem = false;
+                out.push_str(slice);
+            }
+        }
+        i = end;
+    }
+    // EOF 尾逗号剔除。
+    let trimmed = out.trim_end();
+    if trimmed.ends_with(',') {
+        out.truncate(trimmed.len() - 1);
+    }
+    out
+}
+
+/// 值级垃圾修复（视觉模型实测缺陷类，仅修复路径运行，合法 JSON 不进本函数）：
+/// - 值后悬空引号：`"x": 0",` → `"x": 0,`（数字/字符串值闭引号后多出一个引号）
+/// - 重复数字：`"h": 60 16,` → `"h": 60,`（合法 JSON 值域外不会出现数字-空白-数字）
+/// - 字符串闭引号后垃圾段：`"# "#6b4e9a",` → `"# ",`（删到下一个引号含之）
+fn fix_value_garbage(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut in_str = false;
+    let mut escape = false;
+    let mut stack: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let char_len = utf8_char_len(b);
+        let end = (i + char_len).min(bytes.len());
+        let slice = match std::str::from_utf8(&bytes[i..end]) {
+            Ok(v) => v,
+            Err(_) => {
+                i = end;
+                continue;
+            }
+        };
+        if in_str {
+            out.push_str(slice);
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            i = end;
+            continue;
+        }
+        if b == b'{' || b == b'[' {
+            stack.push(b);
+            out.push_str(slice);
+            i = end;
+            continue;
+        }
+        if b == b'}' || b == b']' {
+            let opener = if b == b'}' { b'{' } else { b'[' };
+            if stack.last() == Some(&opener) {
+                stack.pop();
+            }
+            out.push_str(slice);
+            i = end;
+            continue;
+        }
+        // 键位孤儿字符串：对象内 `,`/`{` 后的字符串若后续（跳空白）不是 `:`，
+        // 为模型重复值产物（如 `"left","left",`），删除该串及其后逗号。
+        // 数组上下文不适用（字符串数组元素合法）。
+        if b == b'"' && stack.last() == Some(&b'{') {
+            let prev = out.trim_end().chars().last();
+            if matches!(prev, Some('{') | Some(',')) {
+                if let Some(close) = find_closing_quote(bytes, i) {
+                    let mut j = close + 1;
+                    while j < bytes.len()
+                        && (bytes[j] == b' '
+                            || bytes[j] == b'\t'
+                            || bytes[j] == b'\n'
+                            || bytes[j] == b'\r')
+                    {
+                        j += 1;
+                    }
+                    let after = bytes.get(j).copied();
+                    if !matches!(after, Some(b':')) {
+                        tracing::info!("fix_value_garbage: 删除键位孤儿字符串");
+                        // 跳过字符串；若其后是逗号一并跳过。
+                        i = if after == Some(b',') {
+                            j + 1
+                        } else {
+                            close + 1
+                        };
+                        continue;
+                    }
+                }
+            }
+        }
+        // 非字符串态的引号：判定是否值后悬空引号。
+        if b == b'"' {
+            let prev = out.trim_end().chars().last();
+            let prev_is_value_end = matches!(prev, Some(c) if c.is_ascii_digit() || c == '"');
+            if prev_is_value_end {
+                // 向后看（跳空白）首个字符：逗号/闭括号/EOF → 悬空引号，删之。
+                let mut j = i + 1;
+                while j < bytes.len()
+                    && (bytes[j] == b' '
+                        || bytes[j] == b'\t'
+                        || bytes[j] == b'\n'
+                        || bytes[j] == b'\r')
+                {
+                    j += 1;
+                }
+                let next = bytes.get(j).copied();
+                if matches!(next, None | Some(b',') | Some(b'}') | Some(b']')) {
+                    tracing::info!("fix_value_garbage: 删除值后悬空引号");
+                    i = end;
+                    continue;
+                }
+            }
+            in_str = true;
+            out.push_str(slice);
+            i = end;
+            continue;
+        }
+        // 非字符串态的数字：与前一数字 token 之间隔了空白 → 重复数字，跳过整个数字串。
+        // 注意必须要求 out 以空白结尾——同一 token 内的数字（如 100 的后两位）
+        // 与前一数字间无空白，不可误删。
+        if b.is_ascii_digit() && out.ends_with(|c: char| c.is_whitespace()) {
+            let trimmed_prev = out.trim_end().chars().last();
+            if matches!(trimmed_prev, Some(c) if c.is_ascii_digit()) {
+                let mut j = i;
+                while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'.') {
+                    j += 1;
+                }
+                tracing::info!("fix_value_garbage: 删除重复数字段");
+                i = j;
+                continue;
+            }
+        }
+        // 非字符串态的垃圾字符（前一非空白是闭引号）：删到下一个引号（含）或逗号（不含）。
+        if !b.is_ascii_whitespace()
+            && b != b','
+            && b != b':'
+            && b != b'{'
+            && b != b'}'
+            && b != b'['
+            && b != b']'
+        {
+            let prev = out.trim_end().chars().last();
+            if prev == Some('"') {
+                let mut j = i;
+                let mut cut = None;
+                while j < bytes.len() {
+                    if bytes[j] == b'"' {
+                        cut = Some(j + 1);
+                        break;
+                    }
+                    if bytes[j] == b',' {
+                        cut = Some(j);
+                        break;
+                    }
+                    j += 1;
+                }
+                if let Some(cut) = cut {
+                    tracing::info!("fix_value_garbage: 删除字符串后垃圾段");
+                    i = cut;
+                    continue;
+                }
+            }
+        }
+        out.push_str(slice);
+        i = end;
+    }
+    out
+}
+
+/// 节点级抢救：从坏输出中切出 nodes 数组的顶层 `{...}` 块，逐块独立解析，
+/// 保留合法块、丢弃损坏块。≥1 个合法节点即产出文档（还原草稿语义）。
+fn salvage_pen_document(s: &str) -> Option<PenDocument> {
+    let bytes = s.as_bytes();
+    // 定位 nodes 数组起始 `[`（容忍 `"nodes": [` 空格变体）。
+    let nodes_key = s.find("\"nodes\"")?;
+    let arr_start = bytes[nodes_key..].iter().position(|&b| b == b'[')? + nodes_key;
+    // 字符串感知扫描，收集数组内顶层对象块。
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut escape = false;
+    let mut obj_start: Option<usize> = None;
+    let mut i = arr_start + 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => {
+                if depth == 0 {
+                    obj_start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(st) = obj_start {
+                        chunks.push(&s[st..=i]);
+                    }
+                    obj_start = None;
+                }
+            }
+            b']' if depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    let mut good: Vec<serde_json::Value> = Vec::new();
+    for c in &chunks {
+        match serde_json::from_str::<serde_json::Value>(c) {
+            Ok(v) => good.push(v),
+            Err(e) => tracing::warn!(error = %e, "salvage: 丢弃损坏节点块"),
+        }
+    }
+    if good.is_empty() {
+        tracing::warn!(chunks = chunks.len(), "salvage: 无可抢救节点");
+        return None;
+    }
+    // 页面尺寸：就近扫描 `"width":<num>` / `"height":<num>`（缺省 1440×900）。
+    let w = scan_num_after_key(s, "width").unwrap_or(1440.0);
+    let h = scan_num_after_key(s, "height").unwrap_or(900.0);
+    let nodes = match parse_nodes_with_depth(&serde_json::Value::Array(good), 0) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "salvage: 抢救节点 schema 解析失败");
+            return None;
+        }
+    };
+    let mut doc = PenDocument::new();
+    let mut page = Page::new("page_1", "salvaged", w, h);
+    for n in nodes {
+        page.add(n);
+    }
+    tracing::info!(nodes = page.nodes.len(), "salvage: 节点级抢救产出文档");
+    doc.add_page(page);
+    Some(doc)
+}
+
+/// 在文本中找 `"key":` 后的首个数字（容忍冒号后空格/引号包裹）。
+fn scan_num_after_key(s: &str, key: &str) -> Option<f64> {
+    let pat = format!("\"{key}\":");
+    let pos = s.find(&pat)?;
+    let rest = &s[pos + pat.len()..];
+    let mut num = String::new();
+    for c in rest.chars() {
+        if c.is_ascii_digit() || c == '.' || c == '-' {
+            num.push(c);
+        } else if !num.is_empty() {
+            break;
+        } else if c.is_whitespace() || c == '"' {
+            continue;
+        } else {
+            return None;
+        }
+    }
+    num.parse::<f64>().ok()
+}
+
+/// 从开引号字节位找配对闭引号（处理 `\\` 转义）。返回闭引号下标。
+fn find_closing_quote(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut j = open + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b'"' => return Some(j),
+            _ => j += 1,
+        }
+    }
+    None
 }
 
 const MAX_NODE_DEPTH: usize = 20;
