@@ -264,6 +264,26 @@ fusion-design theme --mode dark > tokens-dark.css
 
 **Usage**: `<link>` or `@import` `tokens.css` in frontend; components reference `var(--color-primary)` etc. Switching systems means swapping `tokens.css` only — global Token sync across the whole site.
 
+## Scenario 10: Web Workbench (fd-server, browser-based)
+
+**Goal**: drive the full design loop from a browser — chat generation, screenshot restoration, version rollback, export, and ecosystem handoff — without leaving `127.0.0.1:11493`.
+
+```bash
+cargo build --release -p fd-server
+./start.sh start          # open http://127.0.0.1:11493
+./start.sh status|stop|log
+```
+
+**Flow**:
+1. Type a prompt (e.g. `login page, email+password form, indigo accent`) → `POST /api/generate` renders v1 on the WASM canvas.
+2. Iterate in chat (`change the primary button label to Sign In`) → `POST /api/iterate` produces v2; the version list on the right supports click-to-view and rollback.
+3. Paste or upload a screenshot → `POST /api/restore` runs the local vision model and creates a new editable session.
+4. Export via **HTML** / **React** buttons, or hand off: **Send to Code** (`POST /api/send-to-code`, HTML+TSX land in the fusion-code IPC dir) and **Save to Artifacts** (`POST /api/save-artifact`, `save_artifact` IPC message for fusion-artifacts-engine with `source: fusion-design` attribution).
+
+**Env**: `FUSION_DESIGN_PORT` (default 11493), `FUSION_DESIGN_DATA_DIR` (IPC outbox + logs, default `~/.fusion-design`), `FUSION_DESIGN_WASM_DIR` (canvas assets; default discovery chain exe dir > cwd > target wasm dirs).
+
+**Note**: generation requires the local inference stack (gateway :11432 or MLX :11434 + `FUSION_CLIENT_KEY`). Cross-repo consumers for the ecosystem handoff are fusion-code#228 / fusion-artifacts-engine#76.
+
 ## Appendix: 22 Subcommand Quick Reference
 
 | Subcommand | Purpose | Required args | See scenario |

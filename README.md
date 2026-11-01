@@ -4,7 +4,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.17 — 13 crates + vendored op-ai, 495 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.17: auth key adopts canonical `FUSION_CLIENT_KEY` with legacy `FUSION_MLX_API_KEY` alias-chain fallback (issue #30, config Phase 3; alias removed 2027-01-01); check-env 0 findings for this repo. Zero open issues, zero open PRs, no stale branches. See `docs/changes/v0.1.17.md`.
+**Status**: v0.1.18 — 14 crates + vendored op-ai, 519 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.18: web workbench landed — `fd-server` on `127.0.0.1:11493` with chat generation/iteration, screenshot restoration (local vision model), version rollback, HTML/React export, WASM canvas hosting, and ecosystem exits `/api/send-to-code` + `/api/save-artifact` (issues #31/#33); gateway/supervisor registration tracked cross-repo (fusion-gateway#448, fusion-supervisor#89). See `docs/changes/v0.1.18.md`.
 
 ## 📋 Overview
 
@@ -58,6 +58,7 @@ fusion-design/
 │   ├── fd-host-desk/           ← Fusion-Desk WKWebView host bridge
 │   ├── fd-host-web/            ← WASM frontend rendering (WebShell + BridgeCommand)
 │   ├── fd-export/              ← PNG/SVG/PDF/HTML batch export
+│   ├── fd-server/              ← Web workbench HTTP service (:11493, issue #31) — chat generate/iterate/restore/export/rollback + WASM canvas hosting
 │   └── fd-cli/                 ← CLI (generate/export/lint/undo/redo/health/diff/theme)
 ├── vendor/
 │   └── openpencil/             ← Trimmed OpenPencil subset (Git subtree)
@@ -104,6 +105,25 @@ cargo run -p fd-cli -- --help                                  # CLI available
 
 **安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
 
+## 🌐 Web Workbench (fd-server)
+
+Issues #31/#33: browser-based workbench served by `fusion-design-server` on `127.0.0.1:11493` — same Rust kernel as the CLI, no cloud calls.
+
+```bash
+cargo build --release -p fd-server
+./start.sh start          # http://127.0.0.1:11493
+./start.sh status|stop|log
+```
+
+- **Chat generation/iteration** — `POST /api/generate` / `POST /api/iterate` (retry loop + model-JSON repair chain against degenerate 4-bit outputs)
+- **Screenshot restoration** — `POST /api/restore` (image → local vision model `Qwen2.5-VL-7B-4bit` → editable PenDocument)
+- **Export** — `POST /api/export` (HTML / React+Tailwind)
+- **Versioning** — `POST /api/rollback`, `GET /api/version/{session}/{n}`, `GET /api/sessions`
+- **Ecosystem exits** — `POST /api/send-to-code` (HTML+TSX into the fusion-code IPC dir), `POST /api/save-artifact` (`save_artifact` IPC message for fusion-artifacts-engine)
+- **WASM canvas** — the served workbench mounts the real fd-host-web canvas; assets discovered via `FUSION_DESIGN_WASM_DIR` > exe dir > cwd > target wasm dirs
+
+Real-model E2E: `cargo test -p fd-server --test e2e_real_model -- --ignored` (requires gateway :11432 + `FUSION_CLIENT_KEY` + vision model loaded).
+
 **CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
 
 | Crate | Tests | Coverage |
@@ -143,6 +163,9 @@ All optional. Unset = default. Affects runtime behavior without code changes.
 | `FUSION_LOG_DIR` | (platform default) | Override the file-log directory. Default: `~/Library/Logs/fusion-design/` (macOS) / `~/.local/share/fusion-design/logs` (Linux). | fd-cli |
 | `FUSION_VENV_ROOT` | (auto-detect) | Root path of the shared `.venv` for ecosystem tool invocation. Falls back to workspace-relative discovery. | fd-ecosystem |
 | `FUSION_TRAINER_BIN` | `fusion-trainer` | Path to the fusion-trainer binary for ecosystem training IPC. Override when not on `PATH`. | fd-ecosystem |
+| `FUSION_DESIGN_PORT` | `11493` | Web workbench listen port (fd-server). Registered owner `fusion-design` in the workspace port-registry. | fd-server |
+| `FUSION_DESIGN_DATA_DIR` | `~/.fusion-design` | Base dir for server data: IPC outbox (fusion-code / fusion-artifacts-engine messages) and logs (`logs/server.log`). | fd-server |
+| `FUSION_DESIGN_WASM_DIR` | (discovery chain) | Dir holding `fd_host_web_bg.wasm` + `fd_host_web.js` for the web workbench canvas. Default chain: exe dir > cwd > `target/wasm32-unknown-unknown/{release,debug}`. | fd-server |
 
 > Audit note: `FUSION_MLX_STREAM_IDLE_SECS` is introduced by P2 FAULT-1 (v0.1.14). `FUSION_LOG_DISABLE_FILE` / `FUSION_LOG_DIR` (file-log toggle + dir override) belong to OPS-13 (v0.1.14, fd-cli 文件日志落地). The other env vars were previously undocumented or inline-only; this table is the single source of truth (OPS-16).
 

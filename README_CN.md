@@ -4,9 +4,9 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：v0.1.17 — 13 个 crate + vendored op-ai，495 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
+**状态**：v0.1.18 — 14 个 crate + vendored op-ai，519 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
 
-v0.1.17：鉴权 key 采纳规范名 `FUSION_CLIENT_KEY`，legacy 名 `FUSION_MLX_API_KEY` 经别名链兜底（issue #30，config Phase 3；别名 2027-01-01 起删除）；check-env 本仓 0 发现项。零开放 issue、零开放 PR、无残留分支。详见 `docs/changes/v0.1.17.md`。
+v0.1.18：Web 工作台落地——`fd-server` 于 `127.0.0.1:11493` 提供对话式生成/迭代、截图还原（本地视觉模型）、版本回退、HTML/React 导出、WASM 画布托管，及生态出口 `/api/send-to-code` + `/api/save-artifact`（issue #31/#33）；gateway/supervisor 注册跨仓跟踪（fusion-gateway#448、fusion-supervisor#89）。详见 `docs/changes/v0.1.18.md`。
 
 ## 📋 概览
 
@@ -60,6 +60,7 @@ fusion-design/
 │   ├── fd-host-desk/           ← Fusion-Desk WKWebView 宿主桥
 │   ├── fd-host-web/            ← WASM 前端渲染（WebShell + BridgeCommand）
 │   ├── fd-export/              ← PNG/SVG/PDF/HTML 批量导出
+│   ├── fd-server/              ← Web 工作台 HTTP 服务（:11493，issue #31）— 对话生成/迭代/还原/导出/回退 + WASM 画布托管
 │   └── fd-cli/                 ← 命令行（generate/export/lint/undo/redo/health/diff/theme/chat）
 ├── vendor/
 │   └── openpencil/             ← 裁剪后的 OpenPencil 子集（Git subtree）
@@ -109,6 +110,8 @@ cargo run -p fd-cli -- --help                                  # CLI 可用
 **fd-cli chat 消费方声明（issue #17 诚实回溯）**：issue #17 设想 `chat` 子命令为 fusion-studio subprocess 入口取代直连 MLX，但经核实 fusion-studio 实际走 fusion-gateway TCP NDJSON（`StreamingBridge.swift`，帧 schema 为 `chat_event`/`chat_done`/`error` + `session_id`/`event`），**不经 fd-cli chat**。故本子命令无 studio 消费方，NDJSON 帧 schema（`delta`/`chat_done`/`error`）为本子命令自洽契约，供 CLI 管道/脚本/测试消费，非对齐 studio。
 
 **安全护栏**：`.fusiondesign` 反序列化限制节点嵌套 ≤64、总数 ≤100000；IPC 消息文件 ≤8MB，防恶意输入栈溢出/OOM。
+
+**Web 工作台（fd-server，issue #31/#33）**：浏览器工作台由 `fusion-design-server` 于 `127.0.0.1:11493` 提供——与 CLI 同一 Rust 内核，零云端调用。`cargo build --release -p fd-server && ./start.sh start` 后打开 http://127.0.0.1:11493 。能力：`/api/generate` `/api/iterate`（重试 + 模型 JSON 修复链）、`/api/restore`（截图 → 本地视觉模型 → 可编辑文档）、`/api/export`（HTML/React）、`/api/rollback` + 版本查询、生态出口 `/api/send-to-code`（HTML+TSX 落 fusion-code IPC 目录）与 `/api/save-artifact`（`save_artifact` IPC 消息供 artifacts-engine 消费）、WASM 画布托管。真模型 E2E：`cargo test -p fd-server --test e2e_real_model -- --ignored`（需 gateway :11432 + `FUSION_CLIENT_KEY` + 视觉模型已加载）。环境变量（`FUSION_DESIGN_PORT` / `FUSION_DESIGN_DATA_DIR` / `FUSION_DESIGN_WASM_DIR`）见 [README.md](README.md#-environment-variables)。
 
 **CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）+ `deny-external-http` 出站 HTTP 仅限 fd-ai-adapter（ubuntu）；macOS-14 跑 check+test 消除平台盲区；tag 触发 release tarball。
 

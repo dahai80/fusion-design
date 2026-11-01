@@ -264,6 +264,26 @@ fusion-design theme --mode dark > tokens-dark.css
 
 **用法**：`tokens.css` 在前端 `<link>` 或 `@import`，组件用 `var(--color-primary)` 等引用。换规范只需换 `tokens.css`，全站 Token 全局同步。
 
+## 场景 10：Web 工作台（fd-server，浏览器端）
+
+**目标**：在浏览器 `127.0.0.1:11493` 完成完整设计闭环——对话生成、截图还原、版本回退、导出、生态交接，无需离开页面。
+
+```bash
+cargo build --release -p fd-server
+./start.sh start          # 打开 http://127.0.0.1:11493
+./start.sh status|stop|log
+```
+
+**流程**：
+1. 输入提示词（如 `登录页，邮箱+密码表单，主色 indigo`）→ `POST /api/generate` 在 WASM 画布渲染 v1。
+2. 对话迭代（`把主按钮文案改成 Sign In`）→ `POST /api/iterate` 产出 v2；右侧版本列表支持点选查看与回退。
+3. 粘贴或上传截图 → `POST /api/restore` 走本地视觉模型，新建可编辑会话。
+4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`，`save_artifact` IPC 消息供 artifacts-engine 消费，溯源 `source: fusion-design`）。
+
+**环境变量**：`FUSION_DESIGN_PORT`（默认 11493）、`FUSION_DESIGN_DATA_DIR`（IPC 发件箱 + 日志，默认 `~/.fusion-design`）、`FUSION_DESIGN_WASM_DIR`（画布资产；默认发现链 可执行文件目录 > cwd > target wasm 目录）。
+
+**注意**：生成需本地推理栈在线（gateway :11432 或 MLX :11434 + `FUSION_CLIENT_KEY`）。生态交接的跨仓消费方为 fusion-code#228 / fusion-artifacts-engine#76。
+
 ## 附录：22 子命令速查表
 
 | 子命令 | 用途 | 必填参数 | 详见场景 |
