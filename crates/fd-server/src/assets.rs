@@ -133,6 +133,9 @@ mod tests {
         assert!(body.contains("id=\"fd-canvas-stage\""), "中栏画布舞台");
         assert!(body.contains("id=\"fd-versions\""), "右栏版本列表");
         assert!(body.contains("fd-canvas-mount"), "mount 校验用 canvas 元素");
+        // 生态出口按钮（issue#33/DS-2）：发给 Code / 存 Artifacts。
+        assert!(body.contains("id=\"send-to-code\""), "发给 Code 按钮");
+        assert!(body.contains("id=\"save-artifact\""), "存 Artifacts 按钮");
         // wasm 胶水由 app.js 动态 import，三栏骨架 + 桥容器齐备。
         let js = include_str!("web/app.js");
         assert!(js.contains("fd_host_web.js"), "app.js 须动态加载 wasm 胶水");
@@ -141,6 +144,14 @@ mod tests {
             "app.js 须加载 wasm 二进制"
         );
         assert!(js.contains("page.render-dom"), "须经桥命令驱动 DOM 渲染");
+        assert!(
+            js.contains("/api/send-to-code"),
+            "app.js 须调 send-to-code 接口"
+        );
+        assert!(
+            js.contains("/api/save-artifact"),
+            "app.js 须调 save-artifact 接口"
+        );
     }
 
     #[test]

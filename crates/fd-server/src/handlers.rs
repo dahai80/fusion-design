@@ -664,6 +664,168 @@ fn push_version(
     })))
 }
 
+/// 生态 IPC 基目录：FUSION_DESIGN_DATA_DIR > ~/.fusion-design。
+fn ipc_base_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("FUSION_DESIGN_DATA_DIR") {
+        return std::path::PathBuf::from(d);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".fusion-design")
+}
+
+/// 解析会话当前/指定版本文档为 PenDocument。
+fn resolve_session_doc(
+    state: &Arc<AppState>,
+    session: &str,
+    version: Option<u32>,
+) -> Result<fd_canvas_core::PenDocument, Box<Resp>> {
+    let Some(sess) = state.sessions.get(session) else {
+        return Err(Box::new(err_json(
+            hyper::StatusCode::NOT_FOUND,
+            &format!("session {session} 不存在"),
+        )));
+    };
+    let entry = match version {
+        Some(v) => sess.versions.iter().find(|e| e.version == v).cloned(),
+        None => sess.current_doc().cloned(),
+    };
+    let Some(entry) = entry else {
+        return Err(Box::new(err_json(
+            hyper::StatusCode::NOT_FOUND,
+            &format!("session {session} 无版本 v{:?}", version),
+        )));
+    };
+    doc_from_json(&entry.document).map_err(|e| {
+        Box::new(err_json(
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("PenDocument 反序列化失败: {e}"),
+        ))
+    })
+}
+
+#[derive(Deserialize)]
+pub struct SendToCodeRequest {
+    pub session: String,
+    #[serde(default)]
+    pub version: Option<u32>,
+    #[serde(default)]
+    pub component: Option<String>,
+}
+
+/// [→ 发给 Code]（issue#33/DS-2）：经 fd-ecosystem 文件 IPC 把当前设计导出
+/// （HTML + React/Tailwind）落到 fusion-code 约定目录并发通知消息。
+pub fn send_to_code(state: &Arc<AppState>, body: &[u8]) -> Resp {
+    send_to_code_with_base(state, &ipc_base_dir(), body)
+}
+
+pub fn send_to_code_with_base(state: &Arc<AppState>, base: &std::path::Path, body: &[u8]) -> Resp {
+    let req: SendToCodeRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return err_json(
+                hyper::StatusCode::BAD_REQUEST,
+                &format!("请求体解析失败: {e}"),
+            )
+        }
+    };
+    let doc = match resolve_session_doc(state, &req.session, req.version) {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let component = req
+        .component
+        .unwrap_or_else(|| "FusionDesignExport".to_string());
+    let link = fd_ecosystem::EcosystemLink::new(base);
+    match link.sync_to_code(&doc, &component) {
+        Ok(files) => {
+            tracing::info!(
+                session = %req.session,
+                files = files.len(),
+                "api/send-to-code: 设计已导出到 fusion-code IPC 目录"
+            );
+            ok_json(serde_json::json!({
+                "ok": true,
+                "component": component,
+                "files": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            }))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "api/send-to-code: IPC 写入失败");
+            err_json(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("发给 Code 失败: {e}"),
+            )
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SaveArtifactRequest {
+    pub session: String,
+    #[serde(default)]
+    pub version: Option<u32>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// [存 Artifacts]（issue#33/DS-2）：经 fd-ecosystem 文件 IPC 向
+/// fusion-artifacts-engine 约定目录写保存消息（source=fusion-design 溯源）。
+/// 消费方在 artifacts-engine 侧（跨仓 dahai80/fusion-artifacts-engine#76 跟踪）。
+pub fn save_artifact(state: &Arc<AppState>, body: &[u8]) -> Resp {
+    save_artifact_with_base(state, &ipc_base_dir(), body)
+}
+
+pub fn save_artifact_with_base(state: &Arc<AppState>, base: &std::path::Path, body: &[u8]) -> Resp {
+    let req: SaveArtifactRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return err_json(
+                hyper::StatusCode::BAD_REQUEST,
+                &format!("请求体解析失败: {e}"),
+            )
+        }
+    };
+    let doc = match resolve_session_doc(state, &req.session, req.version) {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let title = req
+        .title
+        .unwrap_or_else(|| format!("fusion-design {}", req.session));
+    let msg = fd_ecosystem::LinkMessage {
+        target: fd_ecosystem::EcosystemTarget::Custom("fusion-artifacts-engine".to_string()),
+        action: "save_artifact".to_string(),
+        payload: serde_json::json!({
+            "source": "fusion-design",
+            "title": title,
+            "session": req.session,
+            "version": req.version.unwrap_or_else(|| {
+                state
+                    .sessions
+                    .get(&req.session)
+                    .map(|s| s.current)
+                    .unwrap_or(0)
+            }),
+            "document": doc_json(&doc).unwrap_or_default(),
+            "design_system": doc.active_design_system,
+        }),
+    };
+    let link = fd_ecosystem::EcosystemLink::new(base);
+    match link.send(&msg) {
+        Ok(path) => {
+            tracing::info!(path = %path.display(), "api/save-artifact: 保存消息已写入 IPC");
+            ok_json(serde_json::json!({"ok": true, "ipc_message": path.display().to_string()}))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "api/save-artifact: IPC 写入失败");
+            err_json(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("存 Artifacts 失败: {e}"),
+            )
+        }
+    }
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -812,6 +974,97 @@ mod tests {
         assert!(
             v["document"].as_str().unwrap().contains("x"),
             "v2 文档仍可查询"
+        );
+    }
+
+    /// 生态出口（issue#33/DS-2）：发给 Code / 存 Artifacts 落盘验证（tempdir 隔离）。
+    #[tokio::test]
+    async fn send_to_code_and_save_artifact_write_ipc() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let doc = serde_json::json!({
+            "pages": [{
+                "id": "p1", "name": "home", "width": 1440.0, "height": 900.0,
+                "nodes": [
+                    {"id": "n1", "kind": "Text", "name": "title", "x": 10.0, "y": 10.0,
+                     "w": 200.0, "h": 30.0, "text": "Fusion"}
+                ]
+            }]
+        })
+        .to_string();
+        let sid = state.sessions.create(doc, "seed");
+        let base = tempfile::tempdir().unwrap();
+
+        // 发给 Code：HTML + TSX + 通知消息落 fusion-code 目录。
+        let body = serde_json::json!({"session": sid}).to_string();
+        let resp = send_to_code_with_base(&state, base.path(), body.as_bytes());
+        let v: serde_json::Value = json_of(resp).await;
+        assert!(v["error"].is_null(), "send-to-code 不应报错: {v}");
+        assert_eq!(v["ok"], true);
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2, "须写 HTML + TSX: {v}");
+        for f in files {
+            let p = std::path::Path::new(f.as_str().unwrap());
+            assert!(p.exists(), "IPC 文件须真实落盘: {}", p.display());
+        }
+        assert!(
+            files
+                .iter()
+                .all(|f| f.as_str().unwrap().contains("fusion-code")),
+            "文件须落 fusion-code 约定目录"
+        );
+
+        // 指定组件名 + 不存在的会话拒绝。
+        let body = serde_json::json!({"session": sid, "component": "LoginCard"}).to_string();
+        let resp = send_to_code_with_base(&state, base.path(), body.as_bytes());
+        let v: serde_json::Value = json_of(resp).await;
+        assert!(
+            v["files"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|f| f.as_str().unwrap().contains("LoginCard"))),
+            "自定义组件名生效: {v}"
+        );
+        let body = serde_json::json!({"session": "s-nope"}).to_string();
+        let resp = send_to_code_with_base(&state, base.path(), body.as_bytes());
+        assert_eq!(
+            resp.status(),
+            hyper::StatusCode::NOT_FOUND,
+            "未知会话应 404"
+        );
+
+        // 存 Artifacts：IPC 消息落 fusion-artifacts-engine 目录且 payload 带溯源。
+        let body = serde_json::json!({"session": sid, "title": "登录页"}).to_string();
+        let resp = save_artifact_with_base(&state, base.path(), body.as_bytes());
+        let v: serde_json::Value = json_of(resp).await;
+        assert!(v["error"].is_null(), "save-artifact 不应报错: {v}");
+        assert_eq!(v["ok"], true);
+        let msg_path = std::path::Path::new(v["ipc_message"].as_str().unwrap());
+        assert!(msg_path.exists(), "IPC 消息须真实落盘");
+        assert!(
+            msg_path
+                .to_string_lossy()
+                .contains("fusion-artifacts-engine"),
+            "消息须落 artifacts-engine 约定目录: {}",
+            msg_path.display()
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(msg_path).unwrap()).unwrap();
+        assert_eq!(payload["action"], "save_artifact");
+        assert_eq!(payload["payload"]["source"], "fusion-design");
+        assert_eq!(payload["payload"]["title"], "登录页");
+        assert!(
+            payload["payload"]["document"]
+                .as_str()
+                .unwrap_or("")
+                .contains("pages"),
+            "消息须携带完整文档"
+        );
+
+        // 非法请求体拒绝。
+        let resp = save_artifact_with_base(&state, base.path(), b"not-json");
+        assert_eq!(
+            resp.status(),
+            hyper::StatusCode::BAD_REQUEST,
+            "非法请求体应 400"
         );
     }
 }

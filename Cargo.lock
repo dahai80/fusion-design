@@ -777,6 +777,7 @@ dependencies = [
  "fd-canvas-core",
  "fd-codegen",
  "fd-design-system",
+ "fd-ecosystem",
  "http",
  "http-body-util",
  "hyper",

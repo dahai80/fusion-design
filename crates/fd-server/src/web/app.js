@@ -20,6 +20,9 @@ const I18N = {
         reqFailed: "请求失败：{e}",
         busy: "生成中…", model: "模型",
         noSession: "尚无会话，先在左侧生成一个设计",
+sendCode: "发给 Code", saveArtifact: "存 Artifacts",
+sentCode: "已发给 Code（{n} 个文件写入 fusion-code IPC 目录）。",
+savedArtifact: "已存 Artifacts（IPC 消息已写入，入库由 artifacts-engine 消费）。",
     },
     en: {
         chat: "Chat", canvas: "Canvas", versions: "Versions", export: "Export",
@@ -36,6 +39,9 @@ const I18N = {
         reqFailed: "Request failed: {e}",
         busy: "Generating…", model: "Model",
         noSession: "No session yet — generate a design first",
+sendCode: "Send to Code", saveArtifact: "Save to Artifacts",
+sentCode: "Sent to Code ({n} files written to the fusion-code IPC dir).",
+savedArtifact: "Saved to Artifacts (IPC message written; ingestion handled by artifacts-engine).",
     },
 };
 let lang = "zh";
@@ -435,6 +441,38 @@ async function boot() {
     // 导出。
     $("export-html").onclick = () => doExport("html");
     $("export-react").onclick = () => doExport("react");
+
+    // 生态出口（issue#33/DS-2）：发给 Code / 存 Artifacts。
+    $("send-to-code").onclick = async () => {
+        if (!state.session) {
+            addMsg("bot", t("noSession"));
+            return;
+        }
+        try {
+            const d = await api("/api/send-to-code", {
+                session: state.session,
+                version: state.currentVersion || undefined,
+            });
+            addMsg("bot", t("sentCode", { n: (d.files || []).length }));
+        } catch (e) {
+            addMsg("bot", t("reqFailed", { e: e.message }));
+        }
+    };
+    $("save-artifact").onclick = async () => {
+        if (!state.session) {
+            addMsg("bot", t("noSession"));
+            return;
+        }
+        try {
+            await api("/api/save-artifact", {
+                session: state.session,
+                version: state.currentVersion || undefined,
+            });
+            addMsg("bot", t("savedArtifact"));
+        } catch (e) {
+            addMsg("bot", t("reqFailed", { e: e.message }));
+        }
+    };
 
     // 服务健康。
     try {

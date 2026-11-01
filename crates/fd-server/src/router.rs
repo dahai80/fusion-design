@@ -50,6 +50,14 @@ pub async fn handle(
             Ok(b) => handlers::export(&state, &b),
             Err(r) => r,
         },
+        ("POST", "/api/send-to-code") => match read_body(req).await {
+            Ok(b) => handlers::send_to_code(&state, &b),
+            Err(r) => r,
+        },
+        ("POST", "/api/save-artifact") => match read_body(req).await {
+            Ok(b) => handlers::save_artifact(&state, &b),
+            Err(r) => r,
+        },
         ("GET", p) if p.starts_with("/api/tokens") => {
             let ds = query_param(&query, "ds").unwrap_or_else(|| "apple-hig".to_string());
             let theme = query_param(&query, "theme").unwrap_or_else(|| "light".to_string());
