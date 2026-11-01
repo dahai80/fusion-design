@@ -124,7 +124,7 @@ cargo build --release -p fd-server
 
 Real-model E2E: `cargo test -p fd-server --test e2e_real_model -- --ignored` (requires gateway :11432 + `FUSION_CLIENT_KEY` + vision model loaded).
 
-**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）（ubuntu），main 通过后 macos-14 产出 release tarball artifact。
+**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）（ubuntu），main 通过后 macos-15 产出 release tarball artifact（2026-11-02 起 macos-14 runner image 退役，已迁移 macos-15）。
 
 | Crate | Tests | Coverage |
 |-------|-------|----------|

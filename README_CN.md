@@ -113,7 +113,7 @@ cargo run -p fd-cli -- --help                                  # CLI 可用
 
 **Web 工作台（fd-server，issue #31/#33）**：浏览器工作台由 `fusion-design-server` 于 `127.0.0.1:11493` 提供——与 CLI 同一 Rust 内核，零云端调用。`cargo build --release -p fd-server && ./start.sh start` 后打开 http://127.0.0.1:11493 。能力：`/api/generate` `/api/iterate`（重试 + 模型 JSON 修复链）、`/api/restore`（截图 → 本地视觉模型 → 可编辑文档）、`/api/export`（HTML/React）、`/api/rollback` + 版本查询、生态出口 `/api/send-to-code`（HTML+TSX 落 fusion-code IPC 目录）与 `/api/save-artifact`（`save_artifact` IPC 消息供 artifacts-engine 消费）、WASM 画布托管。真模型 E2E：`cargo test -p fd-server --test e2e_real_model -- --ignored`（需 gateway :11432 + `FUSION_CLIENT_KEY` + 视觉模型已加载）。环境变量（`FUSION_DESIGN_PORT` / `FUSION_DESIGN_DATA_DIR` / `FUSION_DESIGN_WASM_DIR`）见 [README.md](README.md#-environment-variables)。
 
-**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）+ `deny-external-http` 出站 HTTP 仅限 fd-ai-adapter（ubuntu）；macOS-14 跑 check+test 消除平台盲区；tag 触发 release tarball。
+**CI**：`.github/workflows/ci.yml` 在 push/PR 到 main 时自动跑 fmt + clippy(`-D warnings`) + test + wasm build + 双零 panic 门禁（`deny-panic` 查 `panic!`/`unimplemented!`/`todo!`/`unreachable!` 宏，`deny-unwrap-expect` 查裸 `.unwrap()`/`.expect()`，后者用 `Scripts/unwrap-expect-allowlist.txt` 基线，新增站点未在 allowlist 则失败）+ `deny-external-http` 出站 HTTP 仅限 fd-ai-adapter（ubuntu）；macOS-15 跑 check+test 消除平台盲区（2026-11-02 起 macos-14 runner image 退役，已迁移 macos-15）；tag 触发 release tarball。
 
 | Crate | 测试数 | 覆盖范围 |
 |-------|--------|----------|

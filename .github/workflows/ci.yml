@@ -66,7 +66,7 @@ jobs:
   # 目标平台验证编译+测试，非 tag 才红。轻量 check+test，不打 tarball。
   build-test-macos:
     name: check + test (macos)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -151,7 +151,7 @@ jobs:
   # 不用吞退出码掩盖。
   release-pack:
     name: release tarball (apple silicon)
-    runs-on: macos-14
+    runs-on: macos-15
     if: startsWith(github.ref, 'refs/tags/v')
     # A-1：release-pack 须等全部门禁 job 成功才放行。
     # 原 needs: build-test 致 macOS build / audit / 三道 deny 门禁失败时 tarball 仍发布（解耦漏洞）。
