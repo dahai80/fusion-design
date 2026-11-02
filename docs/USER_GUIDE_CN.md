@@ -288,7 +288,7 @@ cargo build --release -p fd-server
 1. 输入提示词（如 `登录页，邮箱+密码表单，主色 indigo`）→ `POST /api/generate` 在 WASM 画布渲染 v1。
 2. 对话迭代（`把主按钮文案改成 Sign In`）→ `POST /api/iterate` 产出 v2；右侧版本列表支持点选查看与回退。
 3. 粘贴或上传截图 → `POST /api/restore` 走本地视觉模型，新建可编辑会话。
-4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`：既写历史 `save_artifact` IPC 消息，又经 `POST /api/v1/artifacts/create` 在 fusion-artifacts-engine 真正建产物，落地页即可见；引擎不可达时 IPC 仍落盘，响应带 `engine_degraded: true`）。
+4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`：经 `POST /api/v1/artifacts/create` 在 fusion-artifacts-engine 建产物，落地页即可见；成功时不写 IPC，避免引擎 IPC 消费者重复入库。引擎不可达才回退写 `save_artifact` IPC 消息、由引擎恢复后补入库，响应带 `engine_degraded: true`）。
 
 **环境变量**：`FUSION_ARTIFACTS_URL`（默认 `http://127.0.0.1:11451`）、`FUSION_ARTIFACTS_API_KEY`（缺省读 `~/.fusion/artifacts/config.yaml` 的 `security.api_key`）、`FUSION_DESIGN_PORT`（默认 11493）、`FUSION_DESIGN_DATA_DIR`（IPC 发件箱 + 日志，默认 `~/.fusion-design`）、`FUSION_DESIGN_WASM_DIR`（画布资产；默认发现链 可执行文件目录 > cwd > target wasm 目录）。
 

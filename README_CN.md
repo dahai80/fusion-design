@@ -4,7 +4,7 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：v0.1.21 — 14 个 crate + vendored op-ai，519 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。v0.1.21：新增 Artifact 查看器——点卡片就地打开 `artifact.html?id=...` 渲染正文（HTML 走沙箱 iframe），可下载、可回工作台继续，不再重复开对话。v0.1.20：Design 模块入口改为 Artifacts 落地页（全部 / 我的 / 与您共享三 tab、搜索 + 排序、文档 / 幻灯片 / 设计三张创建卡片跳对话框并预填提示词、分页产物列表），「存 Artifacts」真正在 fusion-artifacts-engine 建产物（不再只写无人消费的 IPC 消息）。v0.1.19：工作台 UI 对齐 fusion-web-shell 设计语言。v0.1.18 新增 fd-server Web 工作台。详见 `docs/changes/v0.1.21.md`。
+**状态**：v0.1.22 — 14 个 crate + vendored op-ai，519 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。v0.1.22：修复存 Artifacts 重复入库——原先既写 IPC 又走 REST，引擎自带的 IPC 消费者会再建一条 `type=data` 副本；现改为 REST 优先、仅引擎不可达时回退 IPC。v0.1.21：新增 Artifact 查看器——点卡片就地打开 `artifact.html?id=...` 渲染正文（HTML 走沙箱 iframe），可下载、可回工作台继续，不再重复开对话。v0.1.20：Design 模块入口改为 Artifacts 落地页（全部 / 我的 / 与您共享三 tab、搜索 + 排序、文档 / 幻灯片 / 设计三张创建卡片跳对话框并预填提示词、分页产物列表），「存 Artifacts」真正在 fusion-artifacts-engine 建产物（不再只写无人消费的 IPC 消息）。v0.1.19：工作台 UI 对齐 fusion-web-shell 设计语言。v0.1.18 新增 fd-server Web 工作台。详见 `docs/changes/v0.1.22.md`。
 
 v0.1.18：Web 工作台落地——`fd-server` 于 `127.0.0.1:11493` 提供对话式生成/迭代、截图还原（本地视觉模型）、版本回退、HTML/React 导出、WASM 画布托管，及生态出口 `/api/send-to-code` + `/api/save-artifact`（issue #31/#33）；gateway/supervisor 注册跨仓跟踪（fusion-gateway#448、fusion-supervisor#89）。详见 `docs/changes/v0.1.18.md`。
 

@@ -771,56 +771,67 @@ pub struct SaveArtifactRequest {
     pub kind: Option<String>,
 }
 
-/// [存 Artifacts]（issue#33/DS-2）：IPC 文件照写（历史契约），并真实入库
-/// artifacts-engine（REST artifact.create），落地页列表才可见。引擎不可达
-/// 不阻断 IPC 保存，响应带 engine_degraded 让调用方可见（fail visibly）。
+/// [存 Artifacts]（issue#33/DS-2）：优先经 artifacts-engine REST 建产物
+/// （落地页可见、带 HTML 正文），成功即不再写 IPC——引擎自带的 IPC 消费者
+/// 会从同一目录再建一条 type=data 的产物，双写等于重复入库。引擎不可达时
+/// 才回退写 IPC（引擎恢复后由消费者补入库），响应带 engine_degraded 可见。
 pub async fn save_artifact(state: &Arc<AppState>, body: &[u8]) -> Resp {
-    let resp = save_artifact_with_base(state, &ipc_base_dir(), body);
-    if resp.status() != hyper::StatusCode::OK {
-        return resp;
-    }
+    save_artifact_dual(state, &ipc_base_dir(), body, None).await
+}
+
+async fn save_artifact_dual(
+    state: &Arc<AppState>,
+    base: &std::path::Path,
+    body: &[u8],
+    client_override: Option<fd_ai_adapter::ArtifactsClient>,
+) -> Resp {
     let req: SaveArtifactRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
-        Err(_) => return resp,
+        Err(_) => return save_artifact_with_base(state, base, body),
     };
-    let Ok(doc) = resolve_session_doc(state, &req.session, req.version) else {
-        return resp;
+    let doc = match resolve_session_doc(state, &req.session, req.version) {
+        Ok(d) => d,
+        Err(r) => return *r,
     };
     let title = req
         .title
         .clone()
         .unwrap_or_else(|| format!("fusion-design {}", req.session));
     let Some(new_artifact) = engine_create_request(state, &req, &doc, &title) else {
-        return resp;
+        return save_artifact_with_base(state, base, body);
     };
-    match fd_ai_adapter::ArtifactsClient::from_env() {
-        Ok(client) => match client.create(&new_artifact).await {
+    let client = match client_override {
+        Some(c) => Ok(c),
+        None => fd_ai_adapter::ArtifactsClient::from_env(),
+    };
+    let engine_err = match client {
+        Ok(c) => match c.create(&new_artifact).await {
             Ok(a) => {
-                tracing::info!(id = %a.id, "api/save-artifact: 已入库 artifacts-engine");
-                ok_json(serde_json::json!({
+                tracing::info!(id = %a.id, "api/save-artifact: 已入库 artifacts-engine（不写 IPC，避免重复入库）");
+                return ok_json(serde_json::json!({
                     "ok": true,
                     "artifact": a,
                     "engine_degraded": false,
-                }))
+                    "ipc_written": false,
+                }));
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "api/save-artifact: 引擎入库失败，IPC 已保存");
-                ok_json(serde_json::json!({
-                    "ok": true, "engine_degraded": true, "error": e.to_string(),
-                }))
-            }
+            Err(e) => e.to_string(),
         },
-        Err(e) => {
-            tracing::warn!(error = %e, "api/save-artifact: 引擎客户端构造失败，IPC 已保存");
-            ok_json(serde_json::json!({
-                "ok": true, "engine_degraded": true, "error": e.to_string(),
-            }))
-        }
-    }
+        Err(e) => e.to_string(),
+    };
+    tracing::warn!(error = %engine_err, "api/save-artifact: 引擎入库失败，回退 IPC 补入库");
+    let mut v = match write_artifact_ipc(state, base, body) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    v["engine_degraded"] = serde_json::Value::Bool(true);
+    v["error"] = serde_json::Value::String(engine_err);
+    v["ipc_written"] = serde_json::Value::Bool(true);
+    ok_json(v)
 }
 
-/// 「存 Artifacts」的真实入库：IPC 文件照写（历史契约），另经 artifacts-engine
-/// REST 建产物，落地页列表才能看到。引擎不可达不阻断保存（degraded 字段告知）。
+/// 「存 Artifacts」的入库请求：文档经 codegen 生成 HTML，映射为引擎能接受的
+/// kind（app / document / template），落地页据此展示与打开查看器。
 fn engine_create_request(
     state: &Arc<AppState>,
     req: &SaveArtifactRequest,
@@ -856,19 +867,27 @@ fn engine_create_request(
 }
 
 pub fn save_artifact_with_base(state: &Arc<AppState>, base: &std::path::Path, body: &[u8]) -> Resp {
+    match write_artifact_ipc(state, base, body) {
+        Ok(v) => ok_json(v),
+        Err(r) => *r,
+    }
+}
+
+fn write_artifact_ipc(
+    state: &Arc<AppState>,
+    base: &std::path::Path,
+    body: &[u8],
+) -> Result<serde_json::Value, Box<Resp>> {
     let req: SaveArtifactRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
-            return err_json(
+            return Err(Box::new(err_json(
                 hyper::StatusCode::BAD_REQUEST,
                 &format!("请求体解析失败: {e}"),
-            )
+            )))
         }
     };
-    let doc = match resolve_session_doc(state, &req.session, req.version) {
-        Ok(d) => d,
-        Err(r) => return *r,
-    };
+    let doc = resolve_session_doc(state, &req.session, req.version)?;
     let title = req
         .title
         .unwrap_or_else(|| format!("fusion-design {}", req.session));
@@ -895,14 +914,14 @@ pub fn save_artifact_with_base(state: &Arc<AppState>, base: &std::path::Path, bo
     match link.send(&msg) {
         Ok(path) => {
             tracing::info!(path = %path.display(), "api/save-artifact: 保存消息已写入 IPC");
-            ok_json(serde_json::json!({"ok": true, "ipc_message": path.display().to_string()}))
+            Ok(serde_json::json!({"ok": true, "ipc_message": path.display().to_string()}))
         }
         Err(e) => {
             tracing::error!(error = %e, "api/save-artifact: IPC 写入失败");
-            err_json(
+            Err(Box::new(err_json(
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("存 Artifacts 失败: {e}"),
-            )
+            )))
         }
     }
 }
@@ -1331,5 +1350,32 @@ mod tests {
             hyper::StatusCode::BAD_REQUEST,
             "非法请求体应 400"
         );
+    }
+
+    /// 引擎不可达时回退 IPC：引擎恢复后由消费者补入库，响应须 fail visibly。
+    #[tokio::test]
+    async fn save_artifact_falls_back_to_ipc_when_engine_down() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let doc = serde_json::json!({
+            "pages": [{
+                "id": "p1", "name": "home", "width": 1440.0, "height": 900.0,
+                "nodes": [
+                    {"id": "n1", "kind": "Text", "name": "title", "x": 10.0, "y": 10.0,
+                     "w": 200.0, "h": 30.0, "text": "Fusion"}
+                ]
+            }]
+        })
+        .to_string();
+        let sid = state.sessions.create(doc, "seed");
+        let base = tempfile::tempdir().unwrap();
+        let client = fd_ai_adapter::ArtifactsClient::new("http://127.0.0.1:1", "k").unwrap();
+        let body = serde_json::json!({"session": sid, "title": "登录页"}).to_string();
+        let resp = save_artifact_dual(&state, base.path(), body.as_bytes(), Some(client)).await;
+        let v: serde_json::Value = json_of(resp).await;
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["engine_degraded"], true, "{v}");
+        assert_eq!(v["ipc_written"], true, "{v}");
+        assert!(v["ipc_message"].as_str().is_some_and(|p| !p.is_empty()));
+        assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
     }
 }
