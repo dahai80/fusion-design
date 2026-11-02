@@ -3,6 +3,8 @@
 // 内容为 HTML 时用 sandbox iframe 渲染（禁脚本），其他类型走纯文本。
 "use strict";
 
+import { syncShell } from "./shell-sync.js";
+
 const BASE = new URL(".", import.meta.url).pathname;
 const url = (p) => BASE + String(p).replace(/^\/+/, "");
 
@@ -52,30 +54,8 @@ function applyI18n() {
     document.documentElement.lang = lang === "zh" ? "zh" : "en";
 }
 
-function parentShellLight() {
-    try {
-        const doc = window.parent !== window ? window.parent.document : null;
-        return doc ? doc.documentElement.classList.contains("light") : null;
-    } catch {
-        return null;
-    }
-}
-
 function applyTheme(theme) {
     document.documentElement.classList.toggle("light", theme === "light");
-}
-
-function watchShellTheme() {
-    try {
-        const doc = window.parent !== window ? window.parent.document : null;
-        if (!doc) return;
-        new MutationObserver(() => {
-            const shell = parentShellLight();
-            if (shell !== null) applyTheme(shell ? "light" : "dark");
-        }).observe(doc.documentElement, { attributes: true, attributeFilter: ["class"] });
-    } catch {
-        // 跨域访问失败：仅用本地主题。
-    }
 }
 
 function sanitizeName(name) {
@@ -151,11 +131,12 @@ async function load() {
 }
 
 function boot() {
-    const shellTheme = parentShellLight();
-    applyTheme(shellTheme !== null ? (shellTheme ? "light" : "dark") : localStorage.getItem("fd-theme") || "dark");
-    watchShellTheme();
-    lang = localStorage.getItem("fd-lang") || "zh";
-    applyI18n();
+    // 主题/语言统一跟随 shell（spec §2.1，模块不自带切换入口）。
+    syncShell((theme, l) => {
+        applyTheme(theme);
+        lang = l;
+        applyI18n();
+    });
     wireDownload();
     load();
 }

@@ -3,6 +3,8 @@
 // 离线：同源 fetch，无任何外部资源。zh/en + dark/light。
 "use strict";
 
+import { syncShell } from "./shell-sync.js";
+
 // ── i18n ──
 const I18N = {
     zh: {
@@ -288,12 +290,14 @@ async function handleSend() {
                 session: state.session,
                 instruction: prompt,
                 design_system: state.designSystem || undefined,
+                model: state.model || undefined,
             });
             busyMsg.textContent = t("iterated", { v: d.current_version, n: nodeCount(d.document) });
         } else {
             d = await api("/api/generate", {
                 prompt,
                 design_system: state.designSystem || undefined,
+                model: state.model || undefined,
             });
             busyMsg.textContent = t("generated", { v: d.current_version, n: nodeCount(d.document) });
         }
@@ -378,36 +382,8 @@ async function doExport(format) {
 }
 
 // ── 主题 / 语言 ──
-function currentTheme() {
-    return document.documentElement.classList.contains("light") ? "light" : "dark";
-}
-
-// 嵌入 shell 时继承外壳主题（same-origin iframe，只读外壳 html 的 light 类）。
-function parentShellLight() {
-    try {
-        const doc = window.parent !== window ? window.parent.document : null;
-        return doc ? doc.documentElement.classList.contains("light") : null;
-    } catch {
-        return null;
-    }
-}
-
 function applyTheme(theme) {
     document.documentElement.classList.toggle("light", theme === "light");
-}
-
-// 跟随外壳主题切换（MutationObserver 监听外壳 html class）。
-function watchShellTheme() {
-    try {
-        const doc = window.parent !== window ? window.parent.document : null;
-        if (!doc) return;
-        new MutationObserver(() => {
-            const shell = parentShellLight();
-            if (shell !== null) applyTheme(shell ? "light" : "dark");
-        }).observe(doc.documentElement, { attributes: true, attributeFilter: ["class"] });
-    } catch {
-        // 跨域或不可访问：仅用本地主题。
-    }
 }
 
 function applyI18n() {
@@ -424,28 +400,16 @@ function applyI18n() {
 
 // ── 启动 ──
 async function boot() {
-    // 主题：外壳主题 > localStorage > 深色（shell 默认深色）。
-    const shellTheme = parentShellLight();
-    const savedTheme = localStorage.getItem("fd-theme");
-    applyTheme(shellTheme !== null ? (shellTheme ? "light" : "dark") : savedTheme || "dark");
-    watchShellTheme();
-    $("theme-toggle").onclick = () => {
-        const next = currentTheme() === "dark" ? "light" : "dark";
-        applyTheme(next);
-        localStorage.setItem("fd-theme", next);
+    // 主题/语言统一跟随 shell（spec §2.1，模块不自带切换入口）。
+    let booted = false;
+    syncShell((theme, l) => {
+        applyTheme(theme);
         if (state.document) renderDoc(state.document);
-    };
-
-    // 语言：localStorage > 中文。
-    lang = localStorage.getItem("fd-lang") || "zh";
-    $("lang-select").value = lang;
-    applyI18n();
-    $("lang-select").onchange = () => {
-        lang = $("lang-select").value;
-        localStorage.setItem("fd-lang", lang);
+        const changed = booted && lang !== null && lang !== l;
+        lang = l;
         applyI18n();
-        refreshVersions();
-    };
+        if (changed) refreshVersions();
+    });
 
     // 预设 chips。
     document.querySelectorAll("#preset-row .chip").forEach((b) => {
@@ -517,13 +481,39 @@ async function boot() {
         }
     };
 
-    // 服务健康。
+    // 服务健康 + 模型选择（排除 embedding/rerank 等非对话模型）。
     try {
         const h = await api("/api/health?deep=1");
         const chip = $("svc-status");
         if (h.mlx && h.mlx.available) {
             chip.dataset.state = "ok";
-            chip.textContent = `MLX ✓ ${h.mlx.model || ""}`;
+            chip.textContent = "MLX ✓";
+            // 只留对话模型：白名单家族 − 黑名单模态（图/视频/TTS/OCR/嵌入/视觉）。
+            const fam = /qwen|llama|glm|deepseek|jais|nemotron|kimi|minimax|vibe/i;
+            const bad = /image|vl|ocr|tts|embed|bge|e5|minilm|gte|rerank|whisper|clip|speech|audio|video|flux|schnell|dflash|flash2|fl2va|sft_|musetalk|ltx|wan2|kokoro/i;
+            const models = (h.mlx.models || []).filter((m) => fam.test(m) && !bad.test(m));
+            const sel = $("model-select");
+            const saved = localStorage.getItem("fd-model");
+            const current = h.mlx.chat_model || saved || models[0] || h.mlx.model || "";
+            state.model = saved && models.includes(saved) ? saved : current;
+            sel.innerHTML = "";
+            for (const m of models) {
+                const o = document.createElement("option");
+                o.value = m;
+                o.textContent = m;
+                sel.appendChild(o);
+            }
+            if (state.model && !models.includes(state.model)) {
+                const o = document.createElement("option");
+                o.value = state.model;
+                o.textContent = state.model;
+                sel.appendChild(o);
+            }
+            sel.value = state.model || "";
+            sel.onchange = () => {
+                state.model = sel.value || null;
+                localStorage.setItem("fd-model", state.model || "");
+            };
         } else {
             chip.dataset.state = "err";
             chip.textContent = lang === "zh" ? "MLX 不可用" : "MLX down";
@@ -547,6 +537,7 @@ async function boot() {
     setViewport("desktop");
     await initCanvas();
     refreshVersions();
+    booted = true;
 }
 
 boot();

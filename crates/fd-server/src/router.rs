@@ -25,6 +25,7 @@ pub async fn handle(
         ("GET", "/") | ("GET", "/index.html") => assets::index(),
         ("GET", "/workbench.html") => assets::workbench(),
         ("GET", "/landing.js") => assets::landing_js(),
+        ("GET", "/shell-sync.js") => assets::shell_sync_js(),
         ("GET", "/api/artifacts") => handlers::artifacts(&query).await,
         ("GET", "/artifact.html") => assets::artifact_page(),
         ("GET", "/artifact.js") => assets::artifact_js(),

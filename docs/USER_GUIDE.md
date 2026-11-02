@@ -290,6 +290,8 @@ cargo build --release -p fd-server
 3. Paste or upload a screenshot → `POST /api/restore` runs the local vision model and creates a new editable session.
 4. Export via **HTML** / **React** buttons, or hand off: **Send to Code** (`POST /api/send-to-code`, HTML+TSX land in the fusion-code IPC dir) and **Save to Artifacts** (`POST /api/save-artifact`: creates the artifact in fusion-artifacts-engine via `POST /api/v1/artifacts/create`, so it shows up on the landing page; on success no IPC message is written, because the engine's own IPC consumer would ingest it a second time. Only when the engine is unreachable does it fall back to the historical `save_artifact` IPC message for later pickup, and the reply sets `engine_degraded: true`).
 
+The workbench toolbar has a **model** selector (chat models only, default Qwen3.5-4B; the choice persists and is sent with generate/iterate; screenshot restore keeps the vision model). Theme and language follow the shell's unified switch — no in-module toggles (standalone use falls back to the shell-convention keys, dark/zh default).
+
 **Env**: `FUSION_ARTIFACTS_URL` (default `http://127.0.0.1:11451`), `FUSION_ARTIFACTS_API_KEY` (falls back to `security.api_key` in `~/.fusion/artifacts/config.yaml`), `FUSION_DESIGN_PORT` (default 11493), `FUSION_DESIGN_DATA_DIR` (IPC outbox + logs, default `~/.fusion-design`), `FUSION_DESIGN_WASM_DIR` (canvas assets; default discovery chain exe dir > cwd > target wasm dirs).
 
 **Note**: generation requires the local inference stack (gateway :11432 or MLX :11434 + `FUSION_CLIENT_KEY`). Cross-repo consumers for the ecosystem handoff are fusion-code#228 / fusion-artifacts-engine#76.

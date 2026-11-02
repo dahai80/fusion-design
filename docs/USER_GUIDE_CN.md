@@ -290,6 +290,8 @@ cargo build --release -p fd-server
 3. 粘贴或上传截图 → `POST /api/restore` 走本地视觉模型，新建可编辑会话。
 4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`：经 `POST /api/v1/artifacts/create` 在 fusion-artifacts-engine 建产物，落地页即可见；成功时不写 IPC，避免引擎 IPC 消费者重复入库。引擎不可达才回退写 `save_artifact` IPC 消息、由引擎恢复后补入库，响应带 `engine_degraded: true`）。
 
+工作台右上可切换**模型**（仅对话模型，缺省 Qwen3.5-4B；选择持久化并随生成/迭代下发；截图还原固定用视觉模型）。主题与语言跟随 shell 统一切换，模块内不另设开关（独立打开时回退 shell 约定键，默认深色/中文）。
+
 **环境变量**：`FUSION_ARTIFACTS_URL`（默认 `http://127.0.0.1:11451`）、`FUSION_ARTIFACTS_API_KEY`（缺省读 `~/.fusion/artifacts/config.yaml` 的 `security.api_key`）、`FUSION_DESIGN_PORT`（默认 11493）、`FUSION_DESIGN_DATA_DIR`（IPC 发件箱 + 日志，默认 `~/.fusion-design`）、`FUSION_DESIGN_WASM_DIR`（画布资产；默认发现链 可执行文件目录 > cwd > target wasm 目录）。
 
 **注意**：生成需本地推理栈在线（gateway :11432 或 MLX :11434 + `FUSION_CLIENT_KEY`）。生态交接的跨仓消费方为 fusion-code#228 / fusion-artifacts-engine#76。

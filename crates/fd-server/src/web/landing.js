@@ -3,6 +3,8 @@
 // 创建卡片跳 workbench.html，携带各类型的预填提示词，等客户输入。
 "use strict";
 
+import { syncShell } from "./shell-sync.js";
+
 const BASE = new URL(".", import.meta.url).pathname;
 const url = (p) => BASE + String(p).replace(/^\/+/, "");
 
@@ -52,34 +54,8 @@ const t = (k, vars) => {
 const $ = (id) => document.getElementById(id);
 const state = { tab: "all", page: 1, pageSize: 24, sort: "updated_at", q: "", lastTotal: 0 };
 
-function currentTheme() {
-    return document.documentElement.classList.contains("light") ? "light" : "dark";
-}
-
-function parentShellLight() {
-    try {
-        const doc = window.parent !== window ? window.parent.document : null;
-        return doc ? doc.documentElement.classList.contains("light") : null;
-    } catch {
-        return null;
-    }
-}
-
 function applyTheme(theme) {
     document.documentElement.classList.toggle("light", theme === "light");
-}
-
-function watchShellTheme() {
-    try {
-        const doc = window.parent !== window ? window.parent.document : null;
-        if (!doc) return;
-        new MutationObserver(() => {
-            const shell = parentShellLight();
-            if (shell !== null) applyTheme(shell ? "light" : "dark");
-        }).observe(doc.documentElement, { attributes: true, attributeFilter: ["class"] });
-    } catch {
-        // 跨域访问失败：仅用本地主题。
-    }
 }
 
 function applyI18n() {
@@ -205,26 +181,16 @@ function setTab(tab) {
 }
 
 function boot() {
-    const shellTheme = parentShellLight();
-    applyTheme(shellTheme !== null ? (shellTheme ? "light" : "dark") : localStorage.getItem("fd-theme") || "dark");
-    watchShellTheme();
-    $("theme-toggle").onclick = () => {
-        const next = currentTheme() === "dark" ? "light" : "dark";
-        applyTheme(next);
-        localStorage.setItem("fd-theme", next);
-    };
-
-    lang = localStorage.getItem("fd-lang") || "zh";
-    $("lang-select").value = lang;
-    applyI18n();
-    refreshCreateLinks();
-    $("lang-select").onchange = () => {
-        lang = $("lang-select").value;
-        localStorage.setItem("fd-lang", lang);
+    // 主题/语言统一跟随 shell（spec §2.1，模块不自带切换入口）。
+    let booted = false;
+    syncShell((theme, l) => {
+        applyTheme(theme);
+        const changed = booted && lang !== null && lang !== l;
+        lang = l;
         applyI18n();
         refreshCreateLinks();
-        load();
-    };
+        if (changed) load();
+    });
 
     document.querySelectorAll("#tab-row .tab").forEach((b) => {
         b.onclick = () => setTab(b.dataset.tab);
@@ -264,6 +230,7 @@ function boot() {
     };
 
     load();
+    booted = true;
 }
 
 boot();

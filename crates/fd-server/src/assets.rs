@@ -63,6 +63,13 @@ pub fn artifact_js() -> Resp {
     )
 }
 
+pub fn shell_sync_js() -> Resp {
+    text_response(
+        include_str!("web/shell-sync.js"),
+        "application/javascript; charset=utf-8",
+    )
+}
+
 pub fn landing_js() -> Resp {
     text_response(
         include_str!("web/landing.js"),
@@ -278,6 +285,55 @@ mod tests {
         assert!(
             landing.contains("artifact.html?id="),
             "卡片点击须打开查看器"
+        );
+    }
+
+    #[test]
+    fn pages_follow_shell_theme_and_lang_standard() {
+        // spec §2.1：主题/语言由 shell 统一管，模块不实现不复刻——
+        // 页面不得自带 lang-select / theme-toggle，也不得另立 fd-lang/fd-theme 键。
+        for html in [
+            include_str!("web/index.html"),
+            include_str!("web/workbench.html"),
+            include_str!("web/artifact.html"),
+        ] {
+            assert!(!html.contains("lang-select"), "禁止模块自带语言切换");
+            assert!(!html.contains("theme-toggle"), "禁止模块自带主题切换");
+        }
+        for js in [
+            include_str!("web/landing.js"),
+            include_str!("web/app.js"),
+            include_str!("web/artifact.js"),
+        ] {
+            assert!(!js.contains("fd-lang"), "禁止另立语言键 fd-lang");
+            assert!(!js.contains("fd-theme"), "禁止另立主题键 fd-theme");
+            assert!(
+                js.contains("shell-sync.js"),
+                "三页统一经 shell-sync 跟随外壳"
+            );
+        }
+        let sync = include_str!("web/shell-sync.js");
+        assert!(sync.contains("fusion.shell.theme"), "回退须用 shell 约定键");
+        assert!(sync.contains("fusion.shell.lang"), "回退须用 shell 约定键");
+        assert!(sync.contains("fusion:theme"), "须监听外壳主题事件");
+        assert!(sync.contains("fusion:lang"), "须监听外壳语言事件");
+    }
+
+    #[test]
+    fn workbench_has_model_select() {
+        // 工作台须可切模型：下拉排除 embedding 类（bge 等），缺省用 chat_model。
+        let html = include_str!("web/workbench.html");
+        assert!(html.contains("id=\"model-select\""), "缺模型下拉");
+        let js = include_str!("web/app.js");
+        assert!(js.contains("chat_model"), "须以服务端 chat_model 为缺省");
+        assert!(
+            js.contains("model: state.model || undefined"),
+            "generate/iterate 须携带所选模型"
+        );
+        assert!(js.contains("const fam ="), "须按对话模型家族过滤");
+        assert!(
+            js.contains("const bad ="),
+            "须排除图/视频/TTS/嵌入等非对话模型"
         );
     }
 

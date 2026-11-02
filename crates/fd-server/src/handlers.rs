@@ -103,6 +103,7 @@ pub async fn health(state: &Arc<AppState>, deep: bool) -> Resp {
         None => serde_json::json!({"probed": false}),
         Some(Ok(h)) => serde_json::json!({
             "probed": true, "available": h.available, "model": h.model,
+            "chat_model": resolve_model(&None),
             "auth_ok": h.auth_ok, "models": h.models, "status": h.status,
         }),
         Some(Err(e)) => {
