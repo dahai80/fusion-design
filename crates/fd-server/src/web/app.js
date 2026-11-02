@@ -370,7 +370,35 @@ async function doExport(format) {
 
 // ── 主题 / 语言 ──
 function currentTheme() {
-    return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    return document.documentElement.classList.contains("light") ? "light" : "dark";
+}
+
+// 嵌入 shell 时继承外壳主题（same-origin iframe，只读外壳 html 的 light 类）。
+function parentShellLight() {
+    try {
+        const doc = window.parent !== window ? window.parent.document : null;
+        return doc ? doc.documentElement.classList.contains("light") : null;
+    } catch {
+        return null;
+    }
+}
+
+function applyTheme(theme) {
+    document.documentElement.classList.toggle("light", theme === "light");
+}
+
+// 跟随外壳主题切换（MutationObserver 监听外壳 html class）。
+function watchShellTheme() {
+    try {
+        const doc = window.parent !== window ? window.parent.document : null;
+        if (!doc) return;
+        new MutationObserver(() => {
+            const shell = parentShellLight();
+            if (shell !== null) applyTheme(shell ? "light" : "dark");
+        }).observe(doc.documentElement, { attributes: true, attributeFilter: ["class"] });
+    } catch {
+        // 跨域或不可访问：仅用本地主题。
+    }
 }
 
 function applyI18n() {
@@ -387,13 +415,14 @@ function applyI18n() {
 
 // ── 启动 ──
 async function boot() {
-    // 主题：localStorage > 系统偏好。
+    // 主题：外壳主题 > localStorage > 深色（shell 默认深色）。
+    const shellTheme = parentShellLight();
     const savedTheme = localStorage.getItem("fd-theme");
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    document.documentElement.dataset.theme = savedTheme || (prefersDark ? "dark" : "light");
+    applyTheme(shellTheme !== null ? (shellTheme ? "light" : "dark") : savedTheme || "dark");
+    watchShellTheme();
     $("theme-toggle").onclick = () => {
         const next = currentTheme() === "dark" ? "light" : "dark";
-        document.documentElement.dataset.theme = next;
+        applyTheme(next);
         localStorage.setItem("fd-theme", next);
         if (state.document) renderDoc(state.document);
     };
