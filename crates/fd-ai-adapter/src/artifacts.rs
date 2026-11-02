@@ -213,6 +213,63 @@ impl ArtifactsClient {
         Ok(summary)
     }
 
+    /// 单个产物元数据（查看器页头）。
+    pub async fn get(&self, id: &str) -> anyhow::Result<ArtifactSummary> {
+        let parsed = self
+            .get_json(&format!("/api/v1/artifacts/{}", urlencode(id)))
+            .await?;
+        let artifact = parsed
+            .get("artifact")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("artifacts-engine 响应缺 artifact"))?;
+        Ok(serde_json::from_value(artifact)?)
+    }
+
+    /// 指定版本正文（查看器内容）。version=None 时取最新版本。
+    pub async fn content(&self, id: &str, version: Option<u32>) -> anyhow::Result<String> {
+        let n = match version {
+            Some(v) => v,
+            None => self.get(id).await?.current_version.max(1),
+        };
+        let parsed = self
+            .get_json(&format!(
+                "/api/v1/artifacts/{}/versions/{}",
+                urlencode(id),
+                n
+            ))
+            .await?;
+        let content = parsed
+            .get("version")
+            .and_then(|v| v.get("content"))
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| anyhow::anyhow!("artifacts-engine 版本响应缺 content"))?;
+        Ok(content.to_string())
+    }
+
+    async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .header("Accept", "application/json")
+            .header("X-API-Key", &self.api_key);
+        if !self.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!(
+                "artifacts-engine {} 失败 status={} body={}",
+                path,
+                status.as_u16(),
+                text.chars().take(160).collect::<String>()
+            );
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("artifacts-engine 响应非 JSON: {e}"))
+    }
+
     pub async fn list(&self, q: &ArtifactQuery) -> anyhow::Result<ArtifactPage> {
         let url = self.build_url(q);
         let mut req = self

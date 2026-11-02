@@ -49,6 +49,20 @@ pub fn workbench() -> Resp {
     )
 }
 
+pub fn artifact_page() -> Resp {
+    text_response(
+        include_str!("web/artifact.html"),
+        "text/html; charset=utf-8",
+    )
+}
+
+pub fn artifact_js() -> Resp {
+    text_response(
+        include_str!("web/artifact.js"),
+        "application/javascript; charset=utf-8",
+    )
+}
+
 pub fn landing_js() -> Resp {
     text_response(
         include_str!("web/landing.js"),
@@ -238,6 +252,33 @@ mod tests {
         assert!(js.contains("Make a Document artifact about "), "文档预填");
         assert!(js.contains("Make a Slides artifact about "), "幻灯片预填");
         assert!(!js.contains("Claude"), "提示词不得出现 Claude");
+    }
+
+    #[test]
+    fn artifact_viewer_embeds_skeleton() {
+        // 查看器：就地看正文 + 下载 + 回工作台继续，资源全部相对路径。
+        let body = include_str!("web/artifact.html");
+        for id in [
+            "artifact-frame",
+            "artifact-code",
+            "artifact-title",
+            "artifact-export",
+            "artifact-open-workbench",
+        ] {
+            assert!(body.contains(&format!("id=\"{id}\"")), "缺元素 {id}");
+        }
+        assert!(body.contains("href=\"app.css\""), "查看器样式相对路径");
+        assert!(body.contains("src=\"artifact.js\""), "查看器脚本相对路径");
+        let js = include_str!("web/artifact.js");
+        assert!(js.contains("import.meta.url"), "查看器须按模块基路径取 API");
+        assert!(!js.contains("fetch(\"/api"), "查看器禁止绝对 /api fetch");
+        assert!(js.contains("api/artifact/"), "查看器须调 api/artifact/<id>");
+        assert!(js.contains("srcdoc"), "HTML 正文须经 iframe 渲染");
+        let landing = include_str!("web/landing.js");
+        assert!(
+            landing.contains("artifact.html?id="),
+            "卡片点击须打开查看器"
+        );
     }
 
     #[test]

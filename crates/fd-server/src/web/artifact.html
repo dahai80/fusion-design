@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artifact · Fusion Design</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="artifact-view" id="artifact-view">
+  <header class="landing-head artifact-head">
+    <div class="artifact-title-group">
+      <a href="index.html" class="btn ghost icon" id="back-to-artifacts" aria-label="back">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      </a>
+      <h1 id="artifact-title" class="artifact-title">…</h1>
+      <span id="artifact-kind" class="badge"></span>
+    </div>
+    <div class="landing-tools">
+      <span id="artifact-meta" class="list-count"></span>
+      <button id="artifact-export" class="btn" data-i18n="download">下载</button>
+      <a id="artifact-open-workbench" class="btn primary hidden" data-i18n="openInWorkbench">在工作台继续</a>
+    </div>
+  </header>
+  <iframe id="artifact-frame" class="artifact-frame" sandbox="allow-same-origin" title="artifact content"></iframe>
+  <pre id="artifact-code" class="artifact-code hidden"></pre>
+  <p id="artifact-empty" class="side-note hidden" data-i18n="empty">产物正文不可用。</p>
+</div>
+<script src="artifact.js" type="module"></script>
+</body>
+</html>

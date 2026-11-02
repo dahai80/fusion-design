@@ -126,9 +126,8 @@ function renderCards(items) {
         const card = document.createElement("button");
         card.className = "artifact-card";
         card.onclick = () => {
-            const kind = (a.kind || "design").toLowerCase();
-            const p = PROMPTS[kind] || `Continue the ${kind} artifact about `;
-            location.href = `workbench.html?kind=${encodeURIComponent(kind)}&prompt=${encodeURIComponent(p)}&artifact=${encodeURIComponent(a.id)}`;
+            // 就地查看正文，不跳外部应用；要改再走查看器里的「在工作台继续」。
+            location.href = `artifact.html?id=${encodeURIComponent(a.id)}`;
         };
         const head = document.createElement("div");
         head.className = "card-head";

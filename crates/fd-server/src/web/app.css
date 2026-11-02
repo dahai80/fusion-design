@@ -377,3 +377,44 @@ body {
     .create-row { grid-template-columns: 1fr; }
     .search { width: 140px; }
 }
+
+/* ── Artifact 查看器（就地看正文，不跳外部应用）── */
+.artifact-view { display: flex; flex-direction: column; height: 100vh; }
+.artifact-head {
+    padding: 0 16px;
+    min-height: 52px;
+    background: var(--fs-bg-elevated);
+    border-bottom: 1px solid var(--fs-border);
+}
+.artifact-title-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+.artifact-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.artifact-frame {
+    flex: 1 1 auto;
+    width: 100%;
+    border: none;
+    background: #ffffff;
+}
+.artifact-code {
+    flex: 1 1 auto;
+    margin: 0;
+    padding: 20px 24px;
+    overflow: auto;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--fs-text-primary);
+    background: var(--fs-bg);
+}
+.artifact-view > .side-note { padding: 24px; }

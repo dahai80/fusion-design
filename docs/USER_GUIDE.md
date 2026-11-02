@@ -281,7 +281,8 @@ cargo build --release -p fd-server
    - 设计 → `Make a Design artifact for `
    - 文档 → `Make a Document artifact about `
    - 幻灯片 → `Make a Slides artifact about `
-3. Existing cards reopen the workbench prefilled for that kind. The back arrow in the workbench toolbar returns to the artifacts list.
+3. Clicking an existing card opens the **artifact viewer** (`artifact.html?id=<id>`): in-place content (HTML in a sandboxed iframe, everything else as plain text), with Download HTML and Continue-in-workbench actions.
+4. The back arrow in the workbench toolbar returns to the artifacts list.
 
 **Workbench flow** (`workbench.html`):
 1. Type a prompt (e.g. `login page, email+password form, indigo accent`) → `POST /api/generate` renders v1 on the WASM canvas.

@@ -999,6 +999,47 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// `GET /api/artifact/<id>?version=n`：查看器数据（元数据 + 正文）。
+/// Claude 同款：点产物在本地打开，不跳外部应用。
+pub async fn artifact_detail(id: &str, version: Option<u32>) -> Resp {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return err_json(hyper::StatusCode::BAD_REQUEST, "产物 id 非法");
+    }
+    let client = match fd_ai_adapter::ArtifactsClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "api/artifact: 客户端构造失败");
+            return ok_json(serde_json::json!({
+                "degraded": true, "error": e.to_string(),
+            }));
+        }
+    };
+    match client.get(id).await {
+        Ok(artifact) => match client.content(id, version).await {
+            Ok(content) => {
+                tracing::info!(id, bytes = content.len(), "api/artifact: 正文返回");
+                ok_json(serde_json::json!({
+                    "artifact": artifact, "content": content, "degraded": false,
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(id, error = %e, "api/artifact: 正文读取失败");
+                ok_json(serde_json::json!({
+                    "artifact": artifact, "content": "", "degraded": true, "error": e.to_string(),
+                }))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(id, error = %e, "api/artifact: 元数据读取失败");
+            ok_json(serde_json::json!({ "degraded": true, "error": e.to_string() }))
+        }
+    }
+}
+
 /// `GET /api/artifacts`：落地页列表，数据源为本机 artifacts-engine。
 /// 引擎不可达时降级为「空列表 + degraded」，落地页仍可打开并创建新内容。
 /// tab=shared 时引擎无 share 过滤能力：单页取 100 条后本地筛 share_id 非空。

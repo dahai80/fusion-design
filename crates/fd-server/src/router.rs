@@ -26,6 +26,13 @@ pub async fn handle(
         ("GET", "/workbench.html") => assets::workbench(),
         ("GET", "/landing.js") => assets::landing_js(),
         ("GET", "/api/artifacts") => handlers::artifacts(&query).await,
+        ("GET", "/artifact.html") => assets::artifact_page(),
+        ("GET", "/artifact.js") => assets::artifact_js(),
+        ("GET", p) if p.starts_with("/api/artifact/") => {
+            let id = p.trim_start_matches("/api/artifact/").to_string();
+            let version = query_param(&query, "version").and_then(|v| v.parse::<u32>().ok());
+            handlers::artifact_detail(&id, version).await
+        }
         ("GET", "/app.js") => assets::app_js(),
         ("GET", "/app.css") => assets::app_css(),
         ("GET", "/fd_host_web.js") => assets::wasm_js(),

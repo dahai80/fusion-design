@@ -281,7 +281,8 @@ cargo build --release -p fd-server
    - 设计 → `Make a Design artifact for `
    - 文档 → `Make a Document artifact about `
    - 幻灯片 → `Make a Slides artifact about `
-3. 已有产物卡片可重新打开工作台；工作台左上返回箭头回到 Artifacts 列表。
+3. 点已有产物卡片进入 **Artifact 查看器**（`artifact.html?id=<id>`）：就地渲染正文（HTML 走沙箱 iframe，其余走纯文本），头部可下载 HTML、或「在工作台继续」带回对话；
+4. 工作台左上返回箭头回到 Artifacts 列表。
 
 **工作台流程**：
 1. 输入提示词（如 `登录页，邮箱+密码表单，主色 indigo`）→ `POST /api/generate` 在 WASM 画布渲染 v1。
