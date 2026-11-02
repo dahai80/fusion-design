@@ -14,6 +14,7 @@
 
 pub mod assets;
 pub mod handlers;
+pub mod prompt;
 pub mod router;
 pub mod state;
 

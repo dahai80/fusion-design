@@ -286,7 +286,7 @@ cargo build --release -p fd-server
 
 **Workbench flow** (`workbench.html`):
 1. Type a prompt (e.g. `login page, email+password form, indigo accent`) → `POST /api/generate` renders v1 on the WASM canvas.
-2. Iterate in chat (`change the primary button label to Sign In`) → `POST /api/iterate` produces v2; the version list on the right supports click-to-view and rollback.
+2. Iterate in chat (`change the primary button label to Sign In`) → `POST /api/iterate` produces v2; the version list on the right supports click-to-view and rollback. For long documents, `region:[node_id,...]` narrows the request to the selected nodes (O(region) context instead of the whole doc); the server merges the result back and guarantees every unlisted node stays unchanged. The prompt keeps a stable order (document TOC → recent changes → base JSON → instruction) so the local engine's prefix cache stays effective.
 3. Paste or upload a screenshot → `POST /api/restore` runs the local vision model and creates a new editable session.
 4. Export via **HTML** / **React** buttons, or hand off: **Send to Code** (`POST /api/send-to-code`, HTML+TSX land in the fusion-code IPC dir) and **Save to Artifacts** (`POST /api/save-artifact`: creates the artifact in fusion-artifacts-engine via `POST /api/v1/artifacts/create`, so it shows up on the landing page; on success no IPC message is written, because the engine's own IPC consumer would ingest it a second time. Only when the engine is unreachable does it fall back to the historical `save_artifact` IPC message for later pickup, and the reply sets `engine_degraded: true`).
 

@@ -130,6 +130,15 @@ fn parse_ui_json_naked_nodes() {
 }
 
 #[test]
+fn parse_ui_json_kind_case_insensitive() {
+    // 序列化端输出 PascalCase（"Text"/"Rect"），模型回显原样——解析必须接受。
+    let pascal = r#"{"page":{"nodes":[{"id":"a","kind":"Text","text":"hi","x":0,"y":0,"w":10,"h":10},{"id":"b","kind":"Rect","x":0,"y":0,"w":10,"h":10}]}}"#;
+    let doc = parse_ui_json(pascal, "P").unwrap();
+    assert_eq!(doc.pages[0].nodes[0].kind, fd_canvas_core::NodeKind::Text);
+    assert_eq!(doc.pages[0].nodes[1].kind, fd_canvas_core::NodeKind::Rect);
+}
+
+#[test]
 fn parse_ui_json_missing_nodes_empty_page() {
     let doc = parse_ui_json(r#"{"page":{}}"#, "x").unwrap();
     assert_eq!(doc.pages.len(), 1);

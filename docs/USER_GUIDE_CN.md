@@ -286,7 +286,7 @@ cargo build --release -p fd-server
 
 **工作台流程**：
 1. 输入提示词（如 `登录页，邮箱+密码表单，主色 indigo`）→ `POST /api/generate` 在 WASM 画布渲染 v1。
-2. 对话迭代（`把主按钮文案改成 Sign In`）→ `POST /api/iterate` 产出 v2；右侧版本列表支持点选查看与回退。
+2. 对话迭代（`把主按钮文案改成 Sign In`）→ `POST /api/iterate` 产出 v2；右侧版本列表支持点选查看与回退。 长文档可传 `region:[节点id,...]` 只送选中节点（O(region) 上下文替代整篇文档）；服务端把结果合并回完整页面，未列出的节点保证不变。提示词保持稳定顺序（文档 TOC → 最近变更 → 基准 JSON → 指令殿后），保证本地引擎 prefix cache 命中。
 3. 粘贴或上传截图 → `POST /api/restore` 走本地视觉模型，新建可编辑会话。
 4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`：经 `POST /api/v1/artifacts/create` 在 fusion-artifacts-engine 建产物，落地页即可见；成功时不写 IPC，避免引擎 IPC 消费者重复入库。引擎不可达才回退写 `save_artifact` IPC 消息、由引擎恢复后补入库，响应带 `engine_degraded: true`）。
 

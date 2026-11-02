@@ -239,6 +239,9 @@ pub struct IterateRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub design_system: Option<String>,
+    /// 区域选择（issue#34）：只迭代这些节点 id；提示词 O(region) 而非 O(doc)。
+    #[serde(default)]
+    pub region: Option<Vec<String>>,
 }
 
 /// 迭代：当前版本文档 + 指令 → 全页重写为新一版。
@@ -268,8 +271,28 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let Some(cur) = sess.current_doc() else {
         return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "会话无当前版本");
     };
+    // 区域外置（issue#34）：region 给了但无命中 → 400（fail visibly，不静默回退全量）。
+    let region: Option<Vec<String>> = req.region.as_ref().map(|ids| {
+        ids.iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    if let Some(ids) = &region {
+        if crate::prompt::select_region(&cur.document, ids).is_none() {
+            return err_json(
+                hyper::StatusCode::BAD_REQUEST,
+                &format!("region 无命中节点: {ids:?}"),
+            );
+        }
+    }
     let model = resolve_model(&req.model);
-    tracing::info!(session = %req.session, model = %model, "api/iterate: 对话迭代");
+    tracing::info!(
+        session = %req.session,
+        model = %model,
+        region = region.as_ref().map(|r| r.len()).unwrap_or(0),
+        "api/iterate: 对话迭代"
+    );
 
     let client = match build_client() {
         Ok(c) => c,
@@ -280,13 +303,13 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             )
         }
     };
-    let sys = "你是 fusion-design UI 迭代器。输入当前页面 JSON 与修改指令，\
-输出修改后的完整页面 JSON（{\"page\":{...}} 同 schema）。保持 width/height 与\
-未提及节点不变，仅落实指令要求。只输出 JSON，禁止额外文字。";
-    let user_base = format!(
-        "当前页面：\n{doc}\n\n修改指令：{ins}",
-        doc = cur.document,
-        ins = req.instruction
+    let sys = crate::prompt::ITERATE_SYS;
+    let changelog = crate::prompt::changelog_of(&sess);
+    let user_base = crate::prompt::build_iterate_user(
+        &cur.document,
+        region.as_deref(),
+        &changelog,
+        &req.instruction,
     );
     let page_name = page_name_of(&cur.document).unwrap_or_else(|| "page-1".to_string());
     // 同 generate：模型输出偶发非 schema JSON，调用+解析整体重试一次。
@@ -324,6 +347,38 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             &format!("迭代失败: {last_err}"),
         );
     };
+    // 区域模式（issue#34）：模型只回了区域节点，确定性合并回完整页面。
+    if let Some(ids) = &region {
+        let model_nodes: Vec<serde_json::Value> = doc_json(&doc)
+            .ok()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+            .and_then(|v| {
+                v.get("pages")
+                    .and_then(|p| p.get(0))
+                    .and_then(|p| p.get("nodes"))
+                    .and_then(|n| n.as_array())
+                    .cloned()
+            })
+            .unwrap_or_default();
+        let merged = crate::prompt::merge_region_nodes(&cur.document, &model_nodes, ids);
+        let Some(merged) = merged else {
+            tracing::error!(region = ?ids, "api/iterate: 模型未返回区域节点，拒绝静默丢节点");
+            return err_json(
+                hyper::StatusCode::BAD_GATEWAY,
+                "模型未返回区域节点结果，请重试或去掉 region 全量迭代",
+            );
+        };
+        match doc_from_json(&merged) {
+            Ok(d) => doc = d,
+            Err(e) => {
+                tracing::error!(error = %e, "api/iterate: 区域合并后文档非法");
+                return err_json(
+                    hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("区域合并失败: {e}"),
+                );
+            }
+        }
+    }
     // 迭代保留设计系统声明：请求显式指定 > 当前版沿用。
     if let Some(ds) = req.design_system.as_deref() {
         let reg = state.registry.lock().unwrap();
@@ -1378,5 +1433,59 @@ mod tests {
         assert_eq!(v["ipc_written"], true, "{v}");
         assert!(v["ipc_message"].as_str().is_some_and(|p| !p.is_empty()));
         assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
+    }
+
+    /// issue#34 契约：region 无命中节点 400（不触发模型调用）；命中时提示词
+    /// 走区域装配（TOC + 变更日志在前，区域 JSON + 指令在后）。
+    #[tokio::test]
+    async fn iterate_region_contract() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let doc = serde_json::json!({
+            "pages": [{
+                "id": "p1", "name": "home", "width": 1440.0, "height": 900.0,
+                "nodes": [
+                    {"id": "n1", "kind": "Text", "name": "title", "x": 10.0, "y": 10.0, "w": 200.0, "h": 30.0},
+                    {"id": "n2", "kind": "Rect", "name": "bg", "x": 0.0, "y": 0.0, "w": 100.0, "h": 50.0}
+                ]
+            }]
+        })
+        .to_string();
+        let sid = state.sessions.create(doc, "seed");
+        state
+            .sessions
+            .push_version(
+                &sid,
+                serde_json::json!({"pages":[]}).to_string(),
+                "迭代：加按钮",
+            )
+            .unwrap();
+
+        // region 无命中 → 400，请求体校验在模型调用前。
+        let body =
+            serde_json::json!({"session": sid, "instruction": "x", "region": ["nope"]}).to_string();
+        let resp = iterate(&state, body.as_bytes()).await;
+        assert_eq!(
+            resp.status(),
+            hyper::StatusCode::BAD_REQUEST,
+            "无命中须 400"
+        );
+
+        // 装配契约（不触模型）：排序 + 区域 O(region) + 变更日志。
+        let sess = state.sessions.get(&sid).unwrap();
+        let user = crate::prompt::build_iterate_user(
+            &sess.current_doc().unwrap().document,
+            Some(&["n1".to_string()]),
+            &crate::prompt::changelog_of(&sess),
+            "放大标题",
+        );
+        assert!(user.contains("文档结构"), "{user}");
+        assert!(user.contains("v2: 迭代：加按钮"), "{user}");
+        assert!(!user.contains("\"bg\""), "区域 JSON 不得带未选节点: {user}");
+        assert!(user.contains("放大标题"), "{user}");
+        let sys = crate::prompt::ITERATE_SYS;
+        assert!(
+            !sys.contains("文档结构") && !sys.contains("最近变更"),
+            "sys 不得嵌逐请求区块（prefix cache 稳定头部）"
+        );
     }
 }

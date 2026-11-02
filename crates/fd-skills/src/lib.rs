@@ -1621,7 +1621,10 @@ pub fn parse_node_with_depth(
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("节点 {idx} 非对象"))?;
     let kind_str = o.get("kind").and_then(|k| k.as_str()).unwrap_or("rect");
-    let kind = match kind_str {
+    // kind 大小写不敏感：文档序列化是 PascalCase（"Text"），模型回显输入 JSON
+    // 原样携带大写（issue#34 区域迭代实测），解析端必须与序列化端对齐，
+    // 否则模型回显合法输入必然失败。
+    let kind = match kind_str.to_ascii_lowercase().as_str() {
         "rect" => NodeKind::Rect,
         "circle" => NodeKind::Circle,
         "text" => NodeKind::Text,
