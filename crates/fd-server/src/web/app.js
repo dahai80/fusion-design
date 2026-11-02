@@ -65,12 +65,19 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const log = $("fd-chat");
 
+// 模块基路径：直连 11493 时为 "/"，经 gateway /shell/fusion-design/ 代理时为该前缀。
+// 资源与 API 一律相对此基路径解析，避免绝对路径打到 gateway 根（404 → 无样式）。
+const BASE = new URL(".", import.meta.url).pathname;
+function url(path) {
+    return BASE + String(path).replace(/^\/+/, "");
+}
+
 // ── API ──
 async function api(path, body) {
     const opt = body
         ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
         : {};
-    const resp = await fetch(path, opt);
+    const resp = await fetch(url(path), opt);
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
@@ -95,8 +102,8 @@ function addMsg(role, text, meta) {
 // ── 画布（WASM 桥）──
 async function initCanvas() {
     try {
-        const mod = await import("/fd_host_web.js");
-        await mod.default("/fd_host_web_bg.wasm");
+        const mod = await import(url("fd_host_web.js"));
+        await mod.default(url("fd_host_web_bg.wasm"));
         // mount 校验 <canvas> 存在（canvas 2D 路径）；DOM 渲染管线落 #fusion-dom-root。
         mod.mount("fd-canvas-mount");
         state.wasmReady = true;
@@ -121,7 +128,7 @@ function renderDoc(docJson) {
     // 设计系统 token CSS 注入画布（tokens.apply）。
     const ds = pickDesignSystem(docJson);
     if (ds) {
-        fetch(`/api/tokens?ds=${encodeURIComponent(ds)}&theme=${currentTheme()}`)
+        fetch(url(`api/tokens?ds=${encodeURIComponent(ds)}&theme=${currentTheme()}`))
             .then((r) => r.json())
             .then((d) => {
                 if (d.css) {

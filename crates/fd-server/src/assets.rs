@@ -155,6 +155,29 @@ mod tests {
     }
 
     #[test]
+    fn assets_and_api_are_module_relative() {
+        // 经 gateway /shell/fusion-design/ 代理时，绝对路径 /app.css 会打到
+        // gateway 根（404 → 整页无样式）。资源引用与 API 基路径必须相对模块前缀。
+        let html = include_str!("web/index.html");
+        assert!(
+            html.contains("href=\"app.css\""),
+            "样式表须用相对路径，绝对 /app.css 在 shell 模块内 404"
+        );
+        assert!(!html.contains("href=\"/app.css\""), "禁止绝对 /app.css");
+        assert!(html.contains("src=\"app.js\""), "脚本须用相对路径");
+        assert!(!html.contains("src=\"/app.js\""), "禁止绝对 /app.js");
+        let js = include_str!("web/app.js");
+        assert!(
+            js.contains("import.meta.url"),
+            "API 基路径须由模块 URL 推导，兼容 shell 前缀"
+        );
+        assert!(
+            !js.contains("fetch(\"/api"),
+            "禁止绝对 /api fetch，shell 模块内会打到 gateway 根"
+        );
+    }
+
+    #[test]
     fn candidate_dirs_cover_env_and_cwd() {
         let dirs = wasm_candidate_dirs();
         assert!(
