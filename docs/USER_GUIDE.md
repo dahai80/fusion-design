@@ -279,8 +279,8 @@ cargo build --release -p fd-server
 1. **Tabs** 全部 / 我的 / 与您共享 list artifacts from `fusion-artifacts-engine` (`GET /api/artifacts`), with search and sort (last opened / created / name / pinned-first) and pagination.
 2. **创建新内容** offers 文档 / 幻灯片 / 设计. Each opens the workbench at `workbench.html?kind=...&prompt=...` with the prompt pre-filled and the cursor waiting:
    - 设计 → `Make a Design artifact for `
-   - 文档 → `Make a Claude Document artifact about `
-   - 幻灯片 → `Make a Claude Slides artifact about `
+   - 文档 → `Make a Document artifact about `
+   - 幻灯片 → `Make a Slides artifact about `
 3. Existing cards reopen the workbench prefilled for that kind. The back arrow in the workbench toolbar returns to the artifacts list.
 
 **Workbench flow** (`workbench.html`):

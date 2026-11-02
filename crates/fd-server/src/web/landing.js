@@ -1,4 +1,4 @@
-// Artifacts 落地页（Claude 三 tab + 创建新内容 + 列表分页）。
+// Artifacts 落地页（三 tab + 创建新内容 + 列表分页）。
 // 数据源：fd-server /api/artifacts（转发本机 artifacts-engine）。离线。
 // 创建卡片跳 workbench.html，携带各类型的预填提示词，等客户输入。
 "use strict";
@@ -6,11 +6,11 @@
 const BASE = new URL(".", import.meta.url).pathname;
 const url = (p) => BASE + String(p).replace(/^\/+/, "");
 
-// 预填提示词：Claude 同款开头，光标停在末尾等用户接话。
+// 预填提示词：光标停在末尾等用户接话。
 const PROMPTS = {
     design: "Make a Design artifact for ",
-    document: "Make a Claude Document artifact about ",
-    slides: "Make a Claude Slides artifact about ",
+    document: "Make a Document artifact about ",
+    slides: "Make a Slides artifact about ",
 };
 
 const I18N = {

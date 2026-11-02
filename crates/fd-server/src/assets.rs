@@ -232,17 +232,15 @@ mod tests {
                 "创建卡片 {kind} 须跳工作台"
             );
         }
-        // 预填提示词：Claude 同款开头。
+        // 预填提示词：交互形状对齐，但不自称 Claude（本项目不是 Anthropic 产品）。
         let js = include_str!("web/landing.js");
         assert!(js.contains("Make a Design artifact for "), "设计预填");
         assert!(
-            js.contains("Make a Claude Document artifact about "),
+            js.contains("Make a Document artifact about "),
             "文档预填"
         );
-        assert!(
-            js.contains("Make a Claude Slides artifact about "),
-            "幻灯片预填"
-        );
+        assert!(js.contains("Make a Slides artifact about "), "幻灯片预填");
+        assert!(!js.contains("Claude"), "提示词不得出现 Claude");
     }
 
     #[test]

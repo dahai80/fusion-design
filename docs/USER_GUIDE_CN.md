@@ -279,8 +279,8 @@ cargo build --release -p fd-server
 1. **全部 / 我的 / 与您共享** 三 tab 列出 `fusion-artifacts-engine` 的产物（`GET /api/artifacts`），带搜索、排序（最近打开 / 创建日期 / 名称 / 置顶优先）与分页。
 2. **创建新内容** 提供 文档 / 幻灯片 / 设计 三张卡片，跳 `workbench.html?kind=...&prompt=...`，提示词已预填、光标停在末尾等用户接话：
    - 设计 → `Make a Design artifact for `
-   - 文档 → `Make a Claude Document artifact about `
-   - 幻灯片 → `Make a Claude Slides artifact about `
+   - 文档 → `Make a Document artifact about `
+   - 幻灯片 → `Make a Slides artifact about `
 3. 已有产物卡片可重新打开工作台；工作台左上返回箭头回到 Artifacts 列表。
 
 **工作台流程**：
