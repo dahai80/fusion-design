@@ -3,27 +3,28 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fusion Design</title>
+<title>Artifacts · Fusion Design</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<div class="workbench" id="workbench">
-  <header class="toolbar">
-    <div class="toolbar-group">
-      <div class="viewport-switch" role="tablist">
-        <button class="seg vp" data-vp="iphone" role="tab" title="iPhone" aria-label="iPhone">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
-        </button>
-        <button class="seg vp" data-vp="ipad" role="tab" title="iPad" aria-label="iPad">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M11 18h2"/></svg>
-        </button>
-        <button class="seg vp active" data-vp="desktop" role="tab" aria-selected="true" title="Desktop" aria-label="Desktop">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-        </button>
-      </div>
+<div class="landing" id="landing">
+  <header class="landing-head">
+    <div class="tabs" role="tablist" id="tab-row">
+      <button class="tab active" role="tab" data-tab="all" aria-selected="true" data-i18n="tabAll">全部</button>
+      <button class="tab" role="tab" data-tab="mine" aria-selected="false" data-i18n="tabMine">我的</button>
+      <button class="tab" role="tab" data-tab="shared" aria-selected="false" data-i18n="tabShared">与您共享</button>
     </div>
-    <div class="toolbar-group">
-      <span id="svc-status" class="status-chip" data-state="unknown">…</span>
+    <div class="landing-tools">
+      <button id="search-toggle" class="btn ghost icon" aria-label="search">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
+      <input id="search-input" class="sel search hidden" type="search" placeholder="搜索" data-i18n-ph="searchPh" />
+      <select id="sort-select" class="sel" aria-label="sort">
+        <option value="updated_at" data-i18n="sortOpened">最近打开</option>
+        <option value="created_at" data-i18n="sortCreated">创建日期</option>
+        <option value="name" data-i18n="sortName">名称</option>
+        <option value="starred" data-i18n="sortPinned">置顶优先</option>
+      </select>
       <select id="lang-select" class="sel" aria-label="language">
         <option value="zh">中文</option>
         <option value="en">English</option>
@@ -34,66 +35,47 @@
     </div>
   </header>
 
-  <main class="columns">
-    <!-- 左：对话 -->
-    <section class="col col-chat">
-      <div class="col-head">
-        <h2 data-i18n="chat">对话</h2>
-      </div>
-      <div id="fd-chat" class="chat-log" aria-live="polite"></div>
-      <div class="presets" id="preset-row">
-        <button class="chip" data-ds="apple-hig">Apple HIG</button>
-        <button class="chip" data-ds="minimal-dashboard">极简后台</button>
-        <button class="chip" data-ds="robot-sim">robot-sim</button>
-      </div>
-      <form id="composer" class="composer">
-        <div id="paste-hint" class="paste-hint hidden" data-i18n="pasteHint">已贴入截图，发送即还原</div>
-        <textarea id="prompt-input" rows="3"
-          data-i18n-ph="composerPh"
-          placeholder="描述界面，或直接粘贴截图/草图还原…（Enter 发送，Shift+Enter 换行）"></textarea>
-        <div class="composer-row">
-          <span id="pending-image" class="pending-image hidden"></span>
-          <button type="submit" id="send-btn" class="btn primary" data-i18n="send">生成</button>
-        </div>
-      </form>
-    </section>
+  <section class="create-block">
+    <h2 class="block-title" data-i18n="createNew">创建新内容</h2>
+    <div class="create-row">
+      <a class="create-card" id="create-doc" href="workbench.html?kind=document" data-kind="document">
+        <span class="create-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>
+        </span>
+        <span class="create-title" data-i18n="docTitle">文档</span>
+        <span class="create-sub" data-i18n="docSub">写作、总结与说明</span>
+      </a>
+      <a class="create-card" id="create-slides" href="workbench.html?kind=slides" data-kind="slides">
+        <span class="create-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M12 16v4M8 20h8"/></svg>
+        </span>
+        <span class="create-title" data-i18n="slidesTitle">幻灯片</span>
+        <span class="create-sub" data-i18n="slidesSub">演示与汇报</span>
+      </a>
+      <a class="create-card" id="create-design" href="workbench.html?kind=design" data-kind="design">
+        <span class="create-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.4 6.8 19l1-5.8L3.5 9.2l5.9-.9z"/></svg>
+        </span>
+        <span class="create-title" data-i18n="designTitle">设计</span>
+        <span class="create-sub" data-i18n="designSub">界面与原型</span>
+      </a>
+    </div>
+  </section>
 
-    <!-- 中：画布 -->
-    <section class="col col-canvas">
-      <div class="col-head">
-        <h2 data-i18n="canvas">画布</h2>
-      </div>
-      <div class="canvas-frame" id="canvas-frame">
-        <div class="canvas-stage" id="fd-canvas-stage">
-          <canvas id="fd-canvas-mount" class="canvas-mount"></canvas>
-          <div id="fusion-dom-root" class="dom-root"></div>
-        </div>
-        <div class="canvas-empty" id="canvas-empty">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
-          <span data-i18n="canvasEmpty">尚无设计。在左侧描述界面，生成后在此预览。</span>
-        </div>
-      </div>
-    </section>
-
-    <!-- 右：版本 + 导出 -->
-    <section class="col col-side">
-      <div class="col-head">
-        <h2 data-i18n="versions">版本</h2>
-      </div>
-      <div id="fd-versions" class="version-list"></div>
-      <div class="side-block">
-        <h3 data-i18n="export">导出</h3>
-        <div class="export-row">
-          <button id="export-html" class="btn" data-i18n="expHtml">HTML</button>
-          <button id="export-react" class="btn" data-i18n="expReact">React</button>
-          <button id="send-to-code" class="btn" data-i18n="sendCode">发给 Code</button>
-          <button id="save-artifact" class="btn" data-i18n="saveArtifact">存 Artifacts</button>
-        </div>
-        <p class="side-note" data-i18n="exportNote">HTML 直接可开；React 为 TSX 组件（Tailwind）。</p>
-      </div>
-    </section>
-  </main>
+  <section class="list-block">
+    <div class="list-head">
+      <h2 class="block-title" data-i18n="allArtifacts">所有 Artifacts</h2>
+      <span id="list-count" class="list-count"></span>
+    </div>
+    <div id="artifact-grid" class="artifact-grid" aria-live="polite"></div>
+    <p id="list-empty" class="side-note hidden" data-i18n="emptyList">还没有内容。从上面的「创建新内容」开始。</p>
+    <div class="pager" id="pager">
+      <button id="prev-page" class="btn" data-i18n="prev">上一页</button>
+      <span id="page-label" class="page-label"></span>
+      <button id="next-page" class="btn" data-i18n="next">下一页</button>
+    </div>
+  </section>
 </div>
-<script src="app.js" type="module"></script>
+<script src="landing.js" type="module"></script>
 </body>
 </html>

@@ -22,7 +22,8 @@ const I18N = {
         noSession: "尚无会话，先在左侧生成一个设计",
 sendCode: "发给 Code", saveArtifact: "存 Artifacts",
 sentCode: "已发给 Code（{n} 个文件写入 fusion-code IPC 目录）。",
-savedArtifact: "已存 Artifacts（IPC 消息已写入，入库由 artifacts-engine 消费）。",
+savedArtifact: "已存 Artifacts（已入库，回到 Artifacts 页可见）。",
+        savedArtifactDegraded: "IPC 已保存，但 artifacts-engine 入库失败：{e}",
     },
     en: {
         chat: "Chat", canvas: "Canvas", versions: "Versions", export: "Export",
@@ -41,7 +42,8 @@ savedArtifact: "已存 Artifacts（IPC 消息已写入，入库由 artifacts-eng
         noSession: "No session yet — generate a design first",
 sendCode: "Send to Code", saveArtifact: "Save to Artifacts",
 sentCode: "Sent to Code ({n} files written to the fusion-code IPC dir).",
-savedArtifact: "Saved to Artifacts (IPC message written; ingestion handled by artifacts-engine).",
+savedArtifact: "Saved to Artifacts (created in the engine; visible on the Artifacts page).",
+        savedArtifactDegraded: "IPC saved, but the artifacts-engine write failed: {e}",
     },
 };
 let lang = "zh";
@@ -500,11 +502,16 @@ async function boot() {
             return;
         }
         try {
-            await api("/api/save-artifact", {
+            const d = await api("/api/save-artifact", {
                 session: state.session,
                 version: state.currentVersion || undefined,
+                kind: state.kind || "design",
             });
-            addMsg("bot", t("savedArtifact"));
+            if (d.engine_degraded) {
+                addMsg("bot", t("savedArtifactDegraded", { e: d.error || "" }));
+            } else {
+                addMsg("bot", t("savedArtifact"));
+            }
         } catch (e) {
             addMsg("bot", t("reqFailed", { e: e.message }));
         }
@@ -525,6 +532,17 @@ async function boot() {
         $("svc-status").dataset.state = "err";
         $("svc-status").textContent = "API ✗";
     }
+
+    // 落地页跳转带入：kind + 预填提示词（光标停在末尾，等客户输入）。
+    const params = new URLSearchParams(window.location.search);
+    const prompt = params.get("prompt");
+    if (prompt) {
+        const input = $("prompt-input");
+        input.value = prompt;
+        input.focus();
+        input.setSelectionRange(prompt.length, prompt.length);
+    }
+    state.kind = params.get("kind") || "design";
 
     setViewport("desktop");
     await initCanvas();

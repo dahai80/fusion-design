@@ -766,13 +766,93 @@ pub struct SaveArtifactRequest {
     pub version: Option<u32>,
     #[serde(default)]
     pub title: Option<String>,
+    /// design / document / slides（落地页创建卡片带入）。
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
-/// [存 Artifacts]（issue#33/DS-2）：经 fd-ecosystem 文件 IPC 向
-/// fusion-artifacts-engine 约定目录写保存消息（source=fusion-design 溯源）。
-/// 消费方在 artifacts-engine 侧（跨仓 dahai80/fusion-artifacts-engine#76 跟踪）。
-pub fn save_artifact(state: &Arc<AppState>, body: &[u8]) -> Resp {
-    save_artifact_with_base(state, &ipc_base_dir(), body)
+/// [存 Artifacts]（issue#33/DS-2）：IPC 文件照写（历史契约），并真实入库
+/// artifacts-engine（REST artifact.create），落地页列表才可见。引擎不可达
+/// 不阻断 IPC 保存，响应带 engine_degraded 让调用方可见（fail visibly）。
+pub async fn save_artifact(state: &Arc<AppState>, body: &[u8]) -> Resp {
+    let resp = save_artifact_with_base(state, &ipc_base_dir(), body);
+    if resp.status() != hyper::StatusCode::OK {
+        return resp;
+    }
+    let req: SaveArtifactRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return resp,
+    };
+    let Ok(doc) = resolve_session_doc(state, &req.session, req.version) else {
+        return resp;
+    };
+    let title = req
+        .title
+        .clone()
+        .unwrap_or_else(|| format!("fusion-design {}", req.session));
+    let Some(new_artifact) = engine_create_request(state, &req, &doc, &title) else {
+        return resp;
+    };
+    match fd_ai_adapter::ArtifactsClient::from_env() {
+        Ok(client) => match client.create(&new_artifact).await {
+            Ok(a) => {
+                tracing::info!(id = %a.id, "api/save-artifact: 已入库 artifacts-engine");
+                ok_json(serde_json::json!({
+                    "ok": true,
+                    "artifact": a,
+                    "engine_degraded": false,
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "api/save-artifact: 引擎入库失败，IPC 已保存");
+                ok_json(serde_json::json!({
+                    "ok": true, "engine_degraded": true, "error": e.to_string(),
+                }))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "api/save-artifact: 引擎客户端构造失败，IPC 已保存");
+            ok_json(serde_json::json!({
+                "ok": true, "engine_degraded": true, "error": e.to_string(),
+            }))
+        }
+    }
+}
+
+/// 「存 Artifacts」的真实入库：IPC 文件照写（历史契约），另经 artifacts-engine
+/// REST 建产物，落地页列表才能看到。引擎不可达不阻断保存（degraded 字段告知）。
+fn engine_create_request(
+    state: &Arc<AppState>,
+    req: &SaveArtifactRequest,
+    doc: &fd_canvas_core::PenDocument,
+    title: &str,
+) -> Option<fd_ai_adapter::NewArtifact> {
+    let reg = state.registry.lock().unwrap();
+    let resolved = fd_codegen::resolve_tokens(doc, &reg);
+    drop(reg);
+    let content = fd_codegen::HtmlCodegen.generate(&resolved);
+    let kind = match req.kind.as_deref() {
+        Some("document") => "document",
+        Some("slides") => "template",
+        Some("design") | None => "app",
+        Some(other) => {
+            tracing::warn!(kind = other, "api/save-artifact: 未知 kind，按 app 入库");
+            "app"
+        }
+    };
+    Some(fd_ai_adapter::NewArtifact {
+        session_id: req.session.clone(),
+        name: title.to_string(),
+        artifact_type: "html".to_string(),
+        content,
+        kind: Some(kind.to_string()),
+        summary: Some(truncate(title, 120)),
+        metadata: Some(serde_json::json!({
+            "source": "fusion-design",
+            "design_system": doc.active_design_system,
+            "kind": req.kind,
+        })),
+    })
 }
 
 pub fn save_artifact_with_base(state: &Arc<AppState>, base: &std::path::Path, body: &[u8]) -> Resp {
@@ -808,6 +888,7 @@ pub fn save_artifact_with_base(state: &Arc<AppState>, base: &std::path::Path, bo
             }),
             "document": doc_json(&doc).unwrap_or_default(),
             "design_system": doc.active_design_system,
+            "kind": req.kind,
         }),
     };
     let link = fd_ecosystem::EcosystemLink::new(base);
@@ -849,9 +930,152 @@ pub(crate) fn request_cap() -> usize {
     REQUEST_CAP
 }
 
+/// Artifacts 落地页查询：解析 `/api/artifacts?...` 的查询串。
+/// tab：all（缺省）/ mine（个人自由产物）/ shared（已分享产物，见 handler 说明）。
+pub fn artifacts_query(query: &str) -> (fd_ai_adapter::ArtifactQuery, String) {
+    let get = |key: &str| {
+        query.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == key).then(|| decode_component(v))
+        })
+    };
+    let tab = get("tab").unwrap_or_else(|| "all".to_string());
+    let page = get("page")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let page_size = get("page_size")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(24)
+        .clamp(1, 100);
+    let sort = get("sort").unwrap_or_else(|| "updated_at".to_string());
+    let allowed_sort = ["updated_at", "created_at", "name", "starred"];
+    let sort = if allowed_sort.contains(&sort.as_str()) {
+        sort
+    } else {
+        "updated_at".to_string()
+    };
+    let ownership_type = (tab == "mine").then(|| "free".to_string());
+    let artifact_type = get("type").filter(|v| !v.is_empty());
+    let name_search = get("q").filter(|v| !v.trim().is_empty());
+    (
+        fd_ai_adapter::ArtifactQuery {
+            page,
+            page_size,
+            sort,
+            artifact_type,
+            ownership_type,
+            name_search,
+        },
+        tab,
+    )
+}
+
+fn decode_component(s: &str) -> String {
+    let s = s.replace('+', " ");
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let h = bytes.next().and_then(hex_val);
+            let l = bytes.next().and_then(hex_val);
+            if let (Some(h), Some(l)) = (h, l) {
+                out.push(h * 16 + l);
+                continue;
+            }
+        }
+        out.push(b);
+    }
+    // percent-decoded 多字节序列（中文搜索词）须按 UTF-8 组装，逐字节转 char 会乱码。
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// `GET /api/artifacts`：落地页列表，数据源为本机 artifacts-engine。
+/// 引擎不可达时降级为「空列表 + degraded」，落地页仍可打开并创建新内容。
+/// tab=shared 时引擎无 share 过滤能力：单页取 100 条后本地筛 share_id 非空。
+pub async fn artifacts(query: &str) -> Resp {
+    let (mut q, tab) = artifacts_query(query);
+    let shared_mode = tab == "shared";
+    if shared_mode {
+        q.page_size = 100;
+        q.page = 1;
+    }
+    let client = match fd_ai_adapter::ArtifactsClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "api/artifacts: 客户端构造失败");
+            return ok_json(serde_json::json!({
+                "artifacts": [], "total": 0, "page": q.page, "page_size": q.page_size,
+                "degraded": true, "error": e.to_string(),
+            }));
+        }
+    };
+    match client.list(&q).await {
+        Ok(page) => {
+            let mut items = page.artifacts;
+            let total = if shared_mode {
+                items.retain(|a| a.share_id.as_deref().is_some_and(|s| !s.is_empty()));
+                items.len() as u64
+            } else {
+                page.total
+            };
+            tracing::info!(
+                tab = %tab,
+                page = q.page,
+                count = items.len(),
+                total,
+                "api/artifacts: 列表返回"
+            );
+            ok_json(serde_json::json!({
+                "artifacts": items, "total": total, "page": q.page,
+                "page_size": q.page_size, "degraded": false,
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, tab = %tab, "api/artifacts: 引擎不可达，降级空列表");
+            ok_json(serde_json::json!({
+                "artifacts": [], "total": 0, "page": q.page, "page_size": q.page_size,
+                "degraded": true, "error": e.to_string(),
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifacts_query_parsing() {
+        // 缺省：全部 tab、updated_at、24/页。
+        let (q, tab) = artifacts_query("");
+        assert_eq!(tab, "all");
+        assert_eq!(q.sort, "updated_at");
+        assert_eq!(q.page_size, 24);
+        assert!(q.ownership_type.is_none());
+
+        // 我的 tab → ownership_type=free（引擎可过滤维度）。
+        let (q, tab) = artifacts_query("tab=mine&page=2&sort=starred");
+        assert_eq!(tab, "mine");
+        assert_eq!(q.ownership_type.as_deref(), Some("free"));
+        assert_eq!(q.page, 2);
+        assert_eq!(q.sort, "starred");
+
+        // 非法 sort 回落；page_size 夹取；搜索词 percent-decode。
+        let (q, _) = artifacts_query("sort=evil&page_size=999&q=%E7%99%BB%E5%BD%95+x");
+        assert_eq!(q.sort, "updated_at");
+        assert_eq!(q.page_size, 100);
+        assert_eq!(q.name_search.as_deref(), Some("登录 x"));
+    }
 
     #[test]
     fn resolve_model_chain() {

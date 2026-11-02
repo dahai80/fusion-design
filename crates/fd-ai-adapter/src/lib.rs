@@ -29,7 +29,9 @@ use std::sync::{Arc, LazyLock};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+mod artifacts;
 mod stream;
+pub use artifacts::{ArtifactPage, ArtifactQuery, ArtifactSummary, ArtifactsClient, NewArtifact};
 pub use stream::parse_sse_line;
 
 // ── fusion-mlx 本地推理客户端 ──

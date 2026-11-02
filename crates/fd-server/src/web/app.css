@@ -47,6 +47,7 @@ body {
     color: var(--fs-text-primary);
     -webkit-font-smoothing: antialiased;
 }
+.hidden { display: none !important; }
 .workbench { display: flex; flex-direction: column; height: 100vh; }
 
 /* 工具栏（shell 已有 tab/标题，模块内只保留操作要素） */
@@ -253,4 +254,126 @@ body {
     .col-canvas { min-height: 420px; }
     .col-side { border-top: 1px solid var(--fs-border); }
     .version-list { flex: 0 0 auto; max-height: 200px; }
+}
+
+/* ── Artifacts 落地页（Claude 同构：tabs / 搜索 / 排序 / 创建新内容 / 列表分页）── */
+.landing {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 24px 24px 48px;
+    min-height: 100vh;
+}
+.landing-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.tabs { display: flex; gap: 4px; }
+.tab {
+    height: 32px;
+    padding: 0 14px;
+    border: 1px solid transparent;
+    border-radius: var(--fs-radius-card);
+    background: transparent;
+    color: var(--fs-text-secondary);
+    font: inherit;
+    cursor: pointer;
+}
+.tab:hover { color: var(--fs-text-primary); background: var(--fs-bg-muted); }
+.tab.active {
+    background: var(--fs-bg-elevated);
+    border-color: var(--fs-border);
+    color: var(--fs-text-primary);
+}
+.landing-tools { display: flex; align-items: center; gap: 8px; }
+.search { width: 200px; }
+.create-block, .list-block { display: flex; flex-direction: column; gap: 12px; }
+.block-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--fs-text-secondary); }
+.create-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.create-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 18px;
+    border: 1px solid var(--fs-border);
+    border-radius: var(--fs-radius-lg);
+    background: var(--fs-bg-elevated);
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.create-card:hover { border-color: var(--fs-brand); transform: translateY(-1px); }
+.create-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--fs-radius-card);
+    background: var(--fs-brand-soft);
+    color: var(--fs-brand);
+    margin-bottom: 4px;
+}
+.create-title { font-size: 15px; font-weight: 600; }
+.create-sub { font-size: 12px; color: var(--fs-text-muted); }
+.list-head { display: flex; align-items: baseline; gap: 10px; }
+.list-count { font-size: 12px; color: var(--fs-text-muted); }
+.artifact-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+}
+.artifact-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px 16px;
+    border: 1px solid var(--fs-border);
+    border-radius: var(--fs-radius-card);
+    background: var(--fs-bg-elevated);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.artifact-card:hover { border-color: var(--fs-brand); }
+.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.badge {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border-radius: var(--fs-radius-full);
+    background: var(--fs-brand-soft);
+    color: var(--fs-brand);
+    font-size: 11px;
+}
+.card-kind { font-size: 12px; color: var(--fs-text-secondary); }
+.card-summary {
+    margin: 0;
+    font-size: 12px;
+    color: var(--fs-text-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: 2.6em;
+}
+.card-meta { font-size: 11px; color: var(--fs-text-muted); }
+.pager { display: flex; align-items: center; gap: 12px; justify-content: center; padding-top: 8px; }
+.page-label { font-size: 12px; color: var(--fs-text-muted); }
+
+@media (max-width: 900px) {
+    .landing { padding: 16px; gap: 20px; }
+    .create-row { grid-template-columns: 1fr; }
+    .search { width: 140px; }
 }

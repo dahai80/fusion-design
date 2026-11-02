@@ -42,6 +42,20 @@ pub fn index() -> Resp {
     text_response(include_str!("web/index.html"), "text/html; charset=utf-8")
 }
 
+pub fn workbench() -> Resp {
+    text_response(
+        include_str!("web/workbench.html"),
+        "text/html; charset=utf-8",
+    )
+}
+
+pub fn landing_js() -> Resp {
+    text_response(
+        include_str!("web/landing.js"),
+        "application/javascript; charset=utf-8",
+    )
+}
+
 pub fn app_js() -> Resp {
     text_response(
         include_str!("web/app.js"),
@@ -126,9 +140,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn index_embeds_html_skeleton() {
+    fn workbench_embeds_html_skeleton() {
         // 编译期嵌入冒烟：D1 三栏骨架 + wasm 加载钩子必须在页内。
-        let body = include_str!("web/index.html");
+        let body = include_str!("web/workbench.html");
         assert!(body.contains("id=\"fd-chat\""), "左栏对话容器");
         assert!(body.contains("id=\"fd-canvas-stage\""), "中栏画布舞台");
         assert!(body.contains("id=\"fd-versions\""), "右栏版本列表");
@@ -164,8 +178,11 @@ mod tests {
             "样式表须用相对路径，绝对 /app.css 在 shell 模块内 404"
         );
         assert!(!html.contains("href=\"/app.css\""), "禁止绝对 /app.css");
-        assert!(html.contains("src=\"app.js\""), "脚本须用相对路径");
-        assert!(!html.contains("src=\"/app.js\""), "禁止绝对 /app.js");
+        assert!(html.contains("src=\"landing.js\""), "脚本须用相对路径");
+        assert!(
+            !html.contains("src=\"/landing.js\""),
+            "禁止绝对 /landing.js"
+        );
         let js = include_str!("web/app.js");
         assert!(
             js.contains("import.meta.url"),
@@ -174,6 +191,57 @@ mod tests {
         assert!(
             !js.contains("fetch(\"/api"),
             "禁止绝对 /api fetch，shell 模块内会打到 gateway 根"
+        );
+        let workbench = include_str!("web/workbench.html");
+        assert!(workbench.contains("href=\"app.css\""), "工作台样式相对路径");
+        assert!(workbench.contains("src=\"app.js\""), "工作台脚本相对路径");
+        let landing_js = include_str!("web/landing.js");
+        assert!(
+            landing_js.contains("import.meta.url"),
+            "落地页同样按模块基路径"
+        );
+        assert!(
+            !landing_js.contains("fetch(\"/api"),
+            "落地页禁止绝对 /api fetch"
+        );
+    }
+
+    #[test]
+    fn landing_page_has_claude_shape() {
+        // 落地页结构：三 tab + 搜索 + 排序 + 三个创建卡片 + 列表分页。
+        let body = include_str!("web/index.html");
+        for id in [
+            "tab-row",
+            "search-input",
+            "sort-select",
+            "artifact-grid",
+            "pager",
+            "create-doc",
+            "create-slides",
+            "create-design",
+        ] {
+            assert!(body.contains(&format!("id=\"{id}\"")), "缺元素 {id}");
+        }
+        assert!(body.contains("data-i18n=\"tabAll\""), "全部 tab");
+        assert!(body.contains("data-i18n=\"tabMine\""), "我的 tab");
+        assert!(body.contains("data-i18n=\"tabShared\""), "与您共享 tab");
+        // 三个创建卡片跳工作台并带 kind。
+        for kind in ["document", "slides", "design"] {
+            assert!(
+                body.contains(&format!("workbench.html?kind={kind}")),
+                "创建卡片 {kind} 须跳工作台"
+            );
+        }
+        // 预填提示词：Claude 同款开头。
+        let js = include_str!("web/landing.js");
+        assert!(js.contains("Make a Design artifact for "), "设计预填");
+        assert!(
+            js.contains("Make a Claude Document artifact about "),
+            "文档预填"
+        );
+        assert!(
+            js.contains("Make a Claude Slides artifact about "),
+            "幻灯片预填"
         );
     }
 

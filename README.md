@@ -4,7 +4,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.19 — 14 crates + vendored op-ai, 519 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. v0.1.19: workbench UI aligned with the fusion-web-shell design language (shell --fs-* tokens, dark default, theme inheritance inside the gateway shell module), so the Design module no longer looks foreign in the unified shell. v0.1.18 added the fd-server web workbench + ecosystem exits. See `docs/changes/v0.1.19.md`.
+**Status**: v0.1.20 — 14 crates + vendored op-ai, 530+ tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. v0.1.20 turns the Design module entry into an Artifacts landing page (All / Mine / Shared tabs, search + sort, three create cards for Document / Slides / Design that pre-fill the chat prompt, paginated artifact grid) and makes "Save to Artifacts" really create the artifact in fusion-artifacts-engine instead of only writing an unused IPC message. v0.1.19 aligned the workbench UI with the fusion-web-shell design language. v0.1.18 added the fd-server web workbench. See `docs/changes/v0.1.20.md`.
 
 ## 📋 Overview
 
@@ -88,7 +88,7 @@ Scenario-based usage + troubleshooting (bilingual):
 
 ```bash
 cargo check --workspace                                        # Full workspace compiles
-cargo test --workspace                                         # 419 tests pass (+1 ignored perf baseline)
+cargo test --workspace                                         # full suite (+ignored perf/E2E baselines)
 bash Scripts/deny-unwrap-expect.sh                             # 零 unwrap/expect 门禁（allowlist 基线）
 bash Scripts/deny-external-http.sh                             # 出站 HTTP 仅限 fd-ai-adapter（离线硬约束）
 cargo test --release -- --ignored perf_baseline                # 1000-node perf baseline (<500ms each)

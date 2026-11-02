@@ -23,6 +23,9 @@ pub async fn handle(
 
     let resp = match (method.as_str(), path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => assets::index(),
+        ("GET", "/workbench.html") => assets::workbench(),
+        ("GET", "/landing.js") => assets::landing_js(),
+        ("GET", "/api/artifacts") => handlers::artifacts(&query).await,
         ("GET", "/app.js") => assets::app_js(),
         ("GET", "/app.css") => assets::app_css(),
         ("GET", "/fd_host_web.js") => assets::wasm_js(),
@@ -55,7 +58,7 @@ pub async fn handle(
             Err(r) => r,
         },
         ("POST", "/api/save-artifact") => match read_body(req).await {
-            Ok(b) => handlers::save_artifact(&state, &b),
+            Ok(b) => handlers::save_artifact(&state, &b).await,
             Err(r) => r,
         },
         ("GET", p) if p.starts_with("/api/tokens") => {
