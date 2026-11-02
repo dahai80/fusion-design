@@ -4,7 +4,7 @@
 
 > Local offline AI visual design workbench for macOS — built on OpenPencil (Rust) + fusion-mlx local multimodal inference, embedded in Fusion-Desk WKWebView.
 
-**Status**: v0.1.18 — 14 crates + vendored op-ai, 519 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. 3 built-in design presets (Apple HIG / minimal dashboard / robot-sim console), op-editor-core/op-codegen/op-design-lint replaced by fd-canvas-core/fd-codegen/fd-design-lint. v0.1.18: web workbench landed — `fd-server` on `127.0.0.1:11493` with chat generation/iteration, screenshot restoration (local vision model), version rollback, HTML/React export, WASM canvas hosting, and ecosystem exits `/api/send-to-code` + `/api/save-artifact` (issues #31/#33); gateway/supervisor registration tracked cross-repo (fusion-gateway#448, fusion-supervisor#89). See `docs/changes/v0.1.18.md`.
+**Status**: v0.1.19 — 14 crates + vendored op-ai, 519 tests pass, WASM build verified, CI green (fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit), release packaging. v0.1.19: workbench UI aligned with the fusion-web-shell design language (shell --fs-* tokens, dark default, theme inheritance inside the gateway shell module), so the Design module no longer looks foreign in the unified shell. v0.1.18 added the fd-server web workbench + ecosystem exits. See `docs/changes/v0.1.19.md`.
 
 ## 📋 Overview
 

@@ -4,7 +4,7 @@
 
 > macOS 本地离线 AI 可视化设计工作台 — 基于 OpenPencil (Rust) 底座 + fusion-mlx 本地多模态推理，原生嵌入 Fusion-Desk WKWebView。
 
-**状态**：v0.1.18 — 14 个 crate + vendored op-ai，519 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。3 套内置设计预设（Apple HIG / 极简后台 / robot-sim 控制台），op-editor-core/op-codegen/op-design-lint 已由 fd-canvas-core/fd-codegen/fd-design-lint 自建替身替代。
+**状态**：v0.1.19 — 14 个 crate + vendored op-ai，519 个测试通过，WASM 构建验证通过，CI 全绿（fmt/clippy/test/wasm/deny-panic/deny-unwrap-expect/deny-external-http/cargo-audit），发布打包就绪。v0.1.19：工作台 UI 对齐 fusion-web-shell 设计语言（外壳 --fs-* token、深色默认、shell 模块内主题继承），Design 模块不再与统一外壳割裂。v0.1.18 新增 fd-server Web 工作台 + 生态出口。详见 `docs/changes/v0.1.19.md`。
 
 v0.1.18：Web 工作台落地——`fd-server` 于 `127.0.0.1:11493` 提供对话式生成/迭代、截图还原（本地视觉模型）、版本回退、HTML/React 导出、WASM 画布托管，及生态出口 `/api/send-to-code` + `/api/save-artifact`（issue #31/#33）；gateway/supervisor 注册跨仓跟踪（fusion-gateway#448、fusion-supervisor#89）。详见 `docs/changes/v0.1.18.md`。
 
