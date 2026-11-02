@@ -274,13 +274,22 @@ cargo build --release -p fd-server
 ./start.sh status|stop|log
 ```
 
-**流程**：
+**落地页**（`http://127.0.0.1:11493/`，即 gateway shell 里的 Design 模块入口）：
+
+1. **全部 / 我的 / 与您共享** 三 tab 列出 `fusion-artifacts-engine` 的产物（`GET /api/artifacts`），带搜索、排序（最近打开 / 创建日期 / 名称 / 置顶优先）与分页。
+2. **创建新内容** 提供 文档 / 幻灯片 / 设计 三张卡片，跳 `workbench.html?kind=...&prompt=...`，提示词已预填、光标停在末尾等用户接话：
+   - 设计 → `Make a Design artifact for `
+   - 文档 → `Make a Claude Document artifact about `
+   - 幻灯片 → `Make a Claude Slides artifact about `
+3. 已有产物卡片可重新打开工作台；工作台左上返回箭头回到 Artifacts 列表。
+
+**工作台流程**：
 1. 输入提示词（如 `登录页，邮箱+密码表单，主色 indigo`）→ `POST /api/generate` 在 WASM 画布渲染 v1。
 2. 对话迭代（`把主按钮文案改成 Sign In`）→ `POST /api/iterate` 产出 v2；右侧版本列表支持点选查看与回退。
 3. 粘贴或上传截图 → `POST /api/restore` 走本地视觉模型，新建可编辑会话。
-4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`，`save_artifact` IPC 消息供 artifacts-engine 消费，溯源 `source: fusion-design`）。
+4. 导出：**HTML** / **React** 按钮；或交接：**发给 Code**（`POST /api/send-to-code`，HTML+TSX 落 fusion-code IPC 目录）、**存 Artifacts**（`POST /api/save-artifact`：既写历史 `save_artifact` IPC 消息，又经 `POST /api/v1/artifacts/create` 在 fusion-artifacts-engine 真正建产物，落地页即可见；引擎不可达时 IPC 仍落盘，响应带 `engine_degraded: true`）。
 
-**环境变量**：`FUSION_DESIGN_PORT`（默认 11493）、`FUSION_DESIGN_DATA_DIR`（IPC 发件箱 + 日志，默认 `~/.fusion-design`）、`FUSION_DESIGN_WASM_DIR`（画布资产；默认发现链 可执行文件目录 > cwd > target wasm 目录）。
+**环境变量**：`FUSION_ARTIFACTS_URL`（默认 `http://127.0.0.1:11451`）、`FUSION_ARTIFACTS_API_KEY`（缺省读 `~/.fusion/artifacts/config.yaml` 的 `security.api_key`）、`FUSION_DESIGN_PORT`（默认 11493）、`FUSION_DESIGN_DATA_DIR`（IPC 发件箱 + 日志，默认 `~/.fusion-design`）、`FUSION_DESIGN_WASM_DIR`（画布资产；默认发现链 可执行文件目录 > cwd > target wasm 目录）。
 
 **注意**：生成需本地推理栈在线（gateway :11432 或 MLX :11434 + `FUSION_CLIENT_KEY`）。生态交接的跨仓消费方为 fusion-code#228 / fusion-artifacts-engine#76。
 

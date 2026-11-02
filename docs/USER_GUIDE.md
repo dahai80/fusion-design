@@ -274,13 +274,22 @@ cargo build --release -p fd-server
 ./start.sh status|stop|log
 ```
 
-**Flow**:
+**Landing page** (`http://127.0.0.1:11493/`, and the Design module inside the gateway shell):
+
+1. **Tabs** 全部 / 我的 / 与您共享 list artifacts from `fusion-artifacts-engine` (`GET /api/artifacts`), with search and sort (last opened / created / name / pinned-first) and pagination.
+2. **创建新内容** offers 文档 / 幻灯片 / 设计. Each opens the workbench at `workbench.html?kind=...&prompt=...` with the prompt pre-filled and the cursor waiting:
+   - 设计 → `Make a Design artifact for `
+   - 文档 → `Make a Claude Document artifact about `
+   - 幻灯片 → `Make a Claude Slides artifact about `
+3. Existing cards reopen the workbench prefilled for that kind. The back arrow in the workbench toolbar returns to the artifacts list.
+
+**Workbench flow** (`workbench.html`):
 1. Type a prompt (e.g. `login page, email+password form, indigo accent`) → `POST /api/generate` renders v1 on the WASM canvas.
 2. Iterate in chat (`change the primary button label to Sign In`) → `POST /api/iterate` produces v2; the version list on the right supports click-to-view and rollback.
 3. Paste or upload a screenshot → `POST /api/restore` runs the local vision model and creates a new editable session.
-4. Export via **HTML** / **React** buttons, or hand off: **Send to Code** (`POST /api/send-to-code`, HTML+TSX land in the fusion-code IPC dir) and **Save to Artifacts** (`POST /api/save-artifact`, `save_artifact` IPC message for fusion-artifacts-engine with `source: fusion-design` attribution).
+4. Export via **HTML** / **React** buttons, or hand off: **Send to Code** (`POST /api/send-to-code`, HTML+TSX land in the fusion-code IPC dir) and **Save to Artifacts** (`POST /api/save-artifact`: writes the historical `save_artifact` IPC message *and* creates the artifact in fusion-artifacts-engine via `POST /api/v1/artifacts/create`, so it shows up on the landing page; when the engine is down the IPC write still succeeds and the reply sets `engine_degraded: true`).
 
-**Env**: `FUSION_DESIGN_PORT` (default 11493), `FUSION_DESIGN_DATA_DIR` (IPC outbox + logs, default `~/.fusion-design`), `FUSION_DESIGN_WASM_DIR` (canvas assets; default discovery chain exe dir > cwd > target wasm dirs).
+**Env**: `FUSION_ARTIFACTS_URL` (default `http://127.0.0.1:11451`), `FUSION_ARTIFACTS_API_KEY` (falls back to `security.api_key` in `~/.fusion/artifacts/config.yaml`), `FUSION_DESIGN_PORT` (default 11493), `FUSION_DESIGN_DATA_DIR` (IPC outbox + logs, default `~/.fusion-design`), `FUSION_DESIGN_WASM_DIR` (canvas assets; default discovery chain exe dir > cwd > target wasm dirs).
 
 **Note**: generation requires the local inference stack (gateway :11432 or MLX :11434 + `FUSION_CLIENT_KEY`). Cross-repo consumers for the ecosystem handoff are fusion-code#228 / fusion-artifacts-engine#76.
 
