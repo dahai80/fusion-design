@@ -90,12 +90,7 @@ pub async fn handle(
                 None => bad_request("路径须为 /api/version/<session>/<version>"),
             }
         }
-        (m, p) if p.starts_with("/api/") => hyper::Response::builder()
-            .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                serde_json::json!({"error": format!("无 {m} {p} 路由")}).to_string(),
-            )))
-            .unwrap_or_default(),
+        (m, p) if p.starts_with("/api/") => method_not_allowed(m, p),
         _ => hyper::Response::builder()
             .status(hyper::StatusCode::NOT_FOUND)
             .body(http_body_util::Full::new(hyper::body::Bytes::from(
@@ -104,6 +99,36 @@ pub async fn handle(
             .unwrap_or_default(),
     };
     Ok(resp)
+}
+
+/// issue#35 契约项：405 带 hint——tokens 等只读端点仅支持 GET，
+/// 消费方不必逆向猜方法。响应形状 {"error","method","path","hint"?}。
+fn method_not_allowed(method: &str, path: &str) -> Resp {
+    let hint = if path.starts_with("/api/tokens") {
+        Some("GET /api/tokens?ds=<id>&theme=light|dark".to_string())
+    } else if path.starts_with("/api/health")
+        || path.starts_with("/api/design-systems")
+        || path.starts_with("/api/sessions")
+        || path.starts_with("/api/artifacts")
+    {
+        Some(format!("GET {path}"))
+    } else {
+        None
+    };
+    let mut body = serde_json::json!({
+        "error": format!("无 {method} {path} 路由"),
+        "method": method,
+        "path": path,
+    });
+    if let Some(h) = hint {
+        body["hint"] = serde_json::json!(h);
+    }
+    hyper::Response::builder()
+        .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+            body.to_string(),
+        )))
+        .unwrap_or_default()
 }
 
 /// 读请求体（上限 REQUEST_CAP）。失败/超限返回 Err(错误响应)。
@@ -183,5 +208,33 @@ mod tests {
         );
         assert_eq!(query_param("a=1", "b"), None);
         assert_eq!(urldecode("%2Fx"), "/x");
+    }
+
+    #[tokio::test]
+    async fn method_not_allowed_contract() {
+        // POST /api/tokens（issue#35 验收报 405 的形状）：405 + hint 指路 GET。
+        let resp = method_not_allowed("POST", "/api/tokens");
+        assert_eq!(resp.status(), hyper::StatusCode::METHOD_NOT_ALLOWED);
+        use http_body_util::BodyExt;
+        let b = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["method"], "POST");
+        assert_eq!(v["path"], "/api/tokens");
+        assert!(
+            v["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("GET /api/tokens"),
+            "{v}"
+        );
+        // 无 hint 的写端点：不带 hint 键。
+        let resp = method_not_allowed("GET", "/api/generate");
+        assert_eq!(resp.status(), hyper::StatusCode::METHOD_NOT_ALLOWED);
     }
 }

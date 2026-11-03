@@ -64,6 +64,17 @@ fn err_json(
     json_response(status, &body)
 }
 
+/// 字段定位错误（issue#35 契约项）：4xx 校验失败须指出哪个字段缺失/非法，
+/// 消费方不必逐端点逆向猜。响应形状 {"error", "field"}。
+fn err_field(
+    status: hyper::StatusCode,
+    field: &str,
+    message: &str,
+) -> hyper::Response<http_body_util::Full<hyper::body::Bytes>> {
+    let body = serde_json::json!({"error": message, "field": field}).to_string();
+    json_response(status, &body)
+}
+
 fn json_response(
     status: hyper::StatusCode,
     body: &str,
@@ -141,8 +152,9 @@ pub fn tokens(state: &Arc<AppState>, ds: &str, theme: &str) -> Resp {
             "theme": theme,
             "css": system.to_css_custom_properties_for_theme(theme),
         })),
-        None => err_json(
+        None => err_field(
             hyper::StatusCode::NOT_FOUND,
+            "ds",
             &format!("设计系统 {ds} 不存在"),
         ),
     }
@@ -163,14 +175,19 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: GenerateRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "body",
                 &format!("请求体解析失败: {e}"),
             )
         }
     };
     if req.prompt.trim().is_empty() {
-        return err_json(hyper::StatusCode::BAD_REQUEST, "prompt 不能为空");
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "prompt",
+            "prompt 不能为空（字符串，非空）",
+        );
     }
     let page = req.page.unwrap_or_else(|| "page-1".to_string());
     let model = resolve_model(&req.model);
@@ -253,18 +270,24 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: IterateRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "body",
                 &format!("请求体解析失败: {e}"),
             )
         }
     };
     if req.instruction.trim().is_empty() {
-        return err_json(hyper::StatusCode::BAD_REQUEST, "instruction 不能为空");
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "instruction",
+            "instruction 不能为空（字符串，非空）",
+        );
     }
     let Some(sess) = state.sessions.get(&req.session) else {
-        return err_json(
+        return err_field(
             hyper::StatusCode::NOT_FOUND,
+            "session",
             &format!("session {} 不存在", req.session),
         );
     };
@@ -280,8 +303,9 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     });
     if let Some(ids) = &region {
         if crate::prompt::select_region(&cur.document, ids).is_none() {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "region",
                 &format!("region 无命中节点: {ids:?}"),
             );
         }
@@ -422,14 +446,19 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: RestoreRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "body",
                 &format!("请求体解析失败: {e}"),
             )
         }
     };
     if req.image_base64.trim().is_empty() {
-        return err_json(hyper::StatusCode::BAD_REQUEST, "image_base64 不能为空");
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "image_base64",
+            "image_base64 不能为空（纯 base64，不带 data: 前缀）",
+        );
     }
     let page = req.page.unwrap_or_else(|| "restored".to_string());
     let hint = req
@@ -449,14 +478,19 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
     ) {
         Ok(b) => b,
         Err(e) => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "image_base64",
                 &format!("image_base64 解码失败: {e}"),
             )
         }
     };
     if bytes.is_empty() {
-        return err_json(hyper::StatusCode::BAD_REQUEST, "图片内容为空");
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "image_base64",
+            "图片内容为空",
+        );
     }
     let tmp_dir = std::env::temp_dir();
     let ts = std::time::SystemTime::now()
@@ -528,8 +562,9 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
 
 pub fn session_info(state: &Arc<AppState>, id: &str) -> Resp {
     let Some(sess) = state.sessions.get(id) else {
-        return err_json(
+        return err_field(
             hyper::StatusCode::NOT_FOUND,
+            "session",
             &format!("session {id} 不存在"),
         );
     };
@@ -558,8 +593,9 @@ pub fn version_doc(state: &Arc<AppState>, id: &str, version: u32) -> Resp {
         Some(v) => {
             ok_json(serde_json::json!({"session": id, "version": version, "document": v.document}))
         }
-        None => err_json(
+        None => err_field(
             hyper::StatusCode::NOT_FOUND,
+            "version",
             &format!("session {id} 无版本 v{version}"),
         ),
     }
@@ -575,14 +611,15 @@ pub fn rollback(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: RollbackRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "body",
                 &format!("请求体解析失败: {e}"),
             )
         }
     };
     if let Err(e) = state.sessions.rollback(&req.session, req.version) {
-        return err_json(hyper::StatusCode::NOT_FOUND, &e.to_string());
+        return err_field(hyper::StatusCode::NOT_FOUND, "version", &e.to_string());
     }
     let sess = match state.sessions.get(&req.session) {
         Some(s) => s,
@@ -613,22 +650,25 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: ExportRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "body",
                 &format!("请求体解析失败: {e}"),
             )
         }
     };
     let Some(sess) = state.sessions.get(&req.session) else {
-        return err_json(
+        return err_field(
             hyper::StatusCode::NOT_FOUND,
+            "session",
             &format!("session {} 不存在", req.session),
         );
     };
     let target_version = req.version.unwrap_or(sess.current);
     let Some(entry) = sess.versions.iter().find(|v| v.version == target_version) else {
-        return err_json(
+        return err_field(
             hyper::StatusCode::NOT_FOUND,
+            "version",
             &format!("session {} 无版本 v{}", req.session, target_version),
         );
     };
@@ -656,8 +696,9 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
             "text/plain; charset=utf-8",
         ),
         other => {
-            return err_json(
+            return err_field(
                 hyper::StatusCode::BAD_REQUEST,
+                "format",
                 &format!("不支持的导出格式 {other}（支持 html / react）"),
             );
         }
@@ -736,8 +777,9 @@ fn resolve_session_doc(
     version: Option<u32>,
 ) -> Result<fd_canvas_core::PenDocument, Box<Resp>> {
     let Some(sess) = state.sessions.get(session) else {
-        return Err(Box::new(err_json(
+        return Err(Box::new(err_field(
             hyper::StatusCode::NOT_FOUND,
+            "session",
             &format!("session {session} 不存在"),
         )));
     };
@@ -746,8 +788,9 @@ fn resolve_session_doc(
         None => sess.current_doc().cloned(),
     };
     let Some(entry) = entry else {
-        return Err(Box::new(err_json(
+        return Err(Box::new(err_field(
             hyper::StatusCode::NOT_FOUND,
+            "version",
             &format!("session {session} 无版本 v{:?}", version),
         )));
     };
@@ -1487,5 +1530,150 @@ mod tests {
             !sys.contains("文档结构") && !sys.contains("最近变更"),
             "sys 不得嵌逐请求区块（prefix cache 稳定头部）"
         );
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    // issue#35 契约测试：钉住 generate/iterate/rollback/restore/tokens 的
+    // 请求/响应形状与字段定位 4xx。改动契约须同步改 docs/API.md 与本模块。
+    use super::*;
+
+    async fn body_of(resp: Resp) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
+    async fn json_of(resp: Resp) -> serde_json::Value {
+        serde_json::from_slice(&body_of(resp).await).unwrap()
+    }
+
+    fn seeded_state() -> (std::sync::Arc<crate::AppState>, String, String) {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let doc = serde_json::json!({
+            "pages": [{
+                "id": "p1", "name": "home", "width": 1440.0, "height": 900.0,
+                "nodes": [
+                    {"id": "n1", "kind": "Text", "name": "title", "x": 10.0, "y": 10.0,
+                     "w": 200.0, "h": 30.0, "text": "Hello"}
+                ]
+            }]
+        })
+        .to_string();
+        let sid = state.sessions.create(doc.clone(), "seed");
+        (state, sid, doc)
+    }
+
+    #[tokio::test]
+    async fn contract_4xx_errors_are_field_located() {
+        let (state, sid, doc) = seeded_state();
+
+        // generate：空 prompt → 400 + field=prompt。
+        let v = json_of(generate(&state, br#"{"prompt":"  "}"#).await).await;
+        assert_eq!(v["field"], "prompt", "{v}");
+
+        // generate：坏 body → 400 + field=body。
+        let v = json_of(generate(&state, br#"not json"#).await).await;
+        assert_eq!(v["field"], "body", "{v}");
+
+        // iterate：空 instruction → 400 + field=instruction。
+        let b = serde_json::json!({"session": sid, "instruction": ""});
+        let v = json_of(iterate(&state, b.to_string().as_bytes()).await).await;
+        assert_eq!(v["field"], "instruction", "{v}");
+
+        // iterate：session 不存在 → 404 + field=session。
+        let b = serde_json::json!({"session": "s-nope", "instruction": "x"});
+        let v = json_of(iterate(&state, b.to_string().as_bytes()).await).await;
+        assert_eq!(v["field"], "session", "{v}");
+        assert!(v.as_object().unwrap()["error"].is_string(), "{v}");
+
+        // iterate：region 无命中 → 400 + field=region。
+        let b = serde_json::json!({"session": sid, "instruction": "x", "region": ["ghost"]});
+        let v = json_of(iterate(&state, b.to_string().as_bytes()).await).await;
+        assert_eq!(v["field"], "region", "{v}");
+
+        // rollback：坏 body → 400 + field=body；不存在版本 → 404 + field=version。
+        let v = json_of(rollback(&state, br#"{"session":"x"}"#)).await;
+        assert_eq!(v["field"], "body", "{v}");
+        let b = serde_json::json!({"session": sid, "version": 99});
+        let v = json_of(rollback(&state, b.to_string().as_bytes())).await;
+        assert_eq!(v["field"], "version", "{v}");
+
+        // restore：空 image → 400 + field=image_base64。
+        let v = json_of(restore(&state, br#"{"image_base64":" "}"#).await).await;
+        assert_eq!(v["field"], "image_base64", "{v}");
+
+        // export：非法 format → 400 + field=format。
+        let b = serde_json::json!({"session": sid, "format": "pdf"});
+        let v = json_of(export(&state, b.to_string().as_bytes())).await;
+        assert_eq!(v["field"], "format", "{v}");
+
+        // tokens：不存在 ds → 404 + field=ds。
+        let v = json_of(tokens(&state, "no-such-ds", "light")).await;
+        assert_eq!(v["field"], "ds", "{v}");
+
+        // session_info：不存在 → 404 + field=session。
+        let v = json_of(session_info(&state, "s-nope")).await;
+        assert_eq!(v["field"], "session", "{v}");
+        let _ = doc;
+    }
+
+    #[tokio::test]
+    async fn contract_tokens_shape() {
+        let (state, _sid, _doc) = seeded_state();
+        let v = json_of(tokens(&state, "apple-hig", "dark")).await;
+        assert!(v["error"].is_null(), "{v}");
+        assert_eq!(v["design_system"], "apple-hig");
+        assert_eq!(v["theme"], "Dark");
+        assert!(
+            v["css"].as_str().unwrap_or_default().contains("--"),
+            "CSS vars: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn contract_success_shapes() {
+        let (state, sid, doc) = seeded_state();
+
+        // rollback：{session, current_version, document}。
+        state
+            .sessions
+            .push_version(&sid, doc.clone(), "v2")
+            .unwrap();
+        let b = serde_json::json!({"session": sid, "version": 1});
+        let v = json_of(rollback(&state, b.to_string().as_bytes())).await;
+        assert!(v["error"].is_null(), "{v}");
+        assert_eq!(v["session"], sid);
+        assert_eq!(v["current_version"], 1);
+        assert!(v["document"].is_string(), "document 须为 JSON 字符串: {v}");
+
+        // export：{filename, content, mime}。
+        let b = serde_json::json!({"session": sid, "format": "html"});
+        let v = json_of(export(&state, b.to_string().as_bytes())).await;
+        assert!(v["error"].is_null(), "{v}");
+        for k in ["filename", "content", "mime"] {
+            assert!(v[k].is_string(), "export 缺 {k}: {v}");
+        }
+
+        // session_info：{session, current_version, versions[]}。
+        let v = json_of(session_info(&state, &sid)).await;
+        assert_eq!(v["session"], sid);
+        assert!(v["current_version"].is_u64());
+        assert!(v["versions"].is_array());
+        let first = &v["versions"][0];
+        for k in ["version", "label", "created_at", "node_count"] {
+            assert!(first.get(k).is_some(), "version 条目缺 {k}: {first}");
+        }
+
+        // version_doc：{version, document}。
+        let v = json_of(version_doc(&state, &sid, 2)).await;
+        assert!(v["error"].is_null(), "{v}");
+        assert_eq!(v["version"], 2);
+        assert!(v["document"].is_string());
     }
 }

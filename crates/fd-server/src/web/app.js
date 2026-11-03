@@ -18,6 +18,7 @@ const I18N = {
         restored: "截图已还原为 v{v}（{n} 节点）。",
         rolledBack: "已回退到 v{v}。",
         rollBack: "回退", view: "查看", current: "当前",
+        layers: "图层", noLayers: "尚无节点",
         exportFailed: "导出失败：{e}",
         reqFailed: "请求失败：{e}",
         busy: "生成中…", model: "模型",
@@ -38,6 +39,7 @@ savedArtifact: "已存 Artifacts（已入库，回到 Artifacts 页可见）。"
         restored: "Screenshot restored as v{v} ({n} nodes).",
         rolledBack: "Rolled back to v{v}.",
         rollBack: "Rollback", view: "View", current: "Current",
+        layers: "Layers", noLayers: "No nodes yet",
         exportFailed: "Export failed: {e}",
         reqFailed: "Request failed: {e}",
         busy: "Generating…", model: "Model",
@@ -111,11 +113,8 @@ async function initCanvas() {
         // mount 校验 <canvas> 存在（canvas 2D 路径）；DOM 渲染管线落 #fusion-dom-root。
         mod.mount("fd-canvas-mount");
         state.wasmReady = true;
-        // 拉取并丢弃 wasm 出站事件队列（node click 等，v1 不消费，仅防堆积）。
-        setInterval(() => {
-            const q = navigator.__fd_host_post;
-            if (Array.isArray(q)) while (q.length) q.shift();
-        }, 2000);
+        // 消费 wasm 出站事件（node click/select → 图层高亮同步，issue#35）。
+        setInterval(pollWasmEvents, WASM_QUEUE_POLL_MS);
     } catch (e) {
         console.warn("canvas wasm unavailable:", e);
         addMsg("bot", `画布 WASM 未加载：${e.message}（生成/导出不受影响，预览降级为空）`);
@@ -124,6 +123,7 @@ async function initCanvas() {
 
 // PenDocument → 画布。经 window.postMessage 驱动 fd-host-web 桥（浏览器路径）。
 function renderDoc(docJson) {
+    renderLayers(docJson);
     if (!state.wasmReady) return;
     window.postMessage(
         { kind: "page.render-dom", payload: { document: docJson }, schema_version: 1 },
@@ -196,15 +196,123 @@ function setViewport(vp) {
     if (state.document) fitStage(state.document);
 }
 
+// ── 图层 + 选择（issue#35 最小画布 UX）──
+// 选中：postMessage node.select 驱动 wasm 高亮（data-node-id 元素）；
+// 画布点击 → wasm 出站 node.click/node.select 事件 → 同步图层高亮。
+const WASM_QUEUE_POLL_MS = 300;
+
+function selectNode(nodeId) {
+    state.selectedNode = nodeId || null;
+    window.postMessage(
+        { kind: "node.select", payload: { node_id: nodeId }, schema_version: 1 },
+        window.location.origin
+    );
+    document.querySelectorAll("#fd-layers .layer-item").forEach((el) => {
+        el.classList.toggle("active", el.dataset.nodeId === state.selectedNode);
+    });
+}
+
+function renderLayers(docJson) {
+    const box = $("fd-layers");
+    if (!box) return;
+    let nodes = [];
+    try {
+        const doc = JSON.parse(docJson);
+        (doc.pages || []).forEach((p) => {
+            (p.nodes || []).forEach((n) => nodes.push(n));
+        });
+    } catch {
+        /* 容错：文档非法时清空图层 */
+    }
+    if (!nodes.length) {
+        box.innerHTML = `<p class="side-note">${t("noLayers")}</p>`;
+        return;
+    }
+    box.innerHTML = "";
+    nodes.forEach((n) => {
+        const item = document.createElement("div");
+        item.className = `layer-item${n.id === state.selectedNode ? " active" : ""}`;
+        item.dataset.nodeId = n.id;
+        const kind = document.createElement("span");
+        kind.className = "layer-kind";
+        kind.textContent = n.kind || "?";
+        const name = document.createElement("span");
+        name.className = "layer-name";
+        name.textContent = n.name || n.id;
+        name.title = `${n.id} · ${n.kind || ""}`;
+        item.appendChild(kind);
+        item.appendChild(name);
+        item.onclick = () => selectNode(n.id);
+        box.appendChild(item);
+    });
+}
+
+// 消费 wasm 出站事件队列（原 v1 仅丢弃防堆积，现消费选择事件）。
+function pollWasmEvents() {
+    const q = navigator.__fd_host_post;
+    if (Array.isArray(q)) {
+        while (q.length) {
+            const raw = q.shift();
+            try {
+                const ev = typeof raw === "string" ? JSON.parse(raw) : raw;
+                const kind = ev && ev.kind;
+                const nid = ev && ev.payload && ev.payload.node_id;
+                if ((kind === "node.click" || kind === "node.select") && nid) {
+                    syncLayerSelection(nid);
+                }
+            } catch {
+                /* 非 JSON 事件忽略 */
+            }
+        }
+    }
+}
+
+// 仅同步图层高亮，不回写 wasm（防 select 事件环）。
+function syncLayerSelection(nodeId) {
+    state.selectedNode = nodeId || null;
+    document.querySelectorAll("#fd-layers .layer-item").forEach((el) => {
+        el.classList.toggle("active", el.dataset.nodeId === state.selectedNode);
+    });
+}
+
+// ── 撤销/重做（版本栈指针移动，rollback 不产生新版本）──
+async function stepVersion(delta) {
+    if (!state.session || !state.currentVersion) return;
+    const target = state.currentVersion + delta;
+    if (target < 1 || target > state.maxVersion) return;
+    try {
+        const d = await api("/api/rollback", { session: state.session, version: target });
+        state.currentVersion = d.current_version;
+        state.document = d.document;
+        renderDoc(d.document);
+        renderLayers(d.document);
+        refreshVersions();
+    } catch (e) {
+        addMsg("bot", t("reqFailed", { e: e.message }));
+    }
+}
+
+function updateUndoRedo() {
+    const undo = $("undo-btn");
+    const redo = $("redo-btn");
+    if (!undo || !redo) return;
+    const cur = state.currentVersion || 0;
+    undo.disabled = !(state.session && cur > 1);
+    redo.disabled = !(state.session && cur < (state.maxVersion || 0));
+}
+
 // ── 版本列表 ──
 async function refreshVersions() {
     const list = $("fd-versions");
     if (!state.session) {
         list.innerHTML = `<p class="side-note">${t("noSession")}</p>`;
+        updateUndoRedo();
         return;
     }
     const data = await api(`/api/session/${state.session}`);
     state.currentVersion = data.current_version;
+    state.maxVersion = (data.versions || []).reduce((m, v) => Math.max(m, v.version), 0);
+    updateUndoRedo();
     list.innerHTML = "";
     // 新版在上。
     [...data.versions].reverse().forEach((v) => {
@@ -223,6 +331,7 @@ async function refreshVersions() {
             state.document = d.document;
             state.currentVersion = v.version;
             renderDoc(d.document);
+            renderLayers(d.document);
             refreshVersions();
         };
         actions.appendChild(viewBtn);
@@ -234,6 +343,7 @@ async function refreshVersions() {
                 state.document = d.document;
                 state.currentVersion = v.version;
                 renderDoc(d.document);
+                renderLayers(d.document);
                 addMsg("bot", t("rolledBack", { v: v.version }));
                 refreshVersions();
             };
@@ -480,6 +590,10 @@ async function boot() {
             addMsg("bot", t("reqFailed", { e: e.message }));
         }
     };
+
+    // 撤销/重做（issue#35：版本栈指针移动）。
+    $("undo-btn").onclick = () => stepVersion(-1);
+    $("redo-btn").onclick = () => stepVersion(1);
 
     // 服务健康 + 模型选择（排除 embedding/rerank 等非对话模型）。
     try {

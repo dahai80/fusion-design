@@ -234,6 +234,28 @@ body {
 .export-row .btn { width: 100%; }
 .side-note { margin: 8px 0 0; font-size: 11px; color: var(--fs-text-muted); line-height: 1.5; }
 
+/* 图层列表（issue#35 最小画布 UX：选中联动 wasm 高亮） */
+.layer-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
+.layer-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 8px; border-radius: var(--fs-radius-sm);
+    cursor: pointer; font-size: 12px;
+    border: 1px solid transparent;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+.layer-item:hover { background: var(--fs-brand-soft); }
+.layer-item.active { border-color: var(--fs-brand); background: var(--fs-brand-soft); }
+.layer-item .layer-kind {
+    flex: none; font-size: 10px; padding: 1px 5px;
+    border-radius: 4px; border: 1px solid var(--fs-border);
+    color: var(--fs-text-muted); text-transform: uppercase;
+}
+.layer-item .layer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 画布工具（撤销/重做） */
+.canvas-tools { display: flex; gap: 4px; margin-left: auto; }
+.canvas-tools .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .hidden { display: none !important; }
 
 /* 滚动条 */

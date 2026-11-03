@@ -338,6 +338,22 @@ mod tests {
     }
 
     #[test]
+    fn workbench_has_canvas_ux_minimum() {
+        // issue#35 最小画布 UX：图层列表 + 节点选中联动 + 撤销/重做可见状态。
+        let html = include_str!("web/workbench.html");
+        assert!(html.contains("id=\"fd-layers\""), "缺图层列表面板");
+        assert!(html.contains("id=\"undo-btn\""), "缺撤销按钮");
+        assert!(html.contains("id=\"redo-btn\""), "缺重做按钮");
+        let js = include_str!("web/app.js");
+        assert!(js.contains("node.select"), "须驱动 wasm 选中高亮");
+        assert!(js.contains("pollWasmEvents"), "须消费画布点击事件同步图层");
+        assert!(js.contains("stepVersion"), "须有版本栈步进（undo/redo）");
+        assert!(js.contains("updateUndoRedo"), "undo/redo 须有可见禁用态");
+        let css = include_str!("web/app.css");
+        assert!(css.contains(".layer-item"), "缺图层条目样式");
+    }
+
+    #[test]
     fn candidate_dirs_cover_env_and_cwd() {
         let dirs = wasm_candidate_dirs();
         assert!(

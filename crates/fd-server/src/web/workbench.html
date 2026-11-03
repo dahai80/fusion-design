@@ -59,6 +59,14 @@
     <section class="col col-canvas">
       <div class="col-head">
         <h2 data-i18n="canvas">画布</h2>
+        <div class="canvas-tools">
+          <button id="undo-btn" class="btn ghost icon" disabled title="Undo" aria-label="Undo">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+          </button>
+          <button id="redo-btn" class="btn ghost icon" disabled title="Redo" aria-label="Redo">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+          </button>
+        </div>
       </div>
       <div class="canvas-frame" id="canvas-frame">
         <div class="canvas-stage" id="fd-canvas-stage">
@@ -78,6 +86,10 @@
         <h2 data-i18n="versions">版本</h2>
       </div>
       <div id="fd-versions" class="version-list"></div>
+      <div class="side-block">
+        <h3 data-i18n="layers">图层</h3>
+        <div id="fd-layers" class="layer-list" aria-label="layers"></div>
+      </div>
       <div class="side-block">
         <h3 data-i18n="export">导出</h3>
         <div class="export-row">
