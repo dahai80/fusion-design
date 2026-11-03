@@ -90,15 +90,52 @@ pub async fn handle(
                 None => bad_request("路径须为 /api/version/<session>/<version>"),
             }
         }
-        (m, p) if p.starts_with("/api/") => method_not_allowed(m, p),
-        _ => hyper::Response::builder()
-            .status(hyper::StatusCode::NOT_FOUND)
-            .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                serde_json::json!({"error": "not found"}).to_string(),
-            )))
-            .unwrap_or_default(),
+        (m, p) if p.starts_with("/api/") => {
+            // issue#36：未知 /api/* 路径必须 404（验收 2026-11-03 误把 405
+            // 当成"路由注册方法错误"）。405 只留给"路径存在但方法不对"。
+            if known_api_path(p) {
+                method_not_allowed(m, p)
+            } else {
+                not_found()
+            }
+        }
+        _ => not_found(),
     };
     Ok(resp)
+}
+
+/// 已知 API 路径判定：区分 404（路径不存在）与 405（路径存在、方法不对）。
+/// 新增路由须同步维护本清单 + docs/API.md + 契约测试。
+fn known_api_path(path: &str) -> bool {
+    const EXACT: [&str; 10] = [
+        "/api/health",
+        "/api/design-systems",
+        "/api/sessions",
+        "/api/generate",
+        "/api/iterate",
+        "/api/restore",
+        "/api/rollback",
+        "/api/export",
+        "/api/send-to-code",
+        "/api/save-artifact",
+    ];
+    const PREFIX: [&str; 5] = [
+        "/api/artifacts",
+        "/api/artifact/",
+        "/api/tokens",
+        "/api/session/",
+        "/api/version/",
+    ];
+    EXACT.contains(&path) || PREFIX.iter().any(|p| path.starts_with(p))
+}
+
+fn not_found() -> Resp {
+    hyper::Response::builder()
+        .status(hyper::StatusCode::NOT_FOUND)
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+            serde_json::json!({"error": "not found"}).to_string(),
+        )))
+        .unwrap_or_default()
 }
 
 /// issue#35 契约项：405 带 hint——tokens 等只读端点仅支持 GET，
@@ -236,5 +273,23 @@ mod tests {
         // 无 hint 的写端点：不带 hint 键。
         let resp = method_not_allowed("GET", "/api/generate");
         assert_eq!(resp.status(), hyper::StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn unknown_api_paths_are_404_not_405() {
+        // issue#36：/api/v1/* 是 artifacts-engine 风格路径，fd-server 无此面；
+        // 未知路径必须 404，不得误报 405（验收据此误判"方法注册错误"）。
+        assert!(!known_api_path("/api/v1/health"));
+        assert!(!known_api_path("/api/v1/designs"));
+        assert!(!known_api_path("/api/v1/share-base"));
+        assert!(!known_api_path("/api/share/abc"));
+        // 已知路径（含前缀路由）须命中。
+        assert!(known_api_path("/api/health"));
+        assert!(known_api_path("/api/tokens"));
+        assert!(known_api_path("/api/artifacts"));
+        assert!(known_api_path("/api/artifact/a-1"));
+        assert!(known_api_path("/api/session/s-x"));
+        assert!(known_api_path("/api/version/s-x/2"));
+        assert!(known_api_path("/api/generate"));
     }
 }

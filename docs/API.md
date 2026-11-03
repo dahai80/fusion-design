@@ -16,7 +16,7 @@ Every 4xx validation error carries a **field-located** body (issue #35):
 | Status | Meaning | Typical `field` values |
 |--------|---------|------------------------|
 | 400 | Request body invalid or a field failed validation | `body` (unparseable JSON), `prompt`, `instruction`, `image_base64`, `region`, `format`, `version`, `ds` |
-| 404 | Referenced resource missing | `session`, `version`, `ds` |
+| 404 | Referenced resource missing, or unknown path (any `/api/*` path not in this table) | `session`, `version`, `ds` |
 | 405 | Method not allowed for the path | — (body adds `method`, `path`, and a `hint` for read-only endpoints, e.g. `GET /api/tokens?ds=<id>&theme=light|dark`) |
 | 413 | Request body over the 8 MB cap | — |
 | 502 | Upstream model failure (after retries) | — |
