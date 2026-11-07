@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/guide
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "P3 残留项 + ARCH-10 round 2/3 全修复设计", en: "2026-08-28-p3-residual-fix-design" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/superpowers/specs/2026-08-28-p3-residual-fix-design.md
+---
 # P3 残留项 + ARCH-10 round 2/3 全修复设计
 
 > 日期：2026-08-28
@@ -155,7 +170,7 @@ adapter 现有 skill 测试迁 fd-skills + adapter 留 client 侧集成测试。
 
 ### FUNC-7 — delta undo 重写（fd-canvas-core/src/lib.rs:762-807）
 
-**现状**：UndoRedoStack 快照式 VecDeque<PenDocument>，max 50。undo/redo 返全快照克隆。
+**现状**：UndoRedoStack 快照式 `VecDeque<PenDocument>`，max 50。undo/redo 返全快照克隆。
 超大文档 50×全文档内存缺口。
 
 **修**：新 `PenDocumentDiff` 数据结构 + delta 栈：
@@ -175,7 +190,7 @@ UndoRedoStack 改 `undo_stack: VecDeque<PenDocumentDiff>` + `current: PenDocumen
 - diff 计算：调用方传 `old_doc` + `new_doc` → `PenDocumentDiff::compute(old, new)` 递归比节点。
 
 **下游同步**：fd-cli/src/main.rs:830/851 undo/redo arm 现从序列化 stack 调 `stack.undo()`。
-delta 栈序列化 schema 变（VecDeque<PenDocumentDiff> vs VecDeque<PenDocument>）——**破坏性**。
+delta 栈序列化 schema 变（`VecDeque<PenDocumentDiff>` vs `VecDeque<PenDocument>`）——**破坏性**。
 旧 `.fusiondesign.history` 快照格式不兼容。须版本化 + 旧格式迁移（或丢弃旧 history 重建）。
 审计 §10 称快照式「MVP 可接受」——delta 是演进，旧 history 不兼容可接受（warn + 重建）。
 

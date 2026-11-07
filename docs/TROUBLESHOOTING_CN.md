@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/guide
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "Fusion-Design 场景化排障手册", en: "TROUBLESHOOTING_CN" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/TROUBLESHOOTING_CN.md
+---
 # Fusion-Design 场景化排障手册
 
 > [English](TROUBLESHOOTING.md) | [中文](TROUBLESHOOTING_CN.md)

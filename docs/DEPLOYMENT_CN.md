@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/guide
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "部署指南", en: "DEPLOYMENT_CN" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/DEPLOYMENT_CN.md
+---
 # 部署指南
 
 > Fusion-Design 三渠道部署。100% 离线——HTTP 仅至 `127.0.0.1` / 私有段。
