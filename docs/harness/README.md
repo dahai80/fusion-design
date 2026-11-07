@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/readme
+product: fusion-design
+class: platform
+entry: developer
+doc_type: readme
+title: { zh: "fd-host-web E2E Harness", en: "README" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/harness/README.md
+---
 # fd-host-web E2E Harness
 
 最小 HTML 测试页，用于黑盒验证 `fd-host-web` 的 WASM 渲染层与 Bridge 协议。对应 issue #10。

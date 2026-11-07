@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/guide
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "Fusion-Design 场景化使用指南", en: "USER_GUIDE_CN" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/USER_GUIDE_CN.md
+---
 # Fusion-Design 场景化使用指南
 
 > [English](USER_GUIDE.md) | [中文](USER_GUIDE_CN.md)

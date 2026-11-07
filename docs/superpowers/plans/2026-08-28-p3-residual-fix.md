@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/guide
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "P3 残留项 + ARCH-10 round 2/3 全修复 Implementation Plan", en: "2026-08-28-p3-residual-fix" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/superpowers/plans/2026-08-28-p3-residual-fix.md
+---
 # P3 残留项 + ARCH-10 round 2/3 全修复 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

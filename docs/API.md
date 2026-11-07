@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/api-reference
+product: fusion-design
+class: platform
+entry: developer
+doc_type: api-reference
+title: { zh: "fd-server HTTP API Contract (v0.1.25)", en: "API" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/API.md
+---
 # fd-server HTTP API Contract (v0.1.25)
 
 Base URL: `http://127.0.0.1:11493` (loopback only, offline — no external traffic).

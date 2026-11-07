@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/readme
+product: fusion-design
+class: platform
+entry: developer
+doc_type: readme
+title: { zh: "Fusion-Design", en: "README" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - README.md
+---
 # Fusion-Design
 
 [English](README.md) | [中文](README_CN.md)

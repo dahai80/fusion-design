@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/readme
+product: fusion-design
+class: platform
+entry: developer
+doc_type: readme
+title: { zh: "fd-export", en: "README" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - crates/fd-export/README.md
+---
 # fd-export
 
 Fusion-Design 导出 crate — 把 `PenDocument` 画布模型批量导出为 PNG/SVG/PDF/HTML。

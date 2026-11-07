@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/guide
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "Deployment Guide", en: "DEPLOYMENT" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/DEPLOYMENT.md
+---
 # Deployment Guide
 
 > Fusion-Design deployment across three distribution channels. 100% offline — HTTP only to `127.0.0.1` / private segments.

@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/changelog
+product: fusion-design
+class: platform
+entry: developer
+doc_type: changelog
+title: { zh: "fd-host-web 内存泄漏与执行卡死修复", en: "fix-host-web-leak-hang" }
+audience: developer
+status: draft
+version: 0.1.26
+updated: 2026-11-07
+owner: "@dahai"
+source_of_truth:
+  - docs/changes/fix-host-web-leak-hang.md
+---
 # fd-host-web 内存泄漏与执行卡死修复
 
 评审发现 `fd-host-web`（WASM 渲染层）存在多处内存泄漏与卡死病根，长期运行（尤其高频拖拽/MutateNode）必然导致 GUI 卡死。本修复针对核心问题。
