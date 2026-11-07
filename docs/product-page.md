@@ -18,7 +18,6 @@ platform:
   extension_points: [workspace crates, fd-skills SkillContext trait, design-system presets, codegen backends]
 source_of_truth:
   - README.md
-  - PRD.md
   - Cargo.toml
 ---
 

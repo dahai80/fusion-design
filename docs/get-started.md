@@ -86,5 +86,5 @@ cargo test --workspace
 
 ## 常见问题
 
-- 模型未加载导致生成 502：用 `check-mlx` 选一个 `model_loaded: true` 的模型 id，详见 [troubleshooting.md](troubleshooting.md)。
+- 模型未加载导致生成 502：用 `check-mlx` 选一个 `model_loaded: true` 的模型 id，详见 [troubleshooting.md](TROUBLESHOOTING.md)。
 - 端口被占用：`FUSION_DESIGN_PORT` 换端口后 `./start.sh restart`（stop + start）。
