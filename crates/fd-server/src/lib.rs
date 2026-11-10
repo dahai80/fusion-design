@@ -95,8 +95,8 @@ mod tests {
         let reg = s.registry.lock().unwrap();
         assert_eq!(
             reg.list().len(),
-            3,
-            "3 内置预设：apple-hig/minimal-dashboard/robot-sim"
+            4,
+            "4 内置预设：apple-hig/minimal-dashboard/robot-sim/desigma-aligned"
         );
     }
 }

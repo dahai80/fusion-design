@@ -211,6 +211,8 @@ pub enum Command {
         input: PathBuf,
         #[arg(long, default_value = "apple-hig")]
         design_system: Option<String>,
+        #[arg(long, value_enum, default_value = "default")]
+        profile: LintProfileArg,
         #[arg(long, value_enum)]
         rules: Option<Vec<LintRuleArg>>,
         /// 自动修复可修复的违规（Token 引用、空值清理、自动命名）
@@ -219,6 +221,9 @@ pub enum Command {
         /// 仅预览修复，不写入文件
         #[arg(long, requires = "fix")]
         dry_run: bool,
+        /// CI gate mode: exit 1 when any Error-severity violation exists
+        #[arg(long)]
+        gate: bool,
     },
     /// 代码导出：PenDocument → HTML / React+Tailwind / Tailwind-only
     Codegen {
@@ -313,6 +318,10 @@ pub enum LintRuleArg {
     HardcodedFontSize,
     MissingInteractionState,
     LayoutInconsistency,
+    BareColorLiteral,
+    OffTokenSpacing,
+    OffTokenRadius,
+    MissingDarkPair,
 }
 
 impl From<LintRuleArg> for fd_design_lint::LintRule {
@@ -331,6 +340,25 @@ impl From<LintRuleArg> for fd_design_lint::LintRule {
             LintRuleArg::HardcodedFontSize => Self::HardcodedFontSize,
             LintRuleArg::MissingInteractionState => Self::MissingInteractionState,
             LintRuleArg::LayoutInconsistency => Self::LayoutInconsistency,
+            LintRuleArg::BareColorLiteral => Self::BareColorLiteral,
+            LintRuleArg::OffTokenSpacing => Self::OffTokenSpacing,
+            LintRuleArg::OffTokenRadius => Self::OffTokenRadius,
+            LintRuleArg::MissingDarkPair => Self::MissingDarkPair,
+        }
+    }
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum LintProfileArg {
+    Default,
+    Desigma,
+}
+
+impl From<LintProfileArg> for fd_design_lint::LintProfile {
+    fn from(v: LintProfileArg) -> Self {
+        match v {
+            LintProfileArg::Default => Self::Default,
+            LintProfileArg::Desigma => Self::Desigma,
         }
     }
 }
@@ -578,10 +606,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Lint {
             input,
             design_system,
+            profile,
             rules,
             fix,
             dry_run,
-        } => commands::lint::run(input, design_system, rules, fix, dry_run),
+            gate,
+        } => commands::lint::run(input, design_system, profile, rules, fix, dry_run, gate),
         Command::Codegen {
             input,
             target,

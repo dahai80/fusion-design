@@ -38,6 +38,11 @@ pub enum LintRule {
     HardcodedFontSize,
     MissingInteractionState,
     LayoutInconsistency,
+    // Issue #41: desigma acceptance-gate rules (Error severity, desigma profile).
+    BareColorLiteral,
+    OffTokenSpacing,
+    OffTokenRadius,
+    MissingDarkPair,
 }
 
 impl LintRule {
@@ -56,6 +61,10 @@ impl LintRule {
             LintRule::HardcodedFontSize => "hardcoded_font_size",
             LintRule::MissingInteractionState => "missing_interaction_state",
             LintRule::LayoutInconsistency => "layout_inconsistency",
+            LintRule::BareColorLiteral => "bare_color_literal",
+            LintRule::OffTokenSpacing => "off_token_spacing",
+            LintRule::OffTokenRadius => "off_token_radius",
+            LintRule::MissingDarkPair => "missing_dark_pair",
         }
     }
 
@@ -74,6 +83,16 @@ impl LintRule {
             LintRule::HardcodedFontSize => "字号未引用设计 Token，维护性差",
             LintRule::MissingInteractionState => "交互控件缺少 hover/active 状态定义",
             LintRule::LayoutInconsistency => "同级节点布局模式不一致",
+            LintRule::BareColorLiteral => {
+                "颜色为裸 hex/rgb 字面量且不匹配任何设计 Token（desigma 准入门禁）"
+            }
+            LintRule::OffTokenSpacing => {
+                "间距值不在设计 Token 刻度上且未引用 Token（desigma 准入门禁）"
+            }
+            LintRule::OffTokenRadius => {
+                "圆角值不在设计 Token 刻度上且未引用 Token（desigma 准入门禁）"
+            }
+            LintRule::MissingDarkPair => "颜色匹配的 Token 缺少暗色模式配对（desigma 准入门禁）",
         }
     }
 
@@ -92,7 +111,42 @@ impl LintRule {
             LintRule::HardcodedFontSize,
             LintRule::MissingInteractionState,
             LintRule::LayoutInconsistency,
+            LintRule::BareColorLiteral,
+            LintRule::OffTokenSpacing,
+            LintRule::OffTokenRadius,
+            LintRule::MissingDarkPair,
         ]
+    }
+}
+
+// Issue #41: lint profiles. Default = all 13 legacy rules (unchanged behavior).
+// Desigma = acceptance gate for desigma-sourced customer designs: token
+// alignment only, every rule Error severity so `--gate` exit code is binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LintProfile {
+    Default,
+    Desigma,
+}
+
+impl LintProfile {
+    pub fn rules(&self) -> Vec<LintRule> {
+        match self {
+            LintProfile::Default => LintRule::all(),
+            LintProfile::Desigma => vec![
+                LintRule::BareColorLiteral,
+                LintRule::OffTokenSpacing,
+                LintRule::OffTokenRadius,
+                LintRule::MissingDarkPair,
+            ],
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            LintProfile::Default => "default",
+            LintProfile::Desigma => "desigma",
+        }
     }
 }
 
@@ -159,6 +213,15 @@ impl Linter {
     pub fn with_rules(rules: Vec<LintRule>) -> Self {
         Self {
             rules,
+            design_system: None,
+        }
+    }
+
+    // Issue #41: profile-based construction (desigma gate). Design system is
+    // still optional; the dark-pair rule no-ops without one.
+    pub fn with_profile(profile: LintProfile) -> Self {
+        Self {
+            rules: profile.rules(),
             design_system: None,
         }
     }
@@ -272,6 +335,10 @@ impl Linter {
                     self.check_missing_interaction_state(node, violations)
                 }
                 LintRule::LayoutInconsistency => (),
+                LintRule::BareColorLiteral => self.check_bare_color_literal(node, violations),
+                LintRule::OffTokenSpacing => self.check_off_token_spacing(node, violations),
+                LintRule::OffTokenRadius => self.check_off_token_radius(node, violations),
+                LintRule::MissingDarkPair => self.check_missing_dark_pair(node, violations),
             }
         }
     }
@@ -1231,8 +1298,8 @@ mod tests {
     }
 
     #[test]
-    fn all_rules_count_is_13() {
-        assert_eq!(LintRule::all().len(), 13);
+    fn all_rules_count_is_17() {
+        assert_eq!(LintRule::all().len(), 17);
     }
 
     #[test]
@@ -1424,5 +1491,151 @@ mod tests {
             doc.pages[0].nodes[0].style.design_token_refs.get("gap"),
             Some(&"spacing.gauge".to_string())
         );
+    }
+
+    // ── Issue #41: desigma acceptance gate ──
+
+    fn desigma_system() -> fd_design_system::DesignSystem {
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        reg.get("desigma-aligned").expect("desigma-aligned").clone()
+    }
+
+    fn lint_with_profile(
+        doc: &PenDocument,
+        profile: LintProfile,
+        system: Option<fd_design_system::DesignSystem>,
+    ) -> LintResult {
+        let mut linter = Linter::with_profile(profile);
+        if let Some(s) = system {
+            linter = linter.with_design_system(s);
+        }
+        linter.lint(doc)
+    }
+
+    #[test]
+    fn desigma_profile_is_gate_rules_all_error() {
+        let rules = LintProfile::Desigma.rules();
+        assert_eq!(
+            rules,
+            vec![
+                LintRule::BareColorLiteral,
+                LintRule::OffTokenSpacing,
+                LintRule::OffTokenRadius,
+                LintRule::MissingDarkPair,
+            ]
+        );
+    }
+
+    #[test]
+    fn desigma_aligned_sample_passes() {
+        use fd_canvas_core::{FlexParams, LayoutMode};
+        // Aligned sample: token-bound fill, on-scale gap + radius with refs.
+        let style = NodeStyle {
+            fill: Some("#FFFFFF".into()),
+            radius: Some(8.0),
+            layout: LayoutMode::Flex(FlexParams {
+                gap: 16.0,
+                ..Default::default()
+            }),
+            design_token_refs: [
+                ("fill".to_string(), "color.bg".to_string()),
+                ("gap".to_string(), "spacing.md".to_string()),
+                ("radius".to_string(), "radius.md".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "Card", style)]);
+        let result = lint_with_profile(&doc, LintProfile::Desigma, Some(desigma_system()));
+        assert_eq!(
+            result.stats.errors, 0,
+            "aligned sample must pass: {:?}",
+            result.violations
+        );
+    }
+
+    #[test]
+    fn desigma_bare_hex_fails_with_actionable_hint() {
+        let style = NodeStyle {
+            fill: Some("#123456".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "Banner", style)]);
+        let result = lint_with_profile(&doc, LintProfile::Desigma, Some(desigma_system()));
+        assert_eq!(result.stats.errors, 1);
+        let v = &result.violations[0];
+        assert_eq!(v.rule, LintRule::BareColorLiteral);
+        assert_eq!(v.node_id, "r1");
+        assert!(v.suggestion.contains("design_token_refs"));
+        assert!(
+            v.suggestion.contains("color.bg"),
+            "hint lists available tokens: {}",
+            v.suggestion
+        );
+    }
+
+    #[test]
+    fn desigma_missing_dark_pair_fails() {
+        // robot-sim dark overlay lacks color.muted / color.warning.
+        let mut reg = fd_design_system::DesignSystemRegistry::new();
+        reg.register_builtin();
+        let system = reg.get("robot-sim").expect("robot-sim").clone();
+        let style = NodeStyle {
+            fill: Some("#7D8590".into()),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "Label", style)]);
+        let result = lint_with_profile(&doc, LintProfile::Desigma, Some(system));
+        assert_eq!(result.stats.errors, 1);
+        let v = &result.violations[0];
+        assert_eq!(v.rule, LintRule::MissingDarkPair);
+        assert!(v.message.contains("color.muted"));
+        assert!(v.suggestion.contains("dark_tokens"));
+    }
+
+    #[test]
+    fn desigma_off_token_spacing_and_radius_fail() {
+        use fd_canvas_core::{FlexParams, LayoutMode};
+        let style = NodeStyle {
+            radius: Some(7.0),
+            layout: LayoutMode::Flex(FlexParams {
+                gap: 13.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "Row", style)]);
+        let result = lint_with_profile(&doc, LintProfile::Desigma, Some(desigma_system()));
+        let rules: Vec<LintRule> = result.violations.iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&LintRule::OffTokenSpacing), "{:?}", rules);
+        assert!(rules.contains(&LintRule::OffTokenRadius), "{:?}", rules);
+        assert_eq!(result.stats.errors, 2);
+    }
+
+    #[test]
+    fn desigma_on_scale_values_pass_without_refs() {
+        use fd_canvas_core::{FlexParams, LayoutMode};
+        // Values on the token scale pass the gate even without token refs
+        // (HardcodedSpacing-style refs are an auto-fix concern, not alignment).
+        let style = NodeStyle {
+            fill: Some("#FFFFFF".into()),
+            radius: Some(8.0),
+            layout: LayoutMode::Flex(FlexParams {
+                gap: 16.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let doc = make_doc(vec![rect_node("r1", "Card", style)]);
+        let result = lint_with_profile(&doc, LintProfile::Desigma, Some(desigma_system()));
+        assert_eq!(result.stats.errors, 0, "{:?}", result.violations);
+    }
+
+    #[test]
+    fn desigma_default_profile_unchanged() {
+        // Default profile keeps the full legacy rule set (17 rules now).
+        assert_eq!(LintProfile::Default.rules().len(), 17);
     }
 }

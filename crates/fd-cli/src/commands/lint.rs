@@ -1,25 +1,31 @@
 //! A-3：Lint 子命令 handler（从 main.rs 拆出）。
 //!
 //! 设计规范检测：PenDocument → LintResult。支持 --fix 原子写 + E-10 备份轮转。
+//! Issue #41：--profile 选择规则集（default / desigma 准入门禁），--gate 供
+//! cowork/CI 管道消费：存在 Error 级违规时退出码 1，通过为 0。
 
 use std::path::PathBuf;
 
 use crate::common::{read_file_capped, rotate_backup};
-use crate::LintRuleArg;
+use crate::{LintProfileArg, LintRuleArg};
 
 pub fn run(
     input: PathBuf,
     design_system: Option<String>,
+    profile: LintProfileArg,
     rules: Option<Vec<LintRuleArg>>,
     fix: bool,
     dry_run: bool,
+    gate: bool,
 ) -> anyhow::Result<()> {
     let json = read_file_capped(&input)?;
     let mut doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
 
+    // Issue #41: explicit --rules overrides --profile; otherwise the profile
+    // picks the rule set (default = all 17 rules, desigma = 4 gate rules).
     let mut linter = match rules {
         Some(r) => fd_design_lint::Linter::with_rules(r.into_iter().map(Into::into).collect()),
-        None => fd_design_lint::Linter::new(),
+        None => fd_design_lint::Linter::with_profile(profile.into()),
     };
 
     if let Some(ref ds_id) = design_system {
@@ -27,6 +33,8 @@ pub fn run(
         reg.register_builtin();
         if let Some(system) = reg.get(ds_id) {
             linter = linter.with_design_system(system.clone());
+        } else {
+            tracing::warn!(design_system = %ds_id, "design system not found, linting without tokens");
         }
     }
 
@@ -73,6 +81,20 @@ pub fn run(
         } else {
             eprintln!("dry-run 模式: 修复未写入文件");
         }
+    }
+
+    // Issue #41: gate semantics for pipeline consumption (cowork desigma gate).
+    // Exit 0 = pass, exit 1 = at least one Error-severity violation, exit 2 =
+    // runtime failure (anyhow). Result JSON above stays machine-readable.
+    if gate {
+        if result.stats.errors > 0 {
+            eprintln!(
+                "gate: FAILED — {} error violation(s) ({} warning, {} info)",
+                result.stats.errors, result.stats.warnings, result.stats.infos
+            );
+            std::process::exit(1);
+        }
+        eprintln!("gate: PASSED — 0 error violations");
     }
 
     Ok(())

@@ -3,7 +3,9 @@
 
 use fd_canvas_core::{NodeKind, PenNode};
 
-use crate::{build_token_map, color::*, LintRule, LintSeverity, LintViolation};
+use crate::{
+    build_numeric_token_map, build_token_map, color::*, LintRule, LintSeverity, LintViolation,
+};
 
 impl super::Linter {
     pub(super) fn check_contrast(
@@ -470,6 +472,236 @@ impl super::Linter {
             }
         }
     }
+
+    // ── Issue #41: desigma acceptance-gate detectors (all Error severity) ──
+
+    // Bare hex/rgb/named color literal that matches no token in the design
+    // system. A literal that equals a token value is fine (token_inconsistency
+    // territory, Info); the gate only rejects off-palette colors. Nodes that
+    // carry a `fill`/`stroke` design_token_ref are already token-bound.
+    pub(super) fn check_bare_color_literal(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+    ) {
+        let system = match &self.design_system {
+            Some(s) => s,
+            None => return,
+        };
+        let token_map = build_token_map(system);
+        let style = &node.style;
+        for (slot, value) in [
+            ("fill", style.fill.as_deref()),
+            ("stroke", style.stroke.as_deref()),
+        ] {
+            let color = match value {
+                Some(c) if !c.is_empty() && c != "none" && c != "transparent" => c,
+                _ => continue,
+            };
+            if parse_color_any(color).is_none() {
+                continue;
+            }
+            if style.design_token_refs.contains_key(slot) {
+                continue;
+            }
+            if token_map.contains_key(color.trim()) {
+                continue;
+            }
+            let palette: Vec<&str> = token_map
+                .iter()
+                .filter(|(val, _)| parse_color_any(val).is_some())
+                .map(|(_, name)| name.as_str())
+                .collect();
+            violations.push(LintViolation {
+                rule: LintRule::BareColorLiteral,
+                node_id: node.id.clone(),
+                message: format!(
+                    "Node '{}' uses bare color literal '{}' on {} (not a design token)",
+                    node.name, color, slot
+                ),
+                suggestion: format!(
+                    "Bind a semantic token via design_token_refs[\"{slot}\"]; available color tokens: {}",
+                    palette.join(", ")
+                ),
+                severity: LintSeverity::Error,
+            });
+        }
+    }
+
+    // Spacing values (flex gap/padding, grid gap) that are neither token-bound
+    // nor on the design-system spacing scale. Values on the scale pass (hint:
+    // bind the token ref for auto-fix), off-scale values fail the gate.
+    pub(super) fn check_off_token_spacing(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+    ) {
+        use fd_canvas_core::LayoutMode;
+        let system = match &self.design_system {
+            Some(s) => s,
+            None => return,
+        };
+        let scale = build_numeric_token_map(system);
+        let refs = &node.style.design_token_refs;
+
+        let push = |what: String, val: f64, violations: &mut Vec<LintViolation>| {
+            violations.push(LintViolation {
+                rule: LintRule::OffTokenSpacing,
+                node_id: node.id.clone(),
+                message: format!(
+                    "Node '{}' {}={} is off the spacing token scale",
+                    node.name, what, val
+                ),
+                suggestion: format!(
+                    "Use a spacing token value (available: {})",
+                    token_family_hint(system, "spacing")
+                ),
+                severity: LintSeverity::Error,
+            });
+        };
+
+        match &node.style.layout {
+            LayoutMode::Flex(flex) => {
+                if flex.gap != 0.0
+                    && !refs.contains_key("gap")
+                    && !scale.contains_key(&fmt_num(flex.gap))
+                {
+                    push(format!("flex gap"), flex.gap, violations);
+                }
+                let p = &flex.padding;
+                let pad = [p.top, p.right, p.bottom, p.left];
+                if pad.iter().any(|v| *v != 0.0) && !refs.contains_key("padding") {
+                    for (side, v) in ["top", "right", "bottom", "left"].iter().zip(pad) {
+                        if v != 0.0 && !scale.contains_key(&fmt_num(v)) {
+                            push(format!("padding.{side}"), v, violations);
+                        }
+                    }
+                }
+            }
+            LayoutMode::Grid(grid) => {
+                for (axis, v) in [("gap.x", grid.gap.0), ("gap.y", grid.gap.1)] {
+                    if v != 0.0 && !refs.contains_key("gap") && !scale.contains_key(&fmt_num(v)) {
+                        push(axis.to_string(), v, violations);
+                    }
+                }
+            }
+            LayoutMode::Free => {}
+        }
+    }
+
+    // Corner radius not token-bound and not on the radius token scale.
+    pub(super) fn check_off_token_radius(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+    ) {
+        let system = match &self.design_system {
+            Some(s) => s,
+            None => return,
+        };
+        let scale = build_numeric_token_map(system);
+        let style = &node.style;
+        let radius = match style.radius {
+            Some(r) if r > 0.0 => r,
+            _ => return,
+        };
+        if style.design_token_refs.contains_key("radius") {
+            return;
+        }
+        if scale.contains_key(&fmt_num(radius)) {
+            return;
+        }
+        violations.push(LintViolation {
+            rule: LintRule::OffTokenRadius,
+            node_id: node.id.clone(),
+            message: format!(
+                "Node '{}' radius={} is off the radius token scale",
+                node.name, radius
+            ),
+            suggestion: format!(
+                "Use a radius token value or bind design_token_refs[\"radius\"] (available: {})",
+                token_family_hint(system, "radius")
+            ),
+            severity: LintSeverity::Error,
+        });
+    }
+
+    // A node color matches a light-mode token whose name has no counterpart in
+    // the design system's dark_tokens overlay — that color would stay frozen at
+    // its light value in dark mode (desigma Light/Dark collection must map to
+    // both shell themes).
+    pub(super) fn check_missing_dark_pair(
+        &self,
+        node: &PenNode,
+        violations: &mut Vec<LintViolation>,
+    ) {
+        let system = match &self.design_system {
+            Some(s) => s,
+            None => return,
+        };
+        let dark = match &system.dark_tokens {
+            Some(d) if !d.is_empty() => d,
+            _ => return,
+        };
+        let token_map = build_token_map(system);
+        let style = &node.style;
+        for (slot, value) in [
+            ("fill", style.fill.as_deref()),
+            ("stroke", style.stroke.as_deref()),
+        ] {
+            let color = match value {
+                Some(c) if !c.is_empty() => c.trim(),
+                _ => continue,
+            };
+            let token_name = match token_map.get(color) {
+                Some(n) => n,
+                None => continue,
+            };
+            if dark.iter().any(|t| t.name == *token_name) {
+                continue;
+            }
+            violations.push(LintViolation {
+                rule: LintRule::MissingDarkPair,
+                node_id: node.id.clone(),
+                message: format!(
+                    "Node '{}' {} uses token '{}' which has no dark-mode pair",
+                    node.name, slot, token_name
+                ),
+                suggestion: format!(
+                    "Add '{}' to the design system's dark_tokens overlay (or extend the desigma Theme collection's Dark mode)",
+                    token_name
+                ),
+                severity: LintSeverity::Error,
+            });
+        }
+    }
+}
+
+// f64 keys in a HashMap come from token Numbers formatted with `{}`; format
+// node values the same way so 16.0 matches "16".
+fn fmt_num(v: f64) -> String {
+    format!("{v}")
+}
+
+// Hint listing a token family's Number values straight from the design system
+// (not the value-keyed numeric map, where equal values across families collide).
+fn token_family_hint(system: &fd_design_system::DesignSystem, family: &str) -> String {
+    let mut values: Vec<(i64, &str)> = system
+        .tokens
+        .iter()
+        .filter_map(|t| match &t.value {
+            fd_design_system::TokenValue::Number(n) if t.name.contains(family) => {
+                Some((*n as i64, t.name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    values.sort();
+    values
+        .iter()
+        .map(|(v, n)| format!("{v}={n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn rects_overlap(a: &PenNode, b: &PenNode) -> bool {

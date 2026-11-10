@@ -103,9 +103,9 @@ fusion-design export-batch --input batch.json --out ./out
 
 ## Scenario 3: Design Lint + Auto-fix
 
-**Goal**: check canvas against design system (13 rules), auto-fix what's fixable.
+**Goal**: check canvas against design system (17 rules), auto-fix what's fixable.
 
-**13 rules**: `contrast-check`, `unlabeled-input`, `text-effects`, `abnormal-rotation`, `empty-effects`, `token-inconsistency`, `unnamed-node`, `text-overflow`, `overlapping-nodes`, `hardcoded-spacing`, `hardcoded-font-size`, `missing-interaction-state`, `layout-inconsistency` (meanings in [Symptom K](TROUBLESHOOTING.md)).
+**13 legacy rules**: `contrast-check`, `unlabeled-input`, `text-effects`, `abnormal-rotation`, `empty-effects`, `token-inconsistency`, `unnamed-node`, `text-overflow`, `overlapping-nodes`, `hardcoded-spacing`, `hardcoded-font-size`, `missing-interaction-state`, `layout-inconsistency` (meanings in [Symptom K](TROUBLESHOOTING.md)). **4 desigma gate rules** (issue #41): `bare-color-literal`, `off-token-spacing`, `off-token-radius`, `missing-dark-pair` — all Error severity.
 
 ```bash
 # Full check (default apple-hig system)
@@ -120,9 +120,16 @@ fusion-design lint --input login.fusiondesign --fix --dry-run
 
 # Apply auto-fix (Token refs / null cleanup / auto-naming)
 fusion-design lint --input login.fusiondesign --fix
+
+# Desigma acceptance gate (issue #41): exit 0 pass / 1 Error violations / 2 runtime failure.
+# Pipeline-consumable violations JSON on stdout; mapping doc: docs/DESIGMA_TOKEN_MAPPING.md
+fusion-design lint --input customer-page.fusiondesign \
+  --design-system desigma-aligned --profile desigma --gate
 ```
 
-**System options**: `apple-hig` (default), `minimal-dashboard`, `robot-sim`. `fusion-design list-design-systems` lists all, `fusion-design activate <id>` switches the active system.
+**System options**: `apple-hig` (default), `minimal-dashboard`, `robot-sim`, `desigma-aligned` (recommended preset for desigma-sourced customer designs — every color token has a dark pair). `fusion-design list-design-systems` lists all, `fusion-design activate <id>` switches the active system.
+
+**Profiles**: `--profile default` = all 17 rules; `--profile desigma` = the 4 token-alignment gate rules (binary exit code via `--gate`, for cowork/CI pipeline integration). Explicit `--rules` overrides the profile.
 
 **Common stalls**: lint report fields unclear → see [Symptom K](TROUBLESHOOTING.md).
 

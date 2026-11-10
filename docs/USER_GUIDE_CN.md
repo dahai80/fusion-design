@@ -103,9 +103,9 @@ fusion-design export-batch --input batch.json --out ./out
 
 ## 场景 3：设计规范检测 + 自动修复
 
-**目标**：检查画布是否符合设计规范（13 条规则），自动修可修项。
+**目标**：检查画布是否符合设计规范（17 条规则），自动修可修项。
 
-**13 条规则**：`contrast-check`（对比度）、`unlabeled-input`（未标注输入框）、`text-effects`（异常文字特效）、`abnormal-rotation`（异常旋转）、`empty-effects`（空特效）、`token-inconsistency`（Token 不一致）、`unnamed-node`（未命名节点）、`text-overflow`（文字溢出）、`overlapping-nodes`（节点重叠）、`hardcoded-spacing`（硬编码间距）、`hardcoded-font-size`（硬编码字号）、`missing-interaction-state`（缺交互态）、`layout-inconsistency`（布局不一致）。
+**13 条经典规则**：`contrast-check`（对比度）、`unlabeled-input`（未标注输入框）、`text-effects`（异常文字特效）、`abnormal-rotation`（异常旋转）、`empty-effects`（空特效）、`token-inconsistency`（Token 不一致）、`unnamed-node`（未命名节点）、`text-overflow`（文字溢出）、`overlapping-nodes`（节点重叠）、`hardcoded-spacing`（硬编码间距）、`hardcoded-font-size`（硬编码字号）、`missing-interaction-state`（缺交互态）、`layout-inconsistency`（布局不一致）。**4 条 desigma 准入规则**（issue #41）：`bare-color-literal`（裸颜色字面量）、`off-token-spacing`（离刻度间距）、`off-token-radius`（离刻度圆角）、`missing-dark-pair`（缺暗色配对），全部 Error 级。
 
 ```bash
 # 全量检测（默认 apple-hig 规范）
@@ -120,9 +120,16 @@ fusion-design lint --input login.fusiondesign --fix --dry-run
 
 # 落地自动修复（Token 引用 / 空值清理 / 自动命名）
 fusion-design lint --input login.fusiondesign --fix
+
+# desigma 准入门禁（issue #41）：退出码 0 通过 / 1 存在 Error 违规 / 2 运行时失败。
+# stdout 输出管道可消费的违规 JSON；映射文档：docs/DESIGMA_TOKEN_MAPPING.md
+fusion-design lint --input customer-page.fusiondesign \
+  --design-system desigma-aligned --profile desigma --gate
 ```
 
-**规范选项**：`apple-hig`（默认）、`minimal-dashboard`（极简后台）、`robot-sim`（机器人仿真控制台）。`fusion-design list-design-systems` 查全量，`fusion-design activate <id>` 切换激活规范。
+**规范选项**：`apple-hig`（默认）、`minimal-dashboard`（极简后台）、`robot-sim`（机器人仿真控制台）、`desigma-aligned`（desigma 来源客户设计的推荐预设——每个颜色 Token 均带暗色配对）。`fusion-design list-design-systems` 查全量，`fusion-design activate <id>` 切换激活规范。
+
+**规则集（profile）**：`--profile default` = 全部 17 条；`--profile desigma` = 4 条 Token 对齐门禁规则（`--gate` 输出二值退出码，供 cowork/CI 管道集成）。显式 `--rules` 优先于 profile。
 
 **常见卡点**：lint 报告字段含义不清 → 见 [现象 K](TROUBLESHOOTING_CN.md)。
 

@@ -354,14 +354,16 @@ impl DesignSystemRegistry {
         }
     }
 
-    /// 注册三套内置规范（Apple HIG / 极简后台 / 机器人仿真控制台）。
+    /// 注册内置规范（Apple HIG / 极简后台 / 机器人仿真控制台 / Desigma Aligned）。
     /// 幂等：已存在的 ID 跳过并告警，不覆盖用户自定义/激活中的规范（E-32/P3）。
     pub fn register_builtin(&mut self) {
         let builtins = [
             ("apple-hig".to_string(), builtin_apple_hig()),
             ("minimal-dashboard".to_string(), builtin_minimal_dashboard()),
             ("robot-sim".to_string(), builtin_robot_sim()),
+            ("desigma-aligned".to_string(), builtin_desigma_aligned()),
         ];
+        let total = builtins.len();
         let mut skipped = 0usize;
         for (id, system) in builtins {
             if self.systems.contains_key(&id) {
@@ -374,11 +376,11 @@ impl DesignSystemRegistry {
         if skipped > 0 {
             tracing::warn!(
                 skipped,
-                total = 3,
-                "register_builtin: 跳过 {skipped}/3 个已存在内置规范"
+                total,
+                "register_builtin: 跳过 {skipped}/{total} 个已存在内置规范"
             );
         } else {
-            tracing::info!("register_builtin: 注册 3 套内置规范");
+            tracing::info!("register_builtin: 注册 {total} 套内置规范");
         }
     }
 
@@ -700,6 +702,174 @@ pub fn builtin_robot_sim() -> DesignSystem {
     }
 }
 
+// Issue #41: recommended preset for desigma-sourced customer designs. Semantic
+// names mirror the shell design language (brand #4F7CFF, 8px spacing scale);
+// every color token ships a dark pair so the desigma gate's missing_dark_pair
+// rule passes out of the box. Desigma Theme collection groups map 1:1:
+// Surface -> color.bg/color.surface, Text -> color.fg(.muted), Border ->
+// color.border, Brand -> color.accent, Status -> color.success/error.
+pub fn builtin_desigma_aligned() -> DesignSystem {
+    DesignSystem {
+        id: "desigma-aligned".into(),
+        name: "Desigma Aligned".into(),
+        tokens: vec![
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#FFFFFF".into()),
+                description: "Page background".into(),
+            },
+            Token {
+                name: "color.surface".into(),
+                value: TokenValue::Color("#F5F6F8".into()),
+                description: "Card / panel surface".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#1C1E21".into()),
+                description: "Primary text".into(),
+            },
+            Token {
+                name: "color.fg.muted".into(),
+                value: TokenValue::Color("#65676D".into()),
+                description: "Secondary text".into(),
+            },
+            Token {
+                name: "color.border".into(),
+                value: TokenValue::Color("#E3E5E9".into()),
+                description: "Hairline border".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#4F7CFF".into()),
+                description: "Brand accent (shell-aligned)".into(),
+            },
+            Token {
+                name: "color.success".into(),
+                value: TokenValue::Color("#34C759".into()),
+                description: "Positive status".into(),
+            },
+            Token {
+                name: "color.error".into(),
+                value: TokenValue::Color("#FF453A".into()),
+                description: "Error status".into(),
+            },
+            Token {
+                name: "spacing.sm".into(),
+                value: TokenValue::Number(8.0),
+                description: "Compact spacing".into(),
+            },
+            Token {
+                name: "spacing.md".into(),
+                value: TokenValue::Number(16.0),
+                description: "Base spacing".into(),
+            },
+            Token {
+                name: "spacing.lg".into(),
+                value: TokenValue::Number(24.0),
+                description: "Section spacing".into(),
+            },
+            Token {
+                name: "radius.sm".into(),
+                value: TokenValue::Number(4.0),
+                description: "Small radius".into(),
+            },
+            Token {
+                name: "radius.md".into(),
+                value: TokenValue::Number(8.0),
+                description: "Card radius (shell-aligned)".into(),
+            },
+            Token {
+                name: "radius.lg".into(),
+                value: TokenValue::Number(16.0),
+                description: "Sheet / modal radius".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(16.0),
+                description: "Body font size".into(),
+            },
+        ],
+        extends: None,
+        dark_tokens: Some(vec![
+            Token {
+                name: "color.bg".into(),
+                value: TokenValue::Color("#0F1115".into()),
+                description: "Dark page background".into(),
+            },
+            Token {
+                name: "color.surface".into(),
+                value: TokenValue::Color("#161A22".into()),
+                description: "Dark card surface".into(),
+            },
+            Token {
+                name: "color.fg".into(),
+                value: TokenValue::Color("#E8EAF0".into()),
+                description: "Dark primary text".into(),
+            },
+            Token {
+                name: "color.fg.muted".into(),
+                value: TokenValue::Color("#9AA0AB".into()),
+                description: "Dark secondary text".into(),
+            },
+            Token {
+                name: "color.border".into(),
+                value: TokenValue::Color("#2A2F3A".into()),
+                description: "Dark hairline border".into(),
+            },
+            Token {
+                name: "color.accent".into(),
+                value: TokenValue::Color("#6D93FF".into()),
+                description: "Dark brand accent".into(),
+            },
+            Token {
+                name: "color.success".into(),
+                value: TokenValue::Color("#30D158".into()),
+                description: "Dark positive status".into(),
+            },
+            Token {
+                name: "color.error".into(),
+                value: TokenValue::Color("#FF6961".into()),
+                description: "Dark error status".into(),
+            },
+            Token {
+                name: "spacing.sm".into(),
+                value: TokenValue::Number(8.0),
+                description: "Compact spacing".into(),
+            },
+            Token {
+                name: "spacing.md".into(),
+                value: TokenValue::Number(16.0),
+                description: "Base spacing".into(),
+            },
+            Token {
+                name: "spacing.lg".into(),
+                value: TokenValue::Number(24.0),
+                description: "Section spacing".into(),
+            },
+            Token {
+                name: "radius.sm".into(),
+                value: TokenValue::Number(4.0),
+                description: "Small radius".into(),
+            },
+            Token {
+                name: "radius.md".into(),
+                value: TokenValue::Number(8.0),
+                description: "Card radius".into(),
+            },
+            Token {
+                name: "radius.lg".into(),
+                value: TokenValue::Number(16.0),
+                description: "Sheet / modal radius".into(),
+            },
+            Token {
+                name: "font.size.body".into(),
+                value: TokenValue::Number(16.0),
+                description: "Body font size".into(),
+            },
+        ]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,12 +897,26 @@ mod tests {
     }
 
     #[test]
-    fn register_builtin_loads_three() {
+    fn register_builtin_loads_all() {
         let mut reg = DesignSystemRegistry::new();
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 3);
+        assert_eq!(reg.list().len(), 4);
         reg.activate("apple-hig").unwrap();
         assert!(reg.lookup("color.bg").is_some());
+    }
+
+    #[test]
+    fn desigma_preset_fully_paired_with_dark() {
+        let system = builtin_desigma_aligned();
+        let dark = system.dark_tokens.as_ref().unwrap();
+        for token in &system.tokens {
+            let pair = dark.iter().find(|t| t.name == token.name);
+            assert!(
+                pair.is_some(),
+                "desigma-aligned token '{}' missing dark pair",
+                token.name
+            );
+        }
     }
 
     #[test]
@@ -1066,10 +1250,10 @@ mod tests {
         // E-32/P3：重复调用 register_builtin 不应覆盖已注册/用户自定义的规范。
         let mut reg = DesignSystemRegistry::new();
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 3);
+        assert_eq!(reg.list().len(), 4);
         // 二次调用：数量不变，不抛错。
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 3, "重复注册不应翻倍或覆盖");
+        assert_eq!(reg.list().len(), 4, "重复注册不应翻倍或覆盖");
     }
 
     #[test]
@@ -1080,9 +1264,9 @@ mod tests {
         let mut custom = builtin_apple_hig();
         custom.name = "我的自定义 HIG".into();
         reg.register(custom).unwrap();
-        // 再注册内置：应跳过 apple-hig，补齐另外两套。
+        // 再注册内置：应跳过 apple-hig，补齐其余内置。
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 3, "内置补齐另两套，apple-hig 跳过");
+        assert_eq!(reg.list().len(), 4, "内置补齐其余三套，apple-hig 跳过");
         // 验证 apple-hig 仍是用户自定义版本。
         reg.activate("apple-hig").unwrap();
         assert_eq!(
