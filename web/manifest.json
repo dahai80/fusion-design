@@ -2,7 +2,7 @@
   "id": "fusion-design",
   "title": "AI 设计工作台",
   "title_en": "AI Design Workbench",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "path": "/design",
   "icon": "Palette",
   "entry": "/shell/fusion-design/workbench.html",

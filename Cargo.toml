@@ -32,7 +32,7 @@ members = [
 exclude = ["vendor/openpencil"]
 
 [workspace.package]
-version = "0.1.26"
+version = "0.1.27"
 edition = "2021"
 rust-version = "1.94"
 license = "Apache-2.0"
