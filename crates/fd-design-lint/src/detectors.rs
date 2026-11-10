@@ -566,7 +566,7 @@ impl super::Linter {
                     && !refs.contains_key("gap")
                     && !scale.contains_key(&fmt_num(flex.gap))
                 {
-                    push(format!("flex gap"), flex.gap, violations);
+                    push("flex gap".to_string(), flex.gap, violations);
                 }
                 let p = &flex.padding;
                 let pad = [p.top, p.right, p.bottom, p.left];

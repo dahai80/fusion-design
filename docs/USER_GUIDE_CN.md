@@ -131,6 +131,17 @@ fusion-design lint --input customer-page.fusiondesign \
 
 **规则集（profile）**：`--profile default` = 全部 17 条；`--profile desigma` = 4 条 Token 对齐门禁规则（`--gate` 输出二值退出码，供 cowork/CI 管道集成）。显式 `--rules` 优先于 profile。
 
+## 工作台即 shell 模块（issue #42）
+
+Web 工作台（`http://127.0.0.1:11493/workbench.html`）同时是 union-web 的标准模块，供 shell Design Hub 挂载：
+
+- `web/manifest.json`（PRD §5.1）以 `fusion-design` 注册（经 gateway 访问 `/shell/fusion-design/workbench.html`）；`start.sh` 启动时向 gateway 注册中心上报 manifest（尽力而为，gateway 不可达仅告警）。
+- `?embedded=1` 在 shell iframe 内隐藏模块自有导航（返回入口）。
+- **Token 面板**（右列）：在图层/画布选中节点后点击 Token 应用（颜色 → 填充，Shift+点击 → 描边，`radius*` → 圆角，`font.size*` → 字号）。取色受限于激活设计系统的 Token，无裸取色器。
+- **画布拖拽**：位置自动落库为新版本（防抖 `POST /api/session/<id>/mutate`）。
+- **保存 .fusiondesign**：导出当前 PenDocument JSON（git 友好）。
+- 统一登录在 gateway 侧执行；模块内 401 仅内联提示，绝不跳转。
+
 **常见卡点**：lint 报告字段含义不清 → 见 [现象 K](TROUBLESHOOTING_CN.md)。
 
 ## 场景 4：草图 / 参考图逆向生成（图生 UI）

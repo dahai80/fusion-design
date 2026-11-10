@@ -51,10 +51,11 @@ Success responses are plain JSON objects; `document` fields are **JSON strings**
 | `GET /api/health?deep=1` | — | adds `mlx:{probed, available, model, chat_model, auth_ok, models[], status}` |
 | `GET /api/design-systems` | — | `{systems[], active, theme}` |
 | `GET /api/sessions` | — | `{sessions[]}` |
-| `GET /api/tokens?ds=<id>&theme=light\|dark` | — | `{design_system, theme, css}` — `css` is CSS custom properties. 404 `field:"ds"` if unknown. GET-only; other methods → 405 with hint |
+| `GET /api/tokens?ds=<id>&theme=light\|dark` | — | `{design_system, theme, css, tokens[{name,value}]}` — `css` is CSS custom properties; `tokens` is the name/value list for the token panel (dark theme = light base merged with dark overlay, v0.1.26). 404 `field:"ds"` if unknown. GET-only; other methods → 405 with hint |
 | `GET /api/artifacts` | query: `tab=all\|mine\|shared`, `page`, `page_size≤100`, `sort`, `q` | artifacts page payload (fusion-artifacts-engine proxy) |
 | `GET /api/artifact/<id>?version=<n>` | — | artifact detail |
 | `GET /api/session/<id>` | — | `{session, current_version, versions[{version,label,created_at,node_count}]}` |
+| `POST /api/session/<id>/mutate` | `node_id` (non-empty) + at least one of `x`,`y`,`w`,`h`,`fill`,`stroke`,`radius`,`font_size`,`opacity` | — | `{session, current_version, document}` — direct node patch on the current version (canvas drag / token panel apply, no model round-trip); pushes a new version labeled `编辑：<node_id>`. 400 `field:"node_id"/"body"`, 404 `field:"session"/"node_id"` |
 | `GET /api/version/<id>/<n>` | — | `{version, document}` |
 
 ### AI endpoints (POST, JSON body)
@@ -84,3 +85,20 @@ requires updating this document and those tests in the same commit.
   corresponding layer item (no two-way echo loop).
 - **Undo/Redo** (canvas header): steps the session version stack pointer
   (`rollback` to `current∓1`); buttons show disabled state at the stack edges.
+
+## Workbench as shell module (issue #42)
+
+- `web/manifest.json` (repo root, PRD §5.1 schema) registers the workbench as
+  a union-web module (`id: fusion-design`, entry `/shell/fusion-design/workbench.html`,
+  category `domain`); `start.sh` POSTs it to the gateway registry on start
+  (best-effort — unreachable gateway logs and continues).
+- `?embedded=1` hides the module's own navigation (back link) per PRD §3.3.
+- Token panel (right column): token name/value pairs from the active design
+  system; select a node (layers/canvas), click a token to apply (color → fill,
+  Shift+click → stroke, `radius*` → radius, `font.size*` → font size).
+  Constrained picking — no bare color picker.
+- Canvas drag: wasm `node.drag` events are debounced (300 ms) and persisted via
+  `POST /api/session/<id>/mutate` (absolute coords = node base + cumulative dx/dy).
+- Save `.fusiondesign`: downloads the current PenDocument JSON (git-friendly).
+- Auth: none bespoke. 401 responses are rendered inline as an error message —
+  the module never redirects, so a module 401 cannot kick the shell (issue #28 contract).

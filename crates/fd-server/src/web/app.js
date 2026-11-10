@@ -19,6 +19,13 @@ const I18N = {
         rolledBack: "已回退到 v{v}。",
         rollBack: "回退", view: "查看", current: "当前",
         layers: "图层", noLayers: "尚无节点",
+        tokens: "Token", noTokens: "先选择设计系统",
+        tokenHint: "选中节点后点击 Token 应用（Shift+点击应用到描边）。",
+        tokenApplied: "已应用 {name} → 节点 {node}（v{v}）。",
+        selectFirst: "先在图层或画布中选中一个节点",
+        savedFile: "已保存 {file}",
+        dragPersistFail: "拖拽位置保存失败：{e}",
+        unauthorized: "未授权（401）：请在 Shell 登录后重试",
         exportFailed: "导出失败：{e}",
         reqFailed: "请求失败：{e}",
         busy: "生成中…", model: "模型",
@@ -40,6 +47,13 @@ savedArtifact: "已存 Artifacts（已入库，回到 Artifacts 页可见）。"
         rolledBack: "Rolled back to v{v}.",
         rollBack: "Rollback", view: "View", current: "Current",
         layers: "Layers", noLayers: "No nodes yet",
+        tokens: "Tokens", noTokens: "Pick a design system first",
+        tokenHint: "Select a node, then click a token to apply (Shift+click applies to stroke).",
+        tokenApplied: "Applied {name} to node {node} (v{v}).",
+        selectFirst: "Select a node in the layers or on the canvas first",
+        savedFile: "Saved {file}",
+        dragPersistFail: "Failed to persist drag position: {e}",
+        unauthorized: "Unauthorized (401): sign in via the shell and retry",
         exportFailed: "Export failed: {e}",
         reqFailed: "Request failed: {e}",
         busy: "Generating…", model: "Model",
@@ -84,6 +98,8 @@ async function api(path, body) {
         ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
         : {};
     const resp = await fetch(url(path), opt);
+    // issue#42 契约：模块内 401 只内联报错，绝不跳转/重定向（不踢 shell，#28 合同）。
+    if (resp.status === 401) throw new Error(t("unauthorized"));
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
@@ -144,6 +160,8 @@ function renderDoc(docJson) {
             })
             .catch(() => {});
     }
+    // Token 面板跟随文档的设计系统（issue#42）。
+    loadTokenPanel();
     fitStage(docJson);
 }
 
@@ -260,6 +278,11 @@ function pollWasmEvents() {
                 if ((kind === "node.click" || kind === "node.select") && nid) {
                     syncLayerSelection(nid);
                 }
+                if (kind === "node.drag" && nid) {
+                    // issue#42：拖拽持久化（防抖落库）+ 同步图层选中。
+                    syncLayerSelection(nid);
+                    onWasmNodeDrag(nid, (ev.payload.dx || 0), (ev.payload.dy || 0));
+                }
             } catch {
                 /* 非 JSON 事件忽略 */
             }
@@ -273,6 +296,136 @@ function syncLayerSelection(nodeId) {
     document.querySelectorAll("#fd-layers .layer-item").forEach((el) => {
         el.classList.toggle("active", el.dataset.nodeId === state.selectedNode);
     });
+}
+
+// ── Token 面板（issue#42）──
+// 受限取色：只从激活设计系统的 Token 里选，不出现裸取色器。
+async function loadTokenPanel() {
+    const box = $("fd-tokens");
+    if (!box) return;
+    const ds = pickDesignSystem(state.document) || state.designSystem;
+    if (!ds) {
+        box.innerHTML = `<p class="side-note">${t("noTokens")}</p>`;
+        state.tokens = null;
+        return;
+    }
+    try {
+        const d = await fetch(url(`api/tokens?ds=${encodeURIComponent(ds)}&theme=${currentTheme()}`))
+            .then((r) => r.json());
+        state.tokens = d.tokens || [];
+        box.innerHTML = "";
+        state.tokens.forEach((tok) => {
+            const item = document.createElement("button");
+            item.type = "button";
+            item.className = "token-item";
+            const isColor = /^#|rgb/i.test(tok.value) && tok.value !== "transparent";
+            const isNumber = /-?\d+(\.\d+)?px$/.test(tok.value);
+            if (isColor) item.classList.add("tok-color");
+            else if (isNumber) item.classList.add("tok-num");
+            else return; // 字体族/shadow 等非取值 token 不上面板
+            const swatch = document.createElement("span");
+            swatch.className = "tok-swatch";
+            if (isColor) swatch.style.background = tok.value;
+            else swatch.textContent = tok.value.replace("px", "");
+            const label = document.createElement("span");
+            label.className = "tok-name";
+            label.textContent = tok.name;
+            item.appendChild(swatch);
+            item.appendChild(label);
+            item.title = `${tok.name} = ${tok.value}`;
+            item.onclick = (ev) => applyToken(tok, ev.shiftKey);
+            box.appendChild(item);
+        });
+        if (!box.children.length) box.innerHTML = `<p class="side-note">${t("noTokens")}</p>`;
+    } catch {
+        box.innerHTML = `<p class="side-note">${t("noTokens")}</p>`;
+    }
+}
+
+// Token → 选中节点：color→fill（Shift→stroke），radius→radius，font.size→font_size。
+async function applyToken(tok, toStroke) {
+    if (!state.selectedNode) {
+        addMsg("bot", t("selectFirst"));
+        return;
+    }
+    if (!state.session) {
+        addMsg("bot", t("noSession"));
+        return;
+    }
+    const body = { node_id: state.selectedNode };
+    if (tok.name.startsWith("color.")) {
+        if (toStroke) body.stroke = tok.value;
+        else body.fill = tok.value;
+    } else if (tok.name.startsWith("radius")) {
+        body.radius = parseFloat(tok.value);
+    } else if (tok.name.startsWith("font.size")) {
+        body.font_size = parseFloat(tok.value);
+    } else {
+        return; // spacing 等暂无画布落点
+    }
+    try {
+        const d = await api(`/api/session/${state.session}/mutate`, body);
+        applyDoc(d);
+        addMsg("bot", t("tokenApplied", { name: tok.name, node: state.selectedNode, v: d.current_version }));
+    } catch (e) {
+        addMsg("bot", t("reqFailed", { e: e.message }));
+    }
+}
+
+// ── 画布拖拽持久化（issue#42）──
+// wasm 拖拽只改 DOM 并持续发 node.drag{node_id,dx,dy}（相对按下点累计）。
+// 防抖 300ms 取最后一次累计位移，换算绝对坐标落 /mutate 新版本。
+const DRAG_PERSIST_MS = 300;
+const pendingDrags = new Map();
+function onWasmNodeDrag(nodeId, dx, dy) {
+    pendingDrags.set(nodeId, { dx, dy });
+    clearTimeout(pendingDrags.get(nodeId).timer);
+    pendingDrags.get(nodeId).timer = setTimeout(async () => {
+        const d = pendingDrags.get(nodeId);
+        pendingDrags.delete(nodeId);
+        if (!d || !state.session) return;
+        const base = findNodePos(state.document, nodeId);
+        if (!base) return;
+        try {
+            const resp = await api(`/api/session/${state.session}/mutate`, {
+                node_id: nodeId,
+                x: base.x + d.dx,
+                y: base.y + d.dy,
+            });
+            applyDoc(resp);
+        } catch (e) {
+            addMsg("bot", t("dragPersistFail", { e: e.message }));
+        }
+    }, DRAG_PERSIST_MS);
+}
+
+function findNodePos(docJson, nodeId) {
+    try {
+        const doc = JSON.parse(docJson);
+        const stack = [...(doc.pages || []).flatMap((p) => p.nodes || [])];
+        while (stack.length) {
+            const n = stack.shift();
+            if (n.id === nodeId) return { x: n.x || 0, y: n.y || 0 };
+            if (Array.isArray(n.children)) stack.push(...n.children);
+        }
+    } catch { /* 容错 */ }
+    return null;
+}
+
+// ── 保存 .fusiondesign（PenDocument JSON，git 友好）──
+function saveFile() {
+    if (!state.document) {
+        addMsg("bot", t("noSession"));
+        return;
+    }
+    const name = `${state.session || "design"}-v${state.currentVersion || 1}.fusiondesign`;
+    const blob = new Blob([state.document], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    addMsg("bot", t("savedFile", { file: name }));
 }
 
 // ── 撤销/重做（版本栈指针移动，rollback 不产生新版本）──
@@ -595,6 +748,9 @@ async function boot() {
     $("undo-btn").onclick = () => stepVersion(-1);
     $("redo-btn").onclick = () => stepVersion(1);
 
+    // 保存 .fusiondesign（issue#42）。
+    $("save-file").onclick = saveFile;
+
     // 服务健康 + 模型选择（排除 embedding/rerank 等非对话模型）。
     try {
         const h = await api("/api/health?deep=1");
@@ -648,9 +804,16 @@ async function boot() {
     }
     state.kind = params.get("kind") || "design";
 
+    // issue#42 内嵌模式（PRD §3.3）：?embedded=1 隐藏自有导航（返回入口），
+    // shell iframe 内不留逃逸链接；其余功能不变。
+    if (params.get("embedded") === "1") {
+        document.body.classList.add("embedded");
+    }
+
     setViewport("desktop");
     await initCanvas();
     refreshVersions();
+    loadTokenPanel();
     booted = true;
 }
 

@@ -147,11 +147,34 @@ pub fn tokens(state: &Arc<AppState>, ds: &str, theme: &str) -> Resp {
     };
     reg.activate_theme(theme);
     match reg.get(ds) {
-        Some(system) => ok_json(serde_json::json!({
-            "design_system": ds,
-            "theme": theme,
-            "css": system.to_css_custom_properties_for_theme(theme),
-        })),
+        Some(system) => {
+            // Issue #42: token panel needs name/value pairs (CSS vars replace
+            // '.' with '-'; the panel wants raw token names). Merged view =
+            // light base + dark overlay values for the requested theme.
+            let overlay: std::collections::HashMap<&str, &fd_design_system::Token> = system
+                .dark_tokens
+                .as_ref()
+                .filter(|_| theme == fd_design_system::Theme::Dark)
+                .map(|d| d.iter().map(|t| (t.name.as_str(), t)).collect())
+                .unwrap_or_default();
+            let tokens: Vec<serde_json::Value> = system
+                .tokens
+                .iter()
+                .map(|t| {
+                    let value = overlay
+                        .get(t.name.as_str())
+                        .map(|d| d.value.to_css_value())
+                        .unwrap_or_else(|| t.value.to_css_value());
+                    serde_json::json!({"name": t.name, "value": value})
+                })
+                .collect();
+            ok_json(serde_json::json!({
+                "design_system": ds,
+                "theme": theme,
+                "css": system.to_css_custom_properties_for_theme(theme),
+                "tokens": tokens,
+            }))
+        }
         None => err_field(
             hyper::StatusCode::NOT_FOUND,
             "ds",
@@ -759,6 +782,129 @@ fn push_version(
         "current_version": version,
         "document": json,
     })))
+}
+
+// Issue #42: direct node mutation (canvas drag + token panel apply). Patches
+// one node on the current version and pushes a new version — the workbench
+// persists client-side edits without a model round-trip.
+#[derive(Deserialize)]
+pub struct NodeMutateRequest {
+    pub node_id: String,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub w: Option<f64>,
+    #[serde(default)]
+    pub h: Option<f64>,
+    #[serde(default)]
+    pub fill: Option<String>,
+    #[serde(default)]
+    pub stroke: Option<String>,
+    #[serde(default)]
+    pub radius: Option<f64>,
+    #[serde(default)]
+    pub font_size: Option<f64>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
+}
+
+fn mutate_node_in_doc(doc: &mut fd_canvas_core::PenDocument, req: &NodeMutateRequest) -> bool {
+    fn apply(nodes: &mut [fd_canvas_core::PenNode], req: &NodeMutateRequest) -> bool {
+        for node in nodes.iter_mut() {
+            if node.id == req.node_id {
+                let style = &mut node.style;
+                if let Some(v) = req.x {
+                    node.x = v;
+                }
+                if let Some(v) = req.y {
+                    node.y = v;
+                }
+                if let Some(v) = req.w {
+                    node.w = v;
+                }
+                if let Some(v) = req.h {
+                    node.h = v;
+                }
+                if let Some(ref v) = req.fill {
+                    style.fill = Some(v.clone());
+                }
+                if let Some(ref v) = req.stroke {
+                    style.stroke = Some(v.clone());
+                }
+                if let Some(v) = req.radius {
+                    style.radius = Some(v);
+                }
+                if let Some(v) = req.font_size {
+                    style.font_size = Some(v);
+                }
+                if let Some(v) = req.opacity {
+                    style.opacity = Some(v);
+                }
+                return true;
+            }
+            if apply(&mut node.children, req) {
+                return true;
+            }
+        }
+        false
+    }
+    doc.pages.iter_mut().any(|page| apply(&mut page.nodes, req))
+}
+
+pub fn node_mutate(state: &Arc<AppState>, session: &str, body: &[u8]) -> Resp {
+    let req: NodeMutateRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return err_field(
+                hyper::StatusCode::BAD_REQUEST,
+                "body",
+                &format!("请求体解析失败: {e}"),
+            )
+        }
+    };
+    if req.node_id.trim().is_empty() {
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "node_id",
+            "node_id 不能为空",
+        );
+    }
+    let has_change = req.x.is_some()
+        || req.y.is_some()
+        || req.w.is_some()
+        || req.h.is_some()
+        || req.fill.is_some()
+        || req.stroke.is_some()
+        || req.radius.is_some()
+        || req.font_size.is_some()
+        || req.opacity.is_some();
+    if !has_change {
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "body",
+            "至少需要一个变更字段（x/y/w/h/fill/stroke/radius/font_size/opacity）",
+        );
+    }
+    let mut doc = match resolve_session_doc(state, session, None) {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    if !mutate_node_in_doc(&mut doc, &req) {
+        return err_field(
+            hyper::StatusCode::NOT_FOUND,
+            "node_id",
+            &format!("节点 {node_id} 不存在", node_id = req.node_id),
+        );
+    }
+    match push_version(state, session, &doc, &format!("编辑：{}", req.node_id)) {
+        Ok(resp) => {
+            tracing::info!(session = %session, node_id = %req.node_id, "api/session/mutate: 节点已更新");
+            resp
+        }
+        Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 /// 生态 IPC 基目录：FUSION_DESIGN_DATA_DIR > ~/.fusion-design。
@@ -1634,6 +1780,53 @@ mod contract_tests {
             v["css"].as_str().unwrap_or_default().contains("--"),
             "CSS vars: {v}"
         );
+        // issue#42：tokens 数组（name/value 对，dark 主题下为暗色合并视图）。
+        let toks = v["tokens"].as_array().expect("tokens array");
+        assert!(!toks.is_empty(), "{v}");
+        let bg = toks
+            .iter()
+            .find(|t| t["name"] == "color.bg")
+            .expect("color.bg");
+        assert_eq!(bg["value"], "#1C1C1E", "dark overlay applied: {bg}");
+    }
+
+    #[tokio::test]
+    async fn contract_node_mutate() {
+        // issue#42：POST /api/session/<id>/mutate 直改节点并落新版本。
+        let (state, sid, _doc) = seeded_state();
+
+        // 坏 body → 400 + field=body。
+        let v = json_of(node_mutate(&state, &sid, b"not json")).await;
+        assert_eq!(v["field"], "body", "{v}");
+
+        // 空 node_id → 400 + field=node_id。
+        let v = json_of(node_mutate(&state, &sid, br#"{"node_id":" "}"#)).await;
+        assert_eq!(v["field"], "node_id", "{v}");
+
+        // 无变更字段 → 400。
+        let v = json_of(node_mutate(&state, &sid, br#"{"node_id":"n1"}"#)).await;
+        assert_eq!(v["field"], "body", "{v}");
+
+        // session 不存在 → 404 + field=session。
+        let b = serde_json::json!({"node_id": "n1", "x": 42.0});
+        let v = json_of(node_mutate(&state, "s-nope", b.to_string().as_bytes())).await;
+        assert_eq!(v["field"], "session", "{v}");
+
+        // 节点不存在 → 404 + field=node_id。
+        let b = serde_json::json!({"node_id": "ghost", "x": 42.0});
+        let v = json_of(node_mutate(&state, &sid, b.to_string().as_bytes())).await;
+        assert_eq!(v["field"], "node_id", "{v}");
+
+        // 成功：{session, current_version, document}，新版本包含变更。
+        let b = serde_json::json!({"node_id": "n1", "x": 42.0, "fill": "#4F7CFF"});
+        let v = json_of(node_mutate(&state, &sid, b.to_string().as_bytes())).await;
+        assert!(v["error"].is_null(), "{v}");
+        assert_eq!(v["current_version"], 2, "{v}");
+        assert!(v["document"].is_string());
+        let doc: serde_json::Value = serde_json::from_str(v["document"].as_str().unwrap()).unwrap();
+        let node = &doc["pages"][0]["nodes"][0];
+        assert_eq!(node["x"], 42.0);
+        assert_eq!(node["style"]["fill"], "#4F7CFF");
     }
 
     #[tokio::test]

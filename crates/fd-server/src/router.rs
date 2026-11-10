@@ -74,6 +74,20 @@ pub async fn handle(
             let theme = query_param(&query, "theme").unwrap_or_else(|| "light".to_string());
             handlers::tokens(&state, &ds, &theme)
         }
+        ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/mutate") => {
+            // issue#42：画布直改（拖拽/Token 面板落库），无模型往返。
+            let id = p
+                .trim_start_matches("/api/session/")
+                .trim_end_matches("/mutate");
+            if id.is_empty() {
+                bad_request("路径须为 /api/session/<id>/mutate")
+            } else {
+                match read_body(req).await {
+                    Ok(b) => handlers::node_mutate(&state, id, &b),
+                    Err(r) => r,
+                }
+            }
+        }
         ("GET", p) if p.starts_with("/api/session/") => {
             let id = p.trim_start_matches("/api/session/");
             handlers::session_info(&state, id)

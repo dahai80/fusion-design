@@ -338,6 +338,37 @@ mod tests {
     }
 
     #[test]
+    fn workbench_has_shell_module_ux() {
+        // issue#42 shell 模块化：Token 面板 + 保存 .fusiondesign + 内嵌模式 + 拖拽落库。
+        let html = include_str!("web/workbench.html");
+        assert!(html.contains("id=\"fd-tokens\""), "缺 Token 面板");
+        assert!(
+            html.contains("id=\"save-file\""),
+            "缺保存 .fusiondesign 按钮"
+        );
+        let js = include_str!("web/app.js");
+        assert!(js.contains("loadTokenPanel"), "须加载 Token 面板");
+        assert!(js.contains("applyToken"), "须支持 Token 应用到选中节点");
+        assert!(js.contains("onWasmNodeDrag"), "须消费 node.drag 持久化拖拽");
+        assert!(js.contains("saveFile"), "须能保存 .fusiondesign");
+        assert!(js.contains("embedded"), "须支持 ?embedded=1 隐藏自有导航");
+        assert!(
+            js.contains("resp.status === 401") || js.contains("resp.status===401"),
+            "401 须内联报错不跳转（#28 合同）"
+        );
+        assert!(!js.contains("location.href"), "模块内禁止页面级跳转");
+        let css = include_str!("web/app.css");
+        assert!(css.contains(".token-item"), "缺 Token 条目样式");
+        assert!(css.contains("body.embedded"), "缺内嵌模式样式");
+        let manifest = include_str!("../../../web/manifest.json");
+        assert!(
+            manifest.contains("\"id\": \"fusion-design\""),
+            "缺 shell manifest"
+        );
+        assert!(manifest.contains("\"entry\""), "manifest 缺 entry");
+    }
+
+    #[test]
     fn workbench_has_canvas_ux_minimum() {
         // issue#35 最小画布 UX：图层列表 + 节点选中联动 + 撤销/重做可见状态。
         let html = include_str!("web/workbench.html");

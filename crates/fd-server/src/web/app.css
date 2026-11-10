@@ -440,3 +440,47 @@ body {
     background: var(--fs-bg);
 }
 .artifact-view > .side-note { padding: 24px; }
+
+/* ── Token 面板（issue#42）── */
+.token-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+.token-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--fs-radius-sm, 6px);
+    background: none;
+    color: var(--fs-text-secondary);
+    font: inherit;
+    font-size: var(--fs-fs-xs, 12px);
+    text-align: left;
+    cursor: pointer;
+}
+.token-item:hover {
+    background: var(--fs-bg-muted);
+    color: var(--fs-text-primary);
+    border-color: var(--fs-border);
+}
+.tok-swatch {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    border-radius: 4px;
+    border: 1px solid var(--fs-border);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    color: var(--fs-text-muted);
+}
+.tok-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 内嵌模式（PRD §3.3）：shell iframe 内隐藏自有导航。 */
+body.embedded #back-to-artifacts { display: none; }

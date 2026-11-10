@@ -131,6 +131,17 @@ fusion-design lint --input customer-page.fusiondesign \
 
 **Profiles**: `--profile default` = all 17 rules; `--profile desigma` = the 4 token-alignment gate rules (binary exit code via `--gate`, for cowork/CI pipeline integration). Explicit `--rules` overrides the profile.
 
+## Workbench as a shell module (issue #42)
+
+The web workbench (`http://127.0.0.1:11493/workbench.html`) doubles as a union-web module for the shell Design Hub:
+
+- `web/manifest.json` (PRD §5.1) registers it as `fusion-design` (`/shell/fusion-design/workbench.html` via the gateway); `start.sh` posts the manifest to the gateway registry on start (best-effort).
+- `?embedded=1` hides the module's own navigation inside the shell iframe.
+- **Token panel** (right column): select a node in Layers/canvas, click a token to apply it (color → fill, Shift+click → stroke, `radius*` → radius, `font.size*` → font size). Picking is constrained to the active design system's tokens.
+- **Canvas drag**: positions persist automatically as a new version (debounced `POST /api/session/<id>/mutate`).
+- **Save .fusiondesign**: exports the current PenDocument JSON (git-friendly) via the export panel.
+- Unified shell login applies at the gateway; a 401 shows inline in the module and never redirects.
+
 **Common stalls**: lint report fields unclear → see [Symptom K](TROUBLESHOOTING.md).
 
 ## Scenario 4: Sketch / Reference Image to UI (image-to-ui)

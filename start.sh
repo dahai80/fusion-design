@@ -17,6 +17,27 @@ pid_alive() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
+# Issue #42: register the web workbench manifest with the shell registry
+# (fusion-gateway /api/v1/shell/manifests). Best-effort: gateway may be down
+# or not yet implementing the endpoint — log and continue, never block start.
+register_shell_manifest() {
+    local manifest="$ROOT/web/manifest.json"
+    local gateway="${FUSION_GATEWAY_URL:-http://127.0.0.1:11432}"
+    if [ ! -f "$manifest" ]; then
+        echo "shell manifest missing: $manifest (skip registration)" >&2
+        return 0
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS -m 3 -X POST -H "Content-Type: application/json" \
+            --data @"$manifest" "$gateway/api/v1/shell/manifests" >/dev/null 2>&1; then
+            echo "shell manifest registered at $gateway"
+        else
+            echo "shell manifest registration skipped (gateway unreachable or endpoint absent)" >&2
+        fi
+    fi
+    return 0
+}
+
 case "${1:-}" in
     start)
         if pid_alive; then
@@ -38,6 +59,7 @@ case "${1:-}" in
             exit 1
         fi
         echo "started (pid $(cat "$PID_FILE")) on http://127.0.0.1:$PORT"
+        register_shell_manifest
         ;;
     stop)
         if pid_alive; then

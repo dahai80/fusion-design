@@ -1,0 +1,13 @@
+{
+  "id": "fusion-design",
+  "title": "AI 设计工作台",
+  "title_en": "AI Design Workbench",
+  "version": "0.1.26",
+  "path": "/design",
+  "icon": "Palette",
+  "entry": "/shell/fusion-design/workbench.html",
+  "health": "http://localhost:11432/shell/fusion-design/api/health",
+  "backend": "http://localhost:11432/design-api",
+  "devices": ["desktop"],
+  "category": "domain"
+}

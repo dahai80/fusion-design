@@ -42,6 +42,7 @@
         <button class="chip" data-ds="apple-hig">Apple HIG</button>
         <button class="chip" data-ds="minimal-dashboard">极简后台</button>
         <button class="chip" data-ds="robot-sim">robot-sim</button>
+        <button class="chip" data-ds="desigma-aligned">desigma-aligned</button>
       </div>
       <form id="composer" class="composer">
         <div id="paste-hint" class="paste-hint hidden" data-i18n="pasteHint">已贴入截图，发送即还原</div>
@@ -91,12 +92,18 @@
         <div id="fd-layers" class="layer-list" aria-label="layers"></div>
       </div>
       <div class="side-block">
+        <h3 data-i18n="tokens">Token</h3>
+        <div id="fd-tokens" class="token-list" aria-label="design tokens"></div>
+        <p class="side-note" data-i18n="tokenHint">选中节点后点击 Token 应用（Shift+点击应用到描边）。</p>
+      </div>
+      <div class="side-block">
         <h3 data-i18n="export">导出</h3>
         <div class="export-row">
           <button id="export-html" class="btn" data-i18n="expHtml">HTML</button>
           <button id="export-react" class="btn" data-i18n="expReact">React</button>
           <button id="send-to-code" class="btn" data-i18n="sendCode">发给 Code</button>
           <button id="save-artifact" class="btn" data-i18n="saveArtifact">存 Artifacts</button>
+          <button id="save-file" class="btn" data-i18n="saveFile">保存 .fusiondesign</button>
         </div>
         <p class="side-note" data-i18n="exportNote">HTML 直接可开；React 为 TSX 组件（Tailwind）。</p>
       </div>
