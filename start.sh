@@ -17,9 +17,33 @@ pid_alive() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
+# Issue #43: resolve the gateway admin key for manifest registration.
+# Order: FUSION_ADMIN_KEY env, then gateway config web_shell.admin_key
+# (FUSION_GATEWAY_CONFIG overrides, default ~/fusion/fusion-gateway/config.yaml)
+# — same resolution order as fusion-supervisor env_map.rs / fusion-cowork.
+# Never log or echo the key.
+resolve_admin_key() {
+    if [ -n "${FUSION_ADMIN_KEY:-}" ]; then
+        printf '%s' "$FUSION_ADMIN_KEY"
+        return 0
+    fi
+    local cfg="${FUSION_GATEWAY_CONFIG:-$HOME/fusion/fusion-gateway/config.yaml}"
+    [ -f "$cfg" ] || return 1
+    awk '
+        /^[^[:space:]#]/ { in_ws = ($0 == "web_shell:") }
+        in_ws && /admin_key:/ {
+            sub(/.*admin_key:[[:space:]]*/, "")
+            gsub(/["'"'"']/, "")
+            if ($0 != "") { print; exit }
+        }
+    ' "$cfg"
+}
+
 # Issue #42: register the web workbench manifest with the shell registry
-# (fusion-gateway /api/v1/shell/manifests). Best-effort: gateway may be down
-# or not yet implementing the endpoint — log and continue, never block start.
+# (fusion-gateway /api/v1/shell/manifests, admin-authed). Best-effort:
+# gateway may be down or unauthenticated — log and continue, never block
+# start. Issue #43: send Authorization: Bearer and distinguish failure
+# modes (auth rejected vs unreachable vs endpoint absent) in the log.
 register_shell_manifest() {
     local manifest="$ROOT/web/manifest.json"
     local gateway="${FUSION_GATEWAY_URL:-http://127.0.0.1:11432}"
@@ -27,14 +51,38 @@ register_shell_manifest() {
         echo "shell manifest missing: $manifest (skip registration)" >&2
         return 0
     fi
-    if command -v curl >/dev/null 2>&1; then
-        if curl -fsS -m 3 -X POST -H "Content-Type: application/json" \
-            --data @"$manifest" "$gateway/api/v1/shell/manifests" >/dev/null 2>&1; then
-            echo "shell manifest registered at $gateway"
-        else
-            echo "shell manifest registration skipped (gateway unreachable or endpoint absent)" >&2
-        fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "shell manifest registration skipped: curl not available" >&2
+        return 0
     fi
+    local key
+    if ! key="$(resolve_admin_key)" || [ -z "$key" ]; then
+        echo "shell manifest registration skipped: no admin key (set FUSION_ADMIN_KEY or gateway config web_shell.admin_key)" >&2
+        return 0
+    fi
+    local body code
+    body="$(mktemp)" || { echo "shell manifest registration skipped: mktemp failed" >&2; return 0; }
+    code="$(curl -sS -m 3 -o "$body" -w '%{http_code}' -X POST \
+        -H "Content-Type: application/json" -H "Authorization: Bearer $key" \
+        --data @"$manifest" "$gateway/api/v1/shell/manifests" 2>/dev/null || true)"
+    rm -f "$body"
+    case "$code" in
+        200|201)
+            echo "shell manifest registered at $gateway"
+            ;;
+        401|403)
+            echo "shell manifest registration failed: gateway rejected auth (HTTP $code) — FUSION_ADMIN_KEY does not match gateway web_shell.admin_key" >&2
+            ;;
+        404)
+            echo "shell manifest registration skipped: gateway endpoint absent (HTTP 404 at $gateway)" >&2
+            ;;
+        000)
+            echo "shell manifest registration skipped: gateway unreachable ($gateway)" >&2
+            ;;
+        *)
+            echo "shell manifest registration failed: gateway HTTP $code" >&2
+            ;;
+    esac
     return 0
 }
 
