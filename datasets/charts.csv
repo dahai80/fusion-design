@@ -1,0 +1,13 @@
+id,data_shape,best_chart,when_to_use,avoid_when,keywords
+ch-01,trend over time,line chart,"continuous time axis and rate of change matters","fewer than 4 points or no time dimension","trend, time series, growth, timeline"
+ch-02,part of whole,pie or donut chart,"few categories summing to 100 percent","more than 6 slices or comparison across many groups","share, percentage, composition, split"
+ch-03,ranked comparison,bar chart,"comparing magnitude across categories","values on a continuous scale over time","compare, ranking, top n, by category"
+ch-04,distribution,histogram,"shape of a single numeric variable","few discrete categories","distribution, spread, bins, frequency"
+ch-05,correlation,scatter plot,"relationship between two numeric variables","purely categorical data","correlation, cluster, relationship, scatter"
+ch-06,flow between stages,funnel chart,"sequential conversion through stages","non-sequential steps","funnel, conversion, drop-off, pipeline"
+ch-07,change between two states,slope chart,"before and after comparison for few entities","many entities or many periods","before after, delta, change, slope"
+ch-08,part to whole over time,stacked area chart,"cumulative composition evolving over time","overlapping uncertain bands","stacked, cumulative, composition trend"
+ch-09,geographic data,choropleth map,"regional intensity of a metric","precise point locations","map, region, geography, density"
+ch-10,single kpi,stat card,"one number that must land instantly","trends that need context","kpi, headline number, metric, stat"
+ch-11,hierarchy,treemap,"nested proportions with limited depth","deep hierarchies with tiny leaves","hierarchy, nested, treemap, proportion"
+ch-12,multi-metric profile,radar chart,"comparing 3-8 metrics for few entities","many metrics or many entities","radar, profile, multi-dimension, spider"

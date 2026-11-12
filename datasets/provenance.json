@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "updated": "2026-11-12",
+  "sources": [
+    "authored in-repo (fusion-design team curation), issue #44",
+    "font names and licenses from the Google Fonts catalog (OFL 1.1 / Apache 2.0), factual reference only",
+    "schema pattern inspired by nextlevelbuilder/ui-ux-pro-max-skill (MIT); no upstream CSV content vendored"
+  ],
+  "files": [
+    {
+      "name": "styles.csv",
+      "rows": 24,
+      "sha256": "3e307026ba7488a0ac7d4aad1c038fe2ccd108157bc3a580b24d6cd59ea02e3b"
+    },
+    {
+      "name": "palettes.csv",
+      "rows": 24,
+      "sha256": "515aa983b9df1b45d12bba673d31828d6da4e51c23edc2282fd1933c43fc36e3"
+    },
+    {
+      "name": "font_pairings.csv",
+      "rows": 20,
+      "sha256": "5d49f938374b7ce06919f2798e74cb1be3ee21f059a19203613726db9cbb6379"
+    },
+    {
+      "name": "ux_guidelines.csv",
+      "rows": 40,
+      "sha256": "187f80ca68d4e1c378b3bbc3e7159b75c9d6777647488812502ae838f3dd6998"
+    },
+    {
+      "name": "charts.csv",
+      "rows": 12,
+      "sha256": "f44b72c1bc123d1111f6c52a0712f3d834ee43d34617e6b226dd6cb9338aaa17"
+    },
+    {
+      "name": "stacks.csv",
+      "rows": 16,
+      "sha256": "6e9bb0e1bd60ed368a4d8215d5a6cf4dcbc7c586ecadeb663aee7860d0eab67f"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+id,name,mood,heading_font,body_font,best_for,license
+fp-01,Modern Neutral,clean,"Inter","Inter","saas dashboards and product ui",OFL 1.1
+fp-02,Editorial Serif,editorial,"Playfair Display","Source Sans 3","magazines and long-form articles",OFL 1.1
+fp-03,Tech Mono,developer,"JetBrains Mono","Inter","developer tools and terminals",OFL 1.1
+fp-04,Friendly Round,playful,"Nunito","Nunito Sans","kids apps and consumer onboarding",OFL 1.1
+fp-05,Luxury Didone,luxury,"Cormorant Garamond","Lato","fashion and premium brands",OFL 1.1
+fp-06,Geometric Startup,startup,"Poppins","Work Sans","launch pages and pitch decks",OFL 1.1
+fp-07,Corporate Slab,enterprise,"Roboto Slab","Roboto","b2b websites and documentation",Apache 2.0 (Roboto) / OFL (Slab)
+fp-08,Humanist Calm,wellness,"Lora","Open Sans","healthcare and wellbeing",OFL 1.1
+fp-09,Compact Data,analytics,"IBM Plex Sans","IBM Plex Sans","dense tables and bi dashboards",OFL 1.1
+fp-10,Display Impact,marketing,"Archivo Black","Archivo","hero banners and event pages",OFL 1.1
+fp-11,Classic News,publishing,"Merriweather","Public Sans","news sites and reports",OFL 1.1
+fp-12,Rounded Soft,commerce,"Quicksand","Nunito Sans","lifestyle and d2c brands",OFL 1.1
+fp-13,Grotesque Grid,swiss,"Space Grotesk","Inter","portfolios and studios",OFL 1.1
+fp-14,Handwritten Accent,collage,"Caveat","Nunito","annotations and creative campaigns",OFL 1.1
+fp-15,Condensed Sport,sport,"Oswald","Barlow","scores and fitness apps",OFL 1.1
+fp-16,Serif Heritage,museum,"EB Garamond","Crimson Pro","museums and archives",OFL 1.1
+fp-17,Wide Industrial,iot,"Saira","Saira","hardware specs and kiosk ui",OFL 1.1
+fp-18,Mono Body,terminal,"IBM Plex Mono","IBM Plex Sans","cli docs and log viewers",OFL 1.1
+fp-19,Elegant Light,fashion,"Montserrat","Raleway","beauty and jewelry",OFL 1.1
+fp-20,Casual Sans,education,"Rubik","Karla","e-learning and campus portals",OFL 1.1

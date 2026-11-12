@@ -1,0 +1,41 @@
+id,category,guideline,do,dont,severity,platform
+ux-01,navigation,Keep primary navigation under 7 items,"Group into 5-7 top-level items with a more menu for the rest","Flatten 20 links into one nav bar",high,web
+ux-02,navigation,Show current location,"Highlight the active item and keep breadcrumbs on deep pages","Rely on browser back button alone",medium,web
+ux-03,navigation,Keep tap targets at least 44px,"Pad list rows and icon buttons to 44x44 or more","Use 16px inline icons as the only tap target",high,mobile
+ux-04,forms,Label every field persistently,"Use a visible label above the input","Use placeholder text as the only label",high,all
+ux-05,forms,Validate on blur not per keystroke,"Validate a field when the user leaves it or submits","Show an error after every single character",medium,all
+ux-06,forms,Keep error messages actionable,"Say what is wrong and how to fix it","Show only 'invalid input'",high,all
+ux-07,feedback,Confirm destructive actions,"Show an undo or explicit confirm for deletes","Delete immediately with no trace",high,all
+ux-08,feedback,Give loading feedback within 100ms,"Show skeleton or spinner immediately","Leave the ui frozen after a click",high,all
+ux-09,feedback,Distinguish error warning and success states,"Use icon plus color plus text","Use color alone as the only signal",high,all
+ux-10,content,Front-load the key information,"Put conclusion or price first then detail","Bury the answer in paragraph three",medium,all
+ux-11,content,Use sentence case for ui text,"Write 'Save changes' not 'Save Changes'","Write ALL CAPS body copy",low,all
+ux-12,content,Keep line length readable,"Limit body text to 45-75 characters per line","Run full width paragraphs on desktop",medium,web
+ux-13,layout,Align to a consistent spacing scale,"Use one 4/8px based spacing scale","Mix 5px 13px and 27px gaps freely",medium,all
+ux-14,layout,Respect reading order in tabs,"Order tabs by task frequency","Order tabs alphabetically regardless of task",low,all
+ux-15,layout,Keep primary action visually distinct,"One filled primary button per view","Render three competing filled buttons",high,all
+ux-16,accessibility,Keep text contrast at least 4.5:1,"Check body text against its background","Use light gray text on white for paragraphs",high,all
+ux-17,accessibility,Support keyboard paths,"Make every action reachable by tab and enter","Require drag-only interactions",high,web
+ux-18,accessibility,Announce dynamic updates,"Use aria-live for toasts and async results","Insert status text that screen readers never see",medium,all
+ux-19,accessibility,Never rely on hover alone,"Give touch and keyboard a way to reveal actions","Hide critical actions behind hover-only menus",medium,web
+ux-20,performance,Optimize first meaningful paint,"Inline critical css and lazy-load below-fold images","Load a 2MB hero video before content",high,web
+ux-21,performance,Keep list interactions under 100ms,"Virtualize long lists","Render 10k dom rows at once",medium,web
+ux-22,empty states,Design the zero-data view,"Explain what will appear and offer the next action","Show a blank white box",medium,all
+ux-23,empty states,Make errors recoverable,"Offer retry and support links on failure pages","Show only an error code",medium,all
+ux-24,search,Support zero-result queries,"Suggest spelling corrections or nearby matches","Show only 'no results'",medium,all
+ux-25,search,Keep search reachable,"Put search in the global header on content-heavy sites","Hide search behind two menus",medium,web
+ux-26,tables,Right-align numeric columns,"Align numbers by decimal point for scanning","Left-align currency amounts with mixed magnitudes",low,web
+ux-27,tables,Freeze header rows on scroll,"Stick the table header while the body scrolls","Lose column context after two screens",medium,web
+ux-28,tables,Offer column density control,"Let users toggle comfortable and compact rows","Ship only one fixed 80px row height",low,web
+ux-29,mobile,Prioritize the thumb zone,"Place primary actions in the bottom third","Put the main cta at the very top on tall phones",high,mobile
+ux-30,mobile,Avoid hover-dependent affordances,"Show expand affordances with icons","Require long-hover to reveal menus",high,mobile
+ux-31,trust,Show security signals near sensitive fields,"Explain why ssn or payment data is needed","Ask for sensitive data with no context",high,all
+ux-32,trust,Keep urls and branding consistent after login,"Preserve the same shell and domain inside the product","Bounce to a visually different legacy portal",medium,all
+ux-33,onboarding,Defer account creation,"Let users try core value before signup","Gate the landing page behind an email wall",medium,all
+ux-34,onboarding,Progressive disclosure for complex settings,"Hide advanced options behind an explicit toggle","Present 40 settings on first launch",medium,all
+ux-35,charts,Pick chart type by question,"Use lines for trends and bars for comparison","Use pie charts for time series",medium,all
+ux-36,charts,Start bar axes at zero,"Keep bar length proportional to value","Truncate the y axis to exaggerate deltas",medium,all
+ux-37,dialogs,Keep dialogs dismissible,"Provide esc close and a visible x","Trap users in a modal with no exit",high,all
+ux-38,dialogs,Do not stack dialogs,"Use one layer and route follow-ups to a new view","Open a modal on top of a modal on top of a modal",medium,all
+ux-39,i18n,Plan for text expansion,"Reserve 30 percent width headroom for localized labels","Hard-code english widths on buttons",medium,all
+ux-40,i18n,Localize dates and numbers,"Use locale-aware formatting helpers","Format 11/12/2026 and hope both regions agree",medium,all

@@ -131,6 +131,18 @@ fusion-design lint --input customer-page.fusiondesign \
 
 **规则集（profile）**：`--profile default` = 全部 17 条；`--profile desigma` = 4 条 Token 对齐门禁规则（`--gate` 输出二值退出码，供 cowork/CI 管道集成）。显式 `--rules` 优先于 profile。
 
+## 设计智能数据集检索（issue #44）
+
+内置离线策展数据集（24 风格、24 配色、20 组 Google Fonts 字体搭配、40 条 UX 守则、12 类图表、16 条栈要点——见 [docs/DATASETS.md](DATASETS.md)），支撑确定性关键词检索：
+
+```bash
+fusion-design search --kind styles --query "dashboard data dense"
+fusion-design search --kind palettes --query "professional trust" --limit 3
+fusion-design search --kind all --query "developer terminal" --json   # 机器可读
+```
+
+`POST /api/generate` 自动复用同一数据集：prompt 命中时服务端在推理前追加 `[Design intelligence]` 建议块（风格/配色/字体/UX 守则/图表各取最优）——无需参数、确定性、零网络。
+
 ## 工作台即 shell 模块（issue #42）
 
 Web 工作台（`http://127.0.0.1:11493/workbench.html`）同时是 union-web 的标准模块，供 shell Design Hub 挂载：

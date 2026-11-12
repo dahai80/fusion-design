@@ -41,6 +41,15 @@ pub async fn handle(
         ("GET", "/api/health") => handlers::health(&state, query.contains("deep=1")).await,
         ("GET", "/api/design-systems") => handlers::design_systems(&state),
         ("GET", "/api/sessions") => handlers::sessions(&state),
+        ("GET", "/api/design-intel/search") => {
+            // issue#44：design-intelligence 数据集检索（内置 CSV，确定性打分）。
+            let q = query_param(&query, "q").unwrap_or_default();
+            let kind = query_param(&query, "kind").unwrap_or_else(|| "all".to_string());
+            let limit = query_param(&query, "limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(5);
+            handlers::design_intel_search(&q, &kind, limit)
+        }
         ("POST", "/api/generate") => match read_body(req).await {
             Ok(b) => handlers::generate(&state, &b).await,
             Err(r) => r,
@@ -121,10 +130,11 @@ pub async fn handle(
 /// 已知 API 路径判定：区分 404（路径不存在）与 405（路径存在、方法不对）。
 /// 新增路由须同步维护本清单 + docs/API.md + 契约测试。
 fn known_api_path(path: &str) -> bool {
-    const EXACT: [&str; 10] = [
+    const EXACT: [&str; 11] = [
         "/api/health",
         "/api/design-systems",
         "/api/sessions",
+        "/api/design-intel/search",
         "/api/generate",
         "/api/iterate",
         "/api/restore",

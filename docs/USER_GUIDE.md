@@ -131,6 +131,18 @@ fusion-design lint --input customer-page.fusiondesign \
 
 **Profiles**: `--profile default` = all 17 rules; `--profile desigma` = the 4 token-alignment gate rules (binary exit code via `--gate`, for cowork/CI pipeline integration). Explicit `--rules` overrides the profile.
 
+## Design-intelligence dataset search (issue #44)
+
+Curated offline datasets (24 styles, 24 palettes, 20 Google-Fonts pairings, 40 UX guidelines, 12 chart types, 16 per-stack notes — see [docs/DATASETS.md](DATASETS.md)) back a deterministic keyword search:
+
+```bash
+fusion-design search --kind styles --query "dashboard data dense"
+fusion-design search --kind palettes --query "professional trust" --limit 3
+fusion-design search --kind all --query "developer terminal" --json   # machine-readable
+```
+
+`POST /api/generate` uses the same datasets automatically: when the prompt matches, a `[Design intelligence]` block (top style, palette, typography, UX guardrails, chart hint) is appended server-side before inference — no flag, deterministic, offline.
+
 ## Workbench as a shell module (issue #42)
 
 The web workbench (`http://127.0.0.1:11493/workbench.html`) doubles as a union-web module for the shell Design Hub:

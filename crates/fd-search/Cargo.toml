@@ -1,0 +1,18 @@
+[package]
+name = "fd-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Design-intelligence data layer for fusion-design (issue #44): searchable curated CSV datasets (styles, palettes, typography, ux guidelines, charts, stacks) with deterministic keyword scoring, zero HTTP"
+
+[dependencies]
+csv = "1.4"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+
+[dev-dependencies]
+sha2 = "0.11"
+serde_json = "1"

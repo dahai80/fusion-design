@@ -38,6 +38,7 @@ fd-codegen = { path = "../fd-codegen" }
 fd-design-system = { path = "../fd-design-system" }
 fd-export = { path = "../fd-export" }
 fd-design-lint = { path = "../fd-design-lint" }
+fd-search = { path = "../fd-search" }
 fd-ecosystem = { path = "../fd-ecosystem" }
 fd-host-desk = { path = "../fd-host-desk" }
 

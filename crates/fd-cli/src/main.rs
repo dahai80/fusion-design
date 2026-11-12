@@ -225,6 +225,22 @@ pub enum Command {
         #[arg(long)]
         gate: bool,
     },
+    /// Design-intelligence dataset search (issue #44): curated styles,
+    /// palettes, typography, ux guidelines, charts, per-stack notes.
+    Search {
+        /// Dataset kind: styles | palettes | font_pairings | ux_guidelines | charts | stacks | all
+        #[arg(long, default_value = "all")]
+        kind: String,
+        /// Free-text query (keyword scoring, deterministic)
+        #[arg(long)]
+        query: String,
+        /// Max hits per query
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        /// Machine-readable JSON output (hit structs)
+        #[arg(long)]
+        json: bool,
+    },
     /// 代码导出：PenDocument → HTML / React+Tailwind / Tailwind-only
     Codegen {
         #[arg(long)]
@@ -612,6 +628,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             dry_run,
             gate,
         } => commands::lint::run(input, design_system, profile, rules, fix, dry_run, gate),
+        Command::Search {
+            kind,
+            query,
+            limit,
+            json,
+        } => commands::search::run(kind, query, limit, json),
         Command::Codegen {
             input,
             target,

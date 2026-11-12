@@ -32,6 +32,7 @@ fd-ai-adapter = { path = "../fd-ai-adapter" }
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-codegen = { path = "../fd-codegen" }
 fd-design-system = { path = "../fd-design-system" }
+fd-search = { path = "../fd-search" }
 fd-ecosystem = { path = "../fd-ecosystem" }
 
 [dev-dependencies]

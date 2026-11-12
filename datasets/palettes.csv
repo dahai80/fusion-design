@@ -1,0 +1,25 @@
+id,name,mood,primary,accent,bg,fg,success,warning,error,dark_bg,source_note
+pal-01,Trust Blue,professional,"#2563EB","#F97316","#F8FAFC","#1E293B","#16A34A","#D97706","#DC2626","#0F172A",authored in-repo
+pal-02,Indigo Calm,productive,"#4F46E5","#06B6D4","#EEF2FF","#1E1B4B","#059669","#D97706","#E11D48","#111827",authored in-repo
+pal-03,Emerald Growth,finance,"#059669","#0EA5E9","#ECFDF5","#064E3B","#059669","#F59E0B","#DC2626","#022C22",authored in-repo
+pal-04,Slate Console,developer,"#0EA5E9","#22D3EE","#0B1220","#E2E8F0","#34D399","#FBBF24","#F87171","#070D1A",authored in-repo
+pal-05,Sunset Commerce,energetic,"#EA580C","#DB2777","#FFF7ED","#431407","#16A34A","#EA580C","#DC2626","#1C0A01",authored in-repo
+pal-06,Lavender Wellness,calm,"#8B5CF6","#F472B6","#FAF5FF","#3B0764","#10B981","#F59E0B","#EF4444","#2E1065",authored in-repo
+pal-07,Forest Natural,organic,"#15803D","#B45309","#F7FEE7","#14281D","#15803D","#CA8A04","#B91C1C","#0A1A10",authored in-repo
+pal-08,Mono Slate,neutral,"#475569","#0EA5E9","#F1F5F9","#0F172A","#22C55E","#F59E0B","#EF4444","#020617",authored in-repo
+pal-09,Cherry Alert,security,"#E11D48","#38BDF8","#FFF1F2","#4C0519","#10B981","#F59E0B","#E11D48","#27040E",authored in-repo
+pal-10,Amber Studio,creative,"#D97706","#7C3AED","#FFFBEB","#451A03","#65A30D","#F59E0B","#DC2626","#1C1002",authored in-repo
+pal-11,Cyan Med,clinical,"#0891B2","#22C55E","#ECFEFF","#083344","#22C55E","#F59E0B","#EF4444","#041E25",authored in-repo
+pal-12,Rose Editorial,publishing,"#BE123C","#78716C","#FEF2F2","#1C0A0C","#65A30D","#D97706","#BE123C","#200509",authored in-repo
+pal-13,Ocean Deep,travel,"#0369A1","#F59E0B","#F0F9FF","#082F49","#16A34A","#F59E0B","#DC2626","#020C17",authored in-repo
+pal-14,Graphite Luxe,luxury,"#A16207","#E7C878","#18181B","#FAFAF9","#4D7C0F","#CA8A04","#B91C1C","#09090B",authored in-repo
+pal-15,Mint Kids,playful,"#10B981","#F472B6","#F0FDF4","#064E3B","#10B981","#FB923C","#F87171","#022C22",authored in-repo
+pal-16,Cobalt Kiosk,display,"#1D4ED8","#FACC15","#FFFFFF","#0F172A","#16A34A","#F59E0B","#DC2626","#0A1022",authored in-repo
+pal-17,Plum Analytics,data,"#7E22CE","#14B8A6","#FAF5FF","#2E1065","#0D9488","#F59E0B","#E11D48","#1E0A2E",authored in-repo
+pal-18,Sand Paper,craft,"#B45309","#57534E","#FEFCE8","#292524","#4D7C0F","#CA8A04","#991B1B","#1C1917",authored in-repo
+pal-19,Steel Industrial,iot,"#64748B","#0284C7","#F8FAFC","#1E293B","#0284C7","#F59E0B","#DC2626","#0B1220",authored in-repo
+pal-20,Magenta Launch,startup,"#DB2777","#8B5CF6","#FDF2F8","#500724","#10B981","#FBBF24","#E11D48","#2B0616",authored in-repo
+pal-21,Olive Campus,education,"#4D7C0F","#0EA5E9","#F7FEE7","#1A2E05","#4D7C0F","#F59E0B","#DC2626","#0C1605",authored in-repo
+pal-22,Ice Fitness,sport,"#0284C7","#F97316","#F0F9FF","#0C4A6E","#22C55E","#F59E0B","#EF4444","#020C17",authored in-repo
+pal-23,Bronze Heritage,museum,"#92400E","#57534E","#FAFAF5","#1C1917","#3F6212","#B45309","#991B1B","#12100D",authored in-repo
+pal-24,Neon Game,entertainment,"#A21CAF","#22D3EE","#0A0A0F","#F5F5F4","#22C55E","#FACC15","#F43F5E","#050508",authored in-repo

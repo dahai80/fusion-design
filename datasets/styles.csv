@@ -1,0 +1,25 @@
+id,name,category,keywords,palette_hint,effects,best_for,avoid_for,dark_ok,complexity
+st-01,Swiss Minimal,minimal,"grid, whitespace, helvetica, objective, hierarchy, neutral",neutral gray + single red accent,none or subtle fade,enterprise dashboards,editorial tooling,yes,low
+st-02,Neumorphism,soft-ui,"extruded, soft shadow, tactile, muted, monochrome",single gray family +- shadow tints,soft dual shadows,media players,toy control panels with dense data,yes,medium
+st-03,Glassmorphism,translucent,"frosted, blur, layered, depth, translucent",vivid gradient behind blur,backdrop blur + float,hero landing pages,dense tables,yes,medium
+st-04,Brutalist,raw,"bold, stark, oversized type, unpolished, high contrast",black white + acid accent,hover inversion,portfolio sites,banking apps,yes,low
+st-05,Claymorphism,soft-3d,"puffy, rounded, pastel, friendly, 3d shadow",pastel family + white,inflate on press,kids products,legal or medical tooling,yes,medium
+st-06,Dark Console,developer,"terminal, mono, dense, keys, code, low light",near-black bg + neon accent,scanline or glow sparingly,devtools and monitors,marketing pages,yes,low
+st-07,Editorial Print,publishing,"serif, columns, drop cap, baseline grid, masthead",ivory bg + ink + one spot color,none,articles and reports,realtime dashboards,yes,medium
+st-08,Bento Grid,modular,"cards, tiles, modular, apple keynote, compact",light gray bg + white cards + colored icons,scale on hover,product overview pages,long-form reading,yes,low
+st-09,Neo Retail,commerce,"price, urgency, badges, carousel, conversion",white bg + brand red/orange CTA,sticky buy bar,e-commerce product pages,b2b settings panels,yes,medium
+st-10,Soft Admin,enterprise,"form, table, filter, calm, productive, low contrast",slate + indigo accent,skeleton loaders,back-office SaaS,games,yes,low
+st-11,Retro Terminal,retro,"crt, phosphor, ascii, 8-bit, scanline",black + green or amber,phosphor glow,nostalgia marketing,data entry,yes,low
+st-12,Organic Natural,wellness,"earthy, rounded, beige, leaf, calm, breathing",sand + moss + terracotta,slow crossfade,wellness and food brands,fintech,yes,low
+st-13,Vivid Gradient,startup,"mesh gradient, vibrant, energetic, launch, gen-z",magenta violet cyan mesh,animated gradient,launch pages,government forms,yes,medium
+st-14,Flat Corporate,safe,"flat, blue, professional, predictable, clean",corporate blue + grays,none,b2b websites,creative portfolios,yes,low
+st-15,Luxury Dark,fashion,"gold, black, serif, premium, moody, exclusive",charcoal + gold foil,fade + parallax hint,luxury brands,children products,yes,medium
+st-16,Playful Cartoon,kids,"rounded, bright, bouncy, mascot, sticker",candy colors,oversized bounce,kids and consumer apps,medical records,yes,medium
+st-17,Data Dense,analytics,"table, sparkline, kpi, compact, grid, numbers",white + blue scale + semantic status,none,BI dashboards,landing pages,yes,low
+st-18,Skeuomorphic Texture,realism,"leather, paper, knob, depth, physical",warm browns + metallic,tactile toggle,audio production apps,modern saas,yes,high
+st-19,Mobile First Card,app,"thumb zone, list, feed, avatar, skeleton",white + system blue,pull to refresh,mobile app flows,desktop kiosks,yes,low
+st-20,Kiosk Ambient,display,"large type, idle, wayfinding, glanceable",high contrast brand + white,slow loop animation,lobbies and signage,form filling,yes,low
+st-21,Cyber Security,trust,"shield, dark, alert, monospace, scan",deep navy + cyan + alert red,pulse on alert,security consoles,recipe sites,yes,medium
+st-22,Paper Craft,collage,"texture, torn edge, sticker, collage, handmade",cream + craft paper tones,slight rotate on hover,creative campaigns,clinical tools,yes,medium
+st-23,Memphis Revival,retro,"squiggle, geometric confetti, 80s, playful",white + bold primaries,wiggle on hover,event pages,audit tools,yes,medium
+st-24,Monoline Tech,clean,"outline icons, thin stroke, engineered, light",white + steel blue,draw-in strokes,iot and hardware specs,luxury retail,yes,low

@@ -139,6 +139,40 @@ pub fn design_systems(state: &Arc<AppState>) -> Resp {
 }
 
 /// 设计系统 Token CSS（画布 ApplyTokens 消费；theme=light|dark）。
+// issue#44：design-intelligence 数据集进程内单例（内置 CSV，只读）。
+static DESIGN_INTEL: std::sync::OnceLock<fd_search::DesignIntel> = std::sync::OnceLock::new();
+
+/// GET /api/design-intel/search?q=&kind=&limit=（issue #44）。
+/// 数据集检索：确定性关键词打分，零 HTTP 零模型。
+pub fn design_intel_search(q: &str, kind: &str, limit: usize) -> Resp {
+    let q = q.trim();
+    if q.is_empty() {
+        return err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "q",
+            "q is required (non-empty free-text query)",
+        );
+    }
+    let limit = limit.clamp(1, 50);
+    let intel = DESIGN_INTEL.get_or_init(fd_search::DesignIntel::embedded);
+    match intel.search_kind(kind, q, limit) {
+        Some(hits) => ok_json(serde_json::json!({
+            "kind": kind,
+            "q": q,
+            "count": hits.len(),
+            "hits": hits,
+        })),
+        None => err_field(
+            hyper::StatusCode::BAD_REQUEST,
+            "kind",
+            &format!(
+                "unknown kind: {kind} (valid: {})",
+                fd_search::KINDS.to_vec().join(" | ") + " | all"
+            ),
+        ),
+    }
+}
+
 pub fn tokens(state: &Arc<AppState>, ds: &str, theme: &str) -> Resp {
     let mut reg = state.registry.lock().unwrap();
     let theme = match theme {
@@ -216,6 +250,19 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let model = resolve_model(&req.model);
     tracing::info!(page = %page, model = %model, "api/generate: 文生 UI");
 
+    // issue#44：设计智能上下文注入——按用户 prompt 检索内置数据集（风格/配色/
+    // 字体/UX 守则/图表），命中则追加结构化建议块。确定性检索，无模型无网络。
+    let base_prompt = match DESIGN_INTEL
+        .get_or_init(fd_search::DesignIntel::embedded)
+        .recommend(&req.prompt, 3)
+    {
+        Some(block) => {
+            tracing::info!("api/generate: design-intel context injected");
+            format!("{}\n{block}", req.prompt)
+        }
+        None => req.prompt.clone(),
+    };
+
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -232,11 +279,11 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     for attempt in 1..=GEN_ATTEMPTS {
         // 重试须变化 prompt：gateway 对同 prompt 有缓存，同串重试只会拿到同一份坏输出。
         let prompt = if attempt == 1 {
-            req.prompt.clone()
+            base_prompt.clone()
         } else {
             format!(
                 "{}\n（第 {attempt} 次尝试，请严格输出合法完整 JSON）",
-                req.prompt
+                base_prompt
             )
         };
         match skills.text_to_ui_async(&prompt, &page).await {
@@ -1788,6 +1835,47 @@ mod contract_tests {
             .find(|t| t["name"] == "color.bg")
             .expect("color.bg");
         assert_eq!(bg["value"], "#1C1C1E", "dark overlay applied: {bg}");
+    }
+
+    #[tokio::test]
+    async fn contract_design_intel_search() {
+        // issue#44：GET /api/design-intel/search 数据集检索契约。
+
+        // 空 q → 400 + field=q。
+        let v = json_of(design_intel_search("", "all", 5)).await;
+        assert_eq!(v["field"], "q", "{v}");
+        let v = json_of(design_intel_search("   ", "all", 5)).await;
+        assert_eq!(v["field"], "q", "{v}");
+
+        // 未知 kind → 400 + field=kind（带合法值提示）。
+        let v = json_of(design_intel_search("dashboard", "nope", 5)).await;
+        assert_eq!(v["field"], "kind", "{v}");
+        assert!(v["error"].as_str().unwrap_or_default().contains("styles"));
+
+        // 命中：{kind, q, count, hits[{kind,id,title,detail,score}]}，score 降序。
+        let v = json_of(design_intel_search("dashboard dark console", "styles", 3)).await;
+        assert!(v["error"].is_null(), "{v}");
+        assert_eq!(v["kind"], "styles");
+        assert_eq!(v["q"], "dashboard dark console");
+        let hits = v["hits"].as_array().expect("hits array");
+        assert!(!hits.is_empty(), "{v}");
+        assert!(hits.len() <= 3, "limit respected: {v}");
+        let first = &hits[0];
+        for k in ["kind", "id", "title", "detail", "score"] {
+            assert!(!first[k].is_null(), "hit 缺 {k}: {v}");
+        }
+        for pair in hits.windows(2) {
+            assert!(
+                pair[0]["score"].as_i64().unwrap_or(0) >= pair[1]["score"].as_i64().unwrap_or(0)
+            );
+        }
+
+        // all 混合检索返回多 kind；limit 缺省 5、非法值回落。
+        let v = json_of(design_intel_search("developer dashboard dark", "all", 20)).await;
+        let hits = v["hits"].as_array().expect("hits array");
+        let kinds: std::collections::HashSet<&str> =
+            hits.iter().filter_map(|h| h["kind"].as_str()).collect();
+        assert!(kinds.len() >= 2, "cross-kind hits: {kinds:?}");
     }
 
     #[tokio::test]

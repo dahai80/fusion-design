@@ -54,6 +54,7 @@ Success responses are plain JSON objects; `document` fields are **JSON strings**
 | `GET /api/tokens?ds=<id>&theme=light\|dark` | — | `{design_system, theme, css, tokens[{name,value}]}` — `css` is CSS custom properties; `tokens` is the name/value list for the token panel (dark theme = light base merged with dark overlay, v0.1.26). 404 `field:"ds"` if unknown. GET-only; other methods → 405 with hint |
 | `GET /api/artifacts` | query: `tab=all\|mine\|shared`, `page`, `page_size≤100`, `sort`, `q` | artifacts page payload (fusion-artifacts-engine proxy) |
 | `GET /api/artifact/<id>?version=<n>` | — | artifact detail |
+| `GET /api/design-intel/search?q=<text>&kind=<k>&limit=<n>` | query: `q` (required, non-empty), `kind` (`styles`\|`palettes`\|`font_pairings`\|`ux_guidelines`\|`charts`\|`stacks`\|`all`, default `all`), `limit` (1-50, default 5) | `{kind, q, count, hits[{kind,id,title,detail,score}]}` — curated dataset search (issue #44), deterministic keyword scoring, zero model/network. 400 `field:"q"/"kind"` |
 | `GET /api/session/<id>` | — | `{session, current_version, versions[{version,label,created_at,node_count}]}` |
 | `POST /api/session/<id>/mutate` | `node_id` (non-empty) + at least one of `x`,`y`,`w`,`h`,`fill`,`stroke`,`radius`,`font_size`,`opacity` | — | `{session, current_version, document}` — direct node patch on the current version (canvas drag / token panel apply, no model round-trip); pushes a new version labeled `编辑：<node_id>`. 400 `field:"node_id"/"body"`, 404 `field:"session"/"node_id"` |
 | `GET /api/version/<id>/<n>` | — | `{version, document}` |
@@ -62,7 +63,7 @@ Success responses are plain JSON objects; `document` fields are **JSON strings**
 
 | Endpoint | Required fields | Optional fields | Response |
 |----------|-----------------|-----------------|----------|
-| `POST /api/generate` | `prompt` (non-empty string) | `page`, `model`, `design_system` | `{session, current_version, document}` |
+| `POST /api/generate` | `prompt` (non-empty string) | `page`, `model`, `design_system` | `{session, current_version, document}` — when the prompt matches the design-intelligence datasets, a `[Design intelligence]` context block (top style / palette / typography / ux guardrails / chart, issue #44) is appended server-side before inference |
 | `POST /api/iterate` | `session`, `instruction` (non-empty) | `model`, `design_system`, `region: [node_id,…]` | `{session, current_version, document}` — with `region`, only selected nodes are sent to the model and the server merges results back; unlisted nodes are guaranteed unchanged; empty model output → 502 |
 | `POST /api/restore` | `image_base64` (pure base64, **no** `data:` prefix) | `hint`, `page`, `model`, `session`, `design_system` | `{session, current_version, document}` — vision model, fixed default |
 | `POST /api/rollback` | `session`, `version` | — | `{session, current_version, document}` — moves the version pointer; no new version is created |

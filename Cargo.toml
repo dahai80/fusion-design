@@ -24,6 +24,9 @@ members = [
     # issue#31/DS-0：Design web 服务面（生成/迭代/还原/导出 API + WASM 画布托管 + D1 工作台）。
     # hyper 仅作入站监听（127.0.0.1:11493），出站推理全部经 fd-ai-adapter，离线约束不破。
     "crates/fd-server",
+    # issue#44：design-intelligence 数据层（内置 CSV 数据集 + 确定性关键词检索），
+    # 零 HTTP 零模型，供 fd-server 生成上下文注入与 fd-cli search 子命令消费。
+    "crates/fd-search",
     # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
     "vendor/openpencil/crates/op-ai",
 ]
@@ -32,7 +35,7 @@ members = [
 exclude = ["vendor/openpencil"]
 
 [workspace.package]
-version = "0.1.28"
+version = "0.1.29"
 edition = "2021"
 rust-version = "1.94"
 license = "Apache-2.0"
