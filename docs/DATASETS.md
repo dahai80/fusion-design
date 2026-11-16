@@ -1,3 +1,18 @@
+---
+doc_id: fusion-design/datasets
+product: fusion-design
+class: platform
+entry: developer
+doc_type: guide
+title: { zh: "设计数据集目录", en: "Design dataset catalog" }
+audience: developer
+status: draft
+version: 0.1.29
+updated: 2026-11-12
+owner: "@dahai"
+source_of_truth:
+  - docs/DATASETS.md
+---
 # Design datasets (issue #44)
 
 Curated design-intelligence data powering `fd-search`, the fd-server
