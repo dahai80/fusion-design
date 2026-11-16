@@ -16,6 +16,6 @@ path = "src/lib.rs"
 # fd-ai-adapter re-export html_to_pen_document 保持调用方 fd_cli 不变。
 [dependencies]
 fd-canvas-core = { path = "../fd-canvas-core" }
-scraper = "0.22"
+scraper = "0.29"
 anyhow = { workspace = true }
 tracing = { workspace = true }
