@@ -6,6 +6,15 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+    # docs-only PRs skip the full test suite (md files carry no product code)
+    paths-ignore:
+      - "**.md"
+
+# Cancel superseded runs on the same ref (rapid PR iterations / quick merges);
+# tag pushes get their own group so release-pack is never canceled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
