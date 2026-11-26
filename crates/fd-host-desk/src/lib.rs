@@ -1,42 +1,44 @@
-//! Fusion-Design 宿主桥 — 嵌入 Fusion-Desk WKWebView 的通信层。
+//! Fusion-Design host bridge — the communication layer embedded in the Fusion-Desk WKWebView.
 //!
-//! 对应 PRD 展示层「Fusion-Desk 内置 WKWebView 渲染无限矢量画布」。
-//! 负责：
-//! - 加载编译后的前端静态资源（file:// 协议，禁止网络）
-//! - 提供 WKWebView ↔ 本地后端服务的消息转发
-//! - 拦截所有外网请求（离线硬约束）
+//! Corresponds to the PRD presentation layer: "Fusion-Desk embeds a WKWebView rendering an infinite
+//! vector canvas".
+//! Responsibilities:
+//! - Load the compiled frontend static assets (file:// protocol, no network)
+//! - Provide message forwarding between the WKWebView ↔ local backend services
+//! - Intercept all external network requests (offline hard constraint)
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// 宿主桥协议版本。studio↔wasm 版本错配时据此协商/告警。
-/// 旧消息无此字段 → serde default 填 0 → 视为 legacy 兼容。
+/// Host bridge protocol version. Used to negotiate/warn on studio↔wasm version mismatches.
+/// Old messages without this field → serde default fills 0 → treated as legacy-compatible.
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
 
-/// WKWebView 消息方向。
+/// WKWebView message direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageDirection {
-    /// WKWebView → 本地后端
+    /// WKWebView → local backend
     WebViewToBackend,
-    /// 本地后端 → WKWebView
+    /// Local backend → WKWebView
     BackendToWebView,
 }
 
-/// 宿主桥消息体。
+/// Host bridge message body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostMessage {
     pub direction: MessageDirection,
     pub kind: String,
     pub payload: serde_json::Value,
-    /// 桥协议版本。缺省 0 = legacy（旧 studio/wasm 未带版本）。
-    /// A2：商用前立版本号，错配可定位而非静默丢功能。
+    /// Bridge protocol version. Default 0 = legacy (old studio/wasm carried no version).
+    /// A2: version numbers were established pre-commercialization so mismatches are locatable
+    /// instead of silently dropping features.
     #[serde(default)]
     pub schema_version: u32,
 }
 
 impl HostMessage {
-    /// 构造当前版本消息（自动填 HOST_PROTOCOL_VERSION）。
+    /// Build a current-version message (HOST_PROTOCOL_VERSION filled automatically).
     pub fn new(
         direction: MessageDirection,
         kind: impl Into<String>,
@@ -50,16 +52,17 @@ impl HostMessage {
         }
     }
 
-    /// 协议版本校验。返回 Ok 表示可处理；Err 表示版本错配需显式回传错误。
-    /// 0（legacy）放行（向后兼容）；高于当前版本 → 拒绝（对方比本端新）。
+    /// Protocol version check. Ok means processable; Err means a version mismatch that requires
+    /// sending back an explicit error.
+    /// 0 (legacy) passes (backward compatible); above the current version → reject (the peer is newer).
     pub fn check_protocol(&self) -> Result<(), HostConfigError> {
         if self.schema_version == 0 {
-            tracing::debug!("HostMessage legacy（无版本字段），按兼容处理");
+            tracing::debug!("HostMessage legacy (no version field), handled with compatibility");
             return Ok(());
         }
         if self.schema_version > HOST_PROTOCOL_VERSION {
             tracing::warn!(
-                "HostMessage 版本 {} 高于本端支持 {}，可能丢字段",
+                "HostMessage version {} is above the supported {}, fields may be lost",
                 self.schema_version,
                 HOST_PROTOCOL_VERSION
             );
@@ -72,19 +75,19 @@ impl HostMessage {
     }
 }
 
-/// 宿主桥配置。
+/// Host bridge configuration.
 #[derive(Debug, Clone)]
 pub struct HostBridgeConfig {
-    /// 前端静态资源目录（file:// 加载入口）。
+    /// Frontend static assets directory (file:// load entry).
     pub frontend_dir: PathBuf,
-    /// 本地后端服务 endpoint（必须 127.0.0.1）。
+    /// Local backend service endpoint (must be 127.0.0.1).
     pub backend_endpoint: String,
-    /// 是否拦截所有外网请求（默认 true，离线硬约束）。
+    /// Whether to intercept all external requests (default true, offline hard constraint).
     pub block_external: bool,
 }
 
 impl HostBridgeConfig {
-    /// 校验配置合规性（离线硬约束）。
+    /// Validate the configuration (offline hard constraint).
     pub fn validate(&self) -> Result<(), HostConfigError> {
         if !self.frontend_dir.exists() {
             return Err(HostConfigError::FrontendMissing(self.frontend_dir.clone()));
@@ -93,26 +96,26 @@ impl HostBridgeConfig {
             return Err(HostConfigError::IndexMissing(self.frontend_dir.clone()));
         }
         if !self.block_external {
-            tracing::warn!("block_external=false 违反离线硬约束");
+            tracing::warn!("block_external=false violates the offline hard constraint");
             return Err(HostConfigError::OfflineConstraintViolated);
         }
         validate_localhost(&self.backend_endpoint)?;
         Ok(())
     }
 
-    /// 返回前端入口的 file:// URL。
+    /// Return the file:// URL of the frontend entry.
     pub fn index_url(&self) -> String {
         let path = self.frontend_dir.join("index.html");
         format!("file://{}", path.display())
     }
 }
 
-/// 校验 endpoint 为 localhost。
+/// Validate that the endpoint is localhost.
 fn validate_localhost(endpoint: &str) -> Result<(), HostConfigError> {
     let url =
         url::Url::parse(endpoint).map_err(|e| HostConfigError::InvalidEndpoint(e.to_string()))?;
     let host = url.host_str().unwrap_or("");
-    // url::Url 对 IPv6 返回形如 "[::1]"，需去方括号比对
+    // url::Url returns IPv6 hosts like "[::1]"; strip the brackets before comparing
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host != "127.0.0.1" && host != "localhost" && host != "::1" {
         return Err(HostConfigError::PublicEndpoint(host.to_string()));
@@ -122,52 +125,54 @@ fn validate_localhost(endpoint: &str) -> Result<(), HostConfigError> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostConfigError {
-    #[error("前端目录不存在: {0}")]
+    #[error("frontend directory does not exist: {0}")]
     FrontendMissing(PathBuf),
-    #[error("前端目录缺少 index.html: {0}")]
+    #[error("frontend directory is missing index.html: {0}")]
     IndexMissing(PathBuf),
-    #[error("无效 endpoint: {0}")]
+    #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
-    #[error("违反离线约束：endpoint host {0} 非 localhost")]
+    #[error("offline constraint violated: endpoint host {0} is not localhost")]
     PublicEndpoint(String),
-    #[error("违反离线硬约束：block_external=false，离线模式不可关闭")]
+    #[error("offline hard constraint violated: block_external=false, offline mode cannot be disabled")]
     OfflineConstraintViolated,
-    /// A2：桥协议版本高于本端支持，需显式回传错误而非静默丢功能。
-    #[error("桥协议版本 {got} 高于本端支持 {supported}")]
+    /// A2: the bridge protocol version is above what this side supports; an explicit error must be
+    /// sent back instead of silently dropping features.
+    #[error("bridge protocol version {got} is above the supported {supported}")]
     ProtocolTooNew { got: u32, supported: u32 },
 }
 
-/// 外网请求拦截器（供 WKWebView configuration 注入）。
+/// External request interceptor (for injection into the WKWebView configuration).
 ///
-/// 在真实 Swift 宿主中，对应 `WKURLSchemeHandler` 注入；
-/// 此处提供 Rust 侧的判定逻辑，供后端服务复用。
+/// In the real Swift host this corresponds to a `WKURLSchemeHandler` injection;
+/// here the Rust-side decision logic is provided for reuse by backend services.
 ///
-/// H-A17 离线分工：此函数判 **URL scheme/host**（file:// 放行、javascript:/data:
-/// 拒绝、http(s) 仅 localhost），供 WKWebView 前端资源拦截；fd-ai-adapter 的
-/// `validate_localhost` 判 **MLX endpoint host**（回环+RFC1918+链路本地），供
-/// 后端 HTTP 出站。二者非重复——分守前端资源与后端推理两道离线边界。出站 HTTP
-/// 库的全局约束由 `Scripts/deny-external-http.sh` CI 门禁强制（reqwest 等仅限
-/// fd-ai-adapter）。
+/// H-A17 offline division of labor: this function judges the **URL scheme/host** (file:// allowed,
+/// javascript:/data: rejected, http(s) only localhost) for WKWebView frontend asset interception;
+/// fd-ai-adapter's `validate_localhost` judges the **MLX endpoint host** (loopback+RFC1918+
+/// link-local) for backend HTTP egress. The two are not duplicates — they guard the two separate
+/// offline boundaries of frontend assets and backend inference. The global constraint on outbound
+/// HTTP libraries is enforced by the `Scripts/deny-external-http.sh` CI gate (reqwest etc. allowed
+/// only in fd-ai-adapter).
 pub fn is_external_url(url: &str) -> bool {
-    // F2/离线强制：allowlist 判定。
-    //   内部 = file://（本地资源，离线前端入口）或 http/https 且 host∈白名单。
-    //   外部 = javascript:/data:（无 host 的危险 scheme，XSS 载体）、解析失败。
-    // 旧实现判无 host 的 javascript:/data: 为"内部/允许"，是 XSS 放行漏洞。
+    // F2/offline enforcement: allowlist decision.
+    //   Internal = file:// (local assets, the offline frontend entry) or http/https with host on the allowlist.
+    //   External = javascript:/data: (dangerous host-less schemes, XSS carriers), and parse failures.
+    // The old implementation classified host-less javascript:/data: as "internal/allowed" — an XSS pass-through hole.
     match url::Url::parse(url) {
         Ok(u) => {
             let scheme = u.scheme();
             if scheme == "file" {
-                return false; // 本地文件资源，离线允许
+                return false; // local file asset, allowed offline
             }
             let host = u.host_str().unwrap_or("");
             let internal_host = host == "127.0.0.1" || host == "localhost" || host == "::1";
             !(scheme == "http" || scheme == "https") || !internal_host
         }
-        Err(_) => true, // 非法 URL 一律视为外网，保守拒绝
+        Err(_) => true, // invalid URLs are always treated as external; reject conservatively
     }
 }
 
-/// 返回前端静态资源目录的合规校验助手。
+/// Compliance-check helper for the frontend static assets directory.
 pub fn ensure_frontend_dir(dir: &Path) -> anyhow::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -198,12 +203,12 @@ mod tests {
 
     #[test]
     fn is_external_url_allows_file_rejects_dangerous_schemes() {
-        // file:// 本地资源：离线允许
+        // file:// local asset: allowed offline
         assert!(!is_external_url("file:///path/index.html"));
-        // F2 回归：javascript:/data: 无 host 危险 scheme 必须判外网（旧实现放行 = XSS 漏洞）
+        // F2 regression: the host-less dangerous schemes javascript:/data: must be judged external (the old implementation allowed them = XSS hole)
         assert!(is_external_url("javascript:alert(1)"));
         assert!(is_external_url("data:text/html,<script>alert(1)</script>"));
-        // 非法 URL 保守判外网
+        // Invalid URLs are conservatively judged external
         assert!(is_external_url("not-a-url"));
     }
 
@@ -252,7 +257,7 @@ mod tests {
         cfg.validate().unwrap();
     }
 
-    // F2 回归：离线是硬约束，block_external=false 必须拒绝启动（旧实现仅 warn）。
+    // F2 regression: offline is a hard constraint, block_external=false must refuse startup (the old implementation only warned).
     #[test]
     fn config_validate_rejects_block_external_false() {
         let tmp = tempdir().unwrap();
@@ -264,7 +269,7 @@ mod tests {
         };
         assert!(
             cfg.validate().is_err(),
-            "block_external=false 必须拒绝（离线硬约束）"
+            "block_external=false must be rejected (offline hard constraint)"
         );
     }
 
@@ -295,7 +300,7 @@ mod tests {
         let msg = HostMessage::new(
             MessageDirection::WebViewToBackend,
             "ai.generate",
-            serde_json::json!({"prompt": "登录页"}),
+            serde_json::json!({"prompt": "login page"}),
         );
         assert_eq!(msg.schema_version, HOST_PROTOCOL_VERSION);
         let s = serde_json::to_string(&msg).unwrap();
@@ -304,16 +309,16 @@ mod tests {
         assert_eq!(m2.schema_version, HOST_PROTOCOL_VERSION);
     }
 
-    // A2 回归：旧消息无 schema_version 字段 → default 0 = legacy，check_protocol 放行。
+    // A2 regression: old messages without a schema_version field → default 0 = legacy, check_protocol lets them pass.
     #[test]
     fn host_message_legacy_no_version_passes() {
         let s = r#"{"direction":"WebViewToBackend","kind":"ai.generate","payload":{}}"#;
         let m: HostMessage = serde_json::from_str(s).unwrap();
         assert_eq!(m.schema_version, 0);
-        assert!(m.check_protocol().is_ok(), "legacy 消息应兼容放行");
+        assert!(m.check_protocol().is_ok(), "legacy messages should pass for compatibility");
     }
 
-    // A2 回归：版本高于本端 → check_protocol 报错（不静默丢功能）。
+    // A2 regression: a version above ours → check_protocol errors (no silent feature loss).
     #[test]
     fn host_message_protocol_too_new_rejected() {
         let m = HostMessage {
@@ -322,6 +327,6 @@ mod tests {
             payload: serde_json::json!({}),
             schema_version: HOST_PROTOCOL_VERSION + 1,
         };
-        assert!(m.check_protocol().is_err(), "高于本端的版本必须拒绝");
+        assert!(m.check_protocol().is_err(), "a version above ours must be rejected");
     }
 }

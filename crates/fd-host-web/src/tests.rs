@@ -1,6 +1,6 @@
 use super::*;
 
-// OPS-13：LogRingBuffer 纯逻辑回归（不触 wasm console / performance，host 目标测）。
+// OPS-13: LogRingBuffer pure-logic regression (no wasm console / performance touched; tested on the host target).
 #[test]
 fn log_ring_buffer_push_and_dump() {
     let mut buf = LogRingBuffer::new();
@@ -34,9 +34,9 @@ fn log_ring_buffer_overflow_drops_oldest() {
     assert_eq!(
         dump.len(),
         LOG_RING_CAPACITY,
-        "超容量应丢最旧保留 capacity 条"
+        "over capacity should drop the oldest and keep exactly capacity entries"
     );
-    assert_eq!(dump[0].msg, format!("m{}", 50), "最旧 50 条应被丢弃");
+    assert_eq!(dump[0].msg, format!("m{}", 50), "the oldest 50 entries should be dropped");
     assert_eq!(
         dump.last().unwrap().msg,
         format!("m{}", LOG_RING_CAPACITY + 49)
@@ -56,7 +56,7 @@ fn log_ring_buffer_clear_empties() {
     assert!(buf.dump().is_empty());
 }
 
-// OPS-13：thread_local LOG_RING 隔离——log.capture.dump clear 语义。
+// OPS-13: thread_local LOG_RING isolation — log.capture.dump clear semantics.
 #[test]
 fn log_ring_thread_local_dump_and_clear() {
     LOG_RING.with(|r| r.borrow_mut().clear());
@@ -86,77 +86,77 @@ fn pen_document_render_json_roundtrip() {
     assert_eq!(doc2.pages[0].nodes[0].id, "n1");
 }
 
-// E-39 回归：sanitize_css_color 剔除可逃逸 CSS 属性边界的 `;{}`（不触发 web_sys）。
-// 危险 url()/expression() 路径走 web_sys console（原生测试不可用），仅验安全净化。
+// E-39 regression: sanitize_css_color strips `;{}` that can escape CSS attribute boundaries (no web_sys touched).
+// The dangerous url()/expression() paths go through web_sys console (unavailable in native tests); only safe sanitization is verified.
 #[test]
 fn sanitize_css_color_strips_escape_chars() {
     assert_eq!(sanitize_css_color("#ff0000"), "#ff0000");
     assert_eq!(sanitize_css_color("rgb(255, 0, 0)"), "rgb(255, 0, 0)");
-    // 逃逸字符 ; { } < > 应被剔除，保留颜色主体。
+    // Escape characters ; { } < > should be stripped, keeping the color body.
     let out = sanitize_css_color("red;} * { background:#fff }");
-    assert!(!out.contains(';'), "应剔除分号防属性逃逸");
-    assert!(!out.contains('{'), "应剔除左花括号");
-    assert!(!out.contains('}'), "应剔除右花括号");
-    assert!(out.contains("red"), "保留合法颜色名");
-    assert!(out.contains("background:#fff"), "保留未逃逸的声明");
+    assert!(!out.contains(';'), "semicolons should be stripped to prevent attribute escape");
+    assert!(!out.contains('{'), "left brace should be stripped");
+    assert!(!out.contains('}'), "right brace should be stripped");
+    assert!(out.contains("red"), "valid color names should be kept");
+    assert!(out.contains("background:#fff"), "unescaped declarations should be kept");
 }
 
-// E-40/P3 回归：sanitize_token_css 须剥 /* */ 注释后再匹配关键字，
-// 防 `u/**/rl(` 等注释拆词绕过 url()/@import/expression()/javascript: 检测。
-// 用 _inner 纯逻辑（不触发 web_sys::console，原生测试安全）。
+// E-40/P3 regression: sanitize_token_css must strip /* */ comments before keyword matching,
+// preventing comment-splitting bypasses like `u/**/rl(` evading the url()/@import/expression()/javascript: checks.
+// Uses the _inner pure logic (does not trigger web_sys::console; safe in native tests).
 #[test]
 fn sanitize_token_css_strips_comment_obfuscated_danger() {
-    // 注释拆词的 url() 必须被剔除。
+    // Comment-split url() must be stripped.
     let bad = "--bg: u/**/rl(http://evil/x.png)";
     let (out, stripped) = sanitize_token_css_inner(bad);
-    assert!(!out.contains("evil"), "注释拆词 url() 必须被剔除");
-    assert_eq!(stripped, 1, "危险行整体剔除，计 1 行");
-    assert!(out.is_empty(), "危险行整体剔除后应为空");
-    // 注释拆词的 @import 必须被剔除。
+    assert!(!out.contains("evil"), "comment-split url() must be stripped");
+    assert_eq!(stripped, 1, "the dangerous line is dropped whole, counted as 1");
+    assert!(out.is_empty(), "after dropping the dangerous line the output should be empty");
+    // Comment-split @import must be stripped.
     let bad2 = "@imp/**/ort url(http://evil.css)";
     let (out2, s2) = sanitize_token_css_inner(bad2);
-    assert!(!out2.contains("evil"), "注释拆词 @import 必须被剔除");
+    assert!(!out2.contains("evil"), "comment-split @import must be stripped");
     assert_eq!(s2, 1);
-    // 注释拆词的 expression() 必须被剔除。
+    // Comment-split expression() must be stripped.
     let bad3 = "--x: expr/**/ession(alert(1))";
     let (out3, s3) = sanitize_token_css_inner(bad3);
-    assert!(!out3.contains("alert"), "注释拆词 expression() 必须被剔除");
+    assert!(!out3.contains("alert"), "comment-split expression() must be stripped");
     assert_eq!(s3, 1);
 }
 
 #[test]
 fn sanitize_token_css_preserves_safe_token_declarations() {
-    // E-40 正向：合法 token 声明（含合法注释说明）应保留，stripped=0。
-    let safe = "--color-bg: #ffffff; /* 背景白 */";
+    // E-40 positive: valid token declarations (with a harmless explanatory comment) should be kept, stripped=0.
+    let safe = "--color-bg: #ffffff; /* white background */";
     let (out, stripped) = sanitize_token_css_inner(safe);
     assert!(
         out.contains("--color-bg: #ffffff;"),
-        "合法声明应保留: {out}"
+        "valid declarations should be kept: {out}"
     );
-    assert_eq!(stripped, 0, "无危险关键字不应剔除");
-    // 安全注释行可保留（不命中危险关键字）。
-    let safe2 = "/* 仅注释 */\n--space-1: 4px;";
+    assert_eq!(stripped, 0, "no dangerous keywords, nothing should be stripped");
+    // Safe comment lines can be kept (no dangerous keyword match).
+    let safe2 = "/* comment only */\n--space-1: 4px;";
     let (out2, s2) = sanitize_token_css_inner(safe2);
-    assert!(out2.contains("--space-1: 4px;"), "合法声明应保留");
+    assert!(out2.contains("--space-1: 4px;"), "valid declarations should be kept");
     assert_eq!(s2, 0);
 }
 
 #[test]
 fn sanitize_token_css_plain_danger_still_stripped() {
-    // E-40 回归：无注释的普通 url()/@import 仍被剔除（不破坏原有 C10 行为）。
+    // E-40 regression: plain url()/@import without comments is still stripped (does not break the original C10 behavior).
     let css = "--bg: url(http://evil.png);\n@import url(evil.css);\n--ok: #fff;";
     let (out, stripped) = sanitize_token_css_inner(css);
-    assert!(!out.contains("evil"), "普通 url()/@import 仍被剔除");
-    assert!(out.contains("--ok: #fff;"), "合法声明保留");
-    assert_eq!(stripped, 2, "两行危险 CSS 被剔除");
+    assert!(!out.contains("evil"), "plain url()/@import is still stripped");
+    assert!(out.contains("--ok: #fff;"), "valid declarations are kept");
+    assert_eq!(stripped, 2, "two dangerous CSS lines are stripped");
 }
 
-// R-A22/E-41 回归：send_to_host 在原生测试环境（无 Window）不得 panic；
-// 有效 payload 走完序列化后优雅返回；无效 payload（含 serde 无法序列化的
-// 非 UTF-8 键）走 E-41 告警分支也不得 panic。
+// R-A22/E-41 regression: send_to_host must not panic in a native test environment (no Window);
+// valid payloads serialize fully and return gracefully; invalid payloads (including non-UTF-8
+// keys serde cannot serialize) hit the E-41 warn branch and still must not panic.
 #[test]
 fn send_to_host_valid_payload_no_panic_native() {
-    send_to_host("ai.generate", &serde_json::json!({"prompt": "登录页"}));
+    send_to_host("ai.generate", &serde_json::json!({"prompt": "login page"}));
 }
 
 #[test]
@@ -167,8 +167,8 @@ fn send_to_host_empty_payload_no_panic_native() {
 #[cfg(target_arch = "wasm32")]
 #[test]
 fn send_to_host_handler_name_is_camelcase() {
-    // R-A22：桥 handler 名须为 WKWebView 惯例 camelCase，studio 侧据此注册。
-    // HOST_HANDLER_NAME 仅 wasm32 编译（非 wasm 构建不产出该常量）。
+    // R-A22: the bridge handler name must follow the WKWebView camelCase convention; studio registers based on it.
+    // HOST_HANDLER_NAME is only compiled for wasm32 (non-wasm builds do not emit this constant).
     assert_eq!(HOST_HANDLER_NAME, "fdHost");
 }
 
@@ -181,7 +181,7 @@ fn handle_host_message_render_page() {
         "payload": payload
     });
     let json = serde_json::to_string(&msg).unwrap();
-    // 验证 JSON 结构正确（不调用 handle_host_message，后者需浏览器环境）
+    // Verify the JSON structure is correct (does not call handle_host_message, which needs a browser environment)
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["kind"], "page.render");
     assert!(parsed["payload"]["document"].is_string());
@@ -189,7 +189,7 @@ fn handle_host_message_render_page() {
 
 #[test]
 fn handle_host_message_invalid_json_does_not_panic() {
-    // 仅验证 JSON 解析逻辑，不触发 web_sys console
+    // Only verify the JSON parsing logic; no web_sys console triggered
     assert!(serde_json::from_str::<serde_json::Value>("not json").is_err());
     assert!(serde_json::from_str::<serde_json::Value>("").is_err());
 }
@@ -204,7 +204,7 @@ fn handle_host_message_unknown_kind_does_not_panic() {
 
 #[test]
 fn mount_creates_shell() {
-    // 需要在浏览器环境运行，宿主目标仅验证结构
+    // Must run in a browser environment; on the host target only the structure is verified
     let _shell = WebShell {
         inner: WebShellInner {
             canvas_id: "canvas".into(),
@@ -233,7 +233,7 @@ fn send_to_host_builds_valid_json() {
 
 #[test]
 fn round_rect_math() {
-    // 验证圆角矩形路径计算：r 不应超过 w/2 或 h/2
+    // Verify rounded-rect path math: r must not exceed w/2 or h/2
     let w = 50.0;
     let h = 30.0;
     let r: f64 = 20.0;
@@ -241,7 +241,7 @@ fn round_rect_math() {
     assert_eq!(clamped, 15.0);
 }
 
-// ── Bridge 类型测试 ──
+// ── Bridge type tests ──
 
 #[test]
 fn bridge_command_page_render_serde() {
@@ -254,7 +254,7 @@ fn bridge_command_page_render_serde() {
         BridgeCommand::PageRender { document_json } => {
             assert!(document_json.contains("pages"));
         }
-        _ => panic!("期望 PageRender"),
+        _ => panic!("expected PageRender"),
     }
 }
 
@@ -269,7 +269,7 @@ fn bridge_command_apply_tokens_serde() {
         BridgeCommand::ApplyTokens { css } => {
             assert!(css.contains("--color-bg"));
         }
-        _ => panic!("期望 ApplyTokens"),
+        _ => panic!("expected ApplyTokens"),
     }
 }
 
@@ -282,7 +282,7 @@ fn bridge_command_select_node_serde() {
     let cmd2: BridgeCommand = serde_json::from_str(&json).unwrap();
     match cmd2 {
         BridgeCommand::SelectNode { node_id } => assert_eq!(node_id, "btn_1"),
-        _ => panic!("期望 SelectNode"),
+        _ => panic!("expected SelectNode"),
     }
 }
 
@@ -293,7 +293,7 @@ fn bridge_command_clear_canvas_serde() {
     let cmd2: BridgeCommand = serde_json::from_str(&json).unwrap();
     match cmd2 {
         BridgeCommand::ClearCanvas => {}
-        _ => panic!("期望 ClearCanvas"),
+        _ => panic!("expected ClearCanvas"),
     }
 }
 
@@ -312,7 +312,7 @@ fn bridge_event_node_click_serde() {
             assert_eq!(x, 10.0);
             assert_eq!(y, 20.0);
         }
-        _ => panic!("期望 NodeClick"),
+        _ => panic!("expected NodeClick"),
     }
 }
 
@@ -331,7 +331,7 @@ fn bridge_event_node_drag_serde() {
             assert_eq!(dx, 5.0);
             assert_eq!(dy, -3.0);
         }
-        _ => panic!("期望 NodeDrag"),
+        _ => panic!("expected NodeDrag"),
     }
 }
 
@@ -345,20 +345,20 @@ fn bridge_event_canvas_click_serde() {
             assert_eq!(x, 100.0);
             assert_eq!(y, 200.0);
         }
-        _ => panic!("期望 CanvasClick"),
+        _ => panic!("expected CanvasClick"),
     }
 }
 
 #[test]
 fn bridge_event_ai_chat_serde() {
     let event = BridgeEvent::AiChat {
-        message: "做一个登录页".to_string(),
+        message: "make a login page".to_string(),
     };
     let json = serde_json::to_string(&event).unwrap();
     let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
     match event2 {
-        BridgeEvent::AiChat { message } => assert_eq!(message, "做一个登录页"),
-        _ => panic!("期望 AiChat"),
+        BridgeEvent::AiChat { message } => assert_eq!(message, "make a login page"),
+        _ => panic!("expected AiChat"),
     }
 }
 
@@ -377,7 +377,7 @@ fn bridge_event_canvas_zoom_serde() {
             assert_eq!(x, 300.0);
             assert_eq!(y, 400.0);
         }
-        _ => panic!("期望 CanvasZoom"),
+        _ => panic!("expected CanvasZoom"),
     }
 }
 
@@ -394,7 +394,7 @@ fn bridge_event_canvas_pan_serde() {
             assert_eq!(dx, 50.0);
             assert_eq!(dy, -30.0);
         }
-        _ => panic!("期望 CanvasPan"),
+        _ => panic!("expected CanvasPan"),
     }
 }
 
@@ -407,7 +407,7 @@ fn bridge_event_node_multi_select_serde() {
     let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
     match event2 {
         BridgeEvent::NodeMultiSelect { node_id } => assert_eq!(node_id, "btn_2"),
-        _ => panic!("期望 NodeMultiSelect"),
+        _ => panic!("expected NodeMultiSelect"),
     }
 }
 
@@ -451,11 +451,11 @@ fn bridge_event_node_select_serde() {
     let event2: BridgeEvent = serde_json::from_str(&json).unwrap();
     match event2 {
         BridgeEvent::NodeSelect { node_id } => assert_eq!(node_id, "card_1"),
-        _ => panic!("期望 NodeSelect"),
+        _ => panic!("expected NodeSelect"),
     }
 }
 
-// ── 吸附算法测试 ──
+// ── Snap algorithm tests ──
 
 #[test]
 fn snap_find_offset_within_threshold() {
@@ -495,10 +495,10 @@ fn snap_find_offset_picks_closest() {
 #[test]
 fn snap_threshold_boundary() {
     let candidates = vec![100.0];
-    // 正好在阈值上
+    // Exactly on the threshold
     let (_, snapped, _) = find_snap_offset(105.0, &candidates);
     assert!(snapped);
-    // 刚好超过阈值
+    // Just past the threshold
     let (_, snapped2, _) = find_snap_offset(105.1, &candidates);
     assert!(!snapped2);
 }
@@ -513,40 +513,40 @@ fn snap_empty_candidates() {
 
 #[test]
 fn snap_4_direction_covers_edges_and_centers() {
-    // 模拟一个 100x50 的节点在 (50, 80)
-    // 吸附候选线来自另一个节点：x=[0, 150, 75], y=[0, 100, 50]
+    // Simulate a 100x50 node at (50, 80)
+    // Snap candidate lines from another node: x=[0, 150, 75], y=[0, 100, 50]
     let snap_x_candidates = vec![0.0, 150.0, 75.0];
     let _snap_y_candidates = [0.0, 100.0, 50.0];
 
-    // 节点左边缘 x=48 → 吸附到 50? 不，48 最近的是 50 → 偏移+2（在阈值内）
-    // 这里测试节点左边缘在 x=2 → 吸附到 x=0
+    // Node left edge x=48 → snap to 50? No, 48's nearest is 50 → offset +2 (within threshold)
+    // This test uses a node left edge at x=2 → snaps to x=0
     let (off_left, sn_left, _) = find_snap_offset(2.0, &snap_x_candidates);
     assert!(sn_left);
-    assert_eq!(off_left, -2.0); // 吸附到 x=0
+    assert_eq!(off_left, -2.0); // snapped to x=0
 
-    // 节点右边缘 x=148 → 吸附到 x=150
+    // Node right edge x=148 → snaps to x=150
     let (off_right, sn_right, _) = find_snap_offset(148.0, &snap_x_candidates);
     assert!(sn_right);
-    assert_eq!(off_right, 2.0); // 吸附到 x=150
+    assert_eq!(off_right, 2.0); // snapped to x=150
 
-    // 节点中心 H x=73 → 吸附到 x=75
+    // Node center-H x=73 → snaps to x=75
     let (off_center, sn_center, _) = find_snap_offset(73.0, &snap_x_candidates);
     assert!(sn_center);
-    assert_eq!(off_center, 2.0); // 吸附到 x=75
+    assert_eq!(off_center, 2.0); // snapped to x=75
 }
 
-// ── 性能优化测试 ──
+// ── Performance optimization tests ──
 
 #[test]
 fn viewport_margin_constant() {
     assert_eq!(VIEWPORT_MARGIN, 200.0);
 }
 
-// E-38/P2-5 回归：节点几何护栏拒绝非有限/超限尺寸，防渲染崩溃/OOM。
+// E-38/P2-5 regression: the node geometry guard rejects non-finite/oversized dimensions, preventing render crashes/OOM.
 #[test]
 fn node_geom_guard_rejects_nonfinite() {
     let mk = |x: f64, y: f64, w: f64, h: f64| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
-    // NaN/Inf 任一坐标 → 拒绝
+    // Any NaN/Inf coordinate → reject
     assert!(!is_node_geom_valid(&mk(f64::NAN, 0.0, 10.0, 10.0), 1.0));
     assert!(!is_node_geom_valid(
         &mk(0.0, f64::INFINITY, 10.0, 10.0),
@@ -557,10 +557,10 @@ fn node_geom_guard_rejects_nonfinite() {
         &mk(0.0, 0.0, 10.0, f64::NEG_INFINITY),
         1.0
     ));
-    // 负尺寸 → 拒绝
+    // Negative dimensions → reject
     assert!(!is_node_geom_valid(&mk(0.0, 0.0, -1.0, 10.0), 1.0));
     assert!(!is_node_geom_valid(&mk(0.0, 0.0, 10.0, -1.0), 1.0));
-    // 超大尺寸（f64::MAX / 超 MAX_NODE_DIM_PX）→ 拒绝
+    // Oversized dimensions (f64::MAX / beyond MAX_NODE_DIM_PX) → reject
     assert!(!is_node_geom_valid(&mk(0.0, 0.0, f64::MAX, 10.0), 1.0));
     assert!(!is_node_geom_valid(
         &mk(0.0, 0.0, 10.0, MAX_NODE_DIM_PX + 1.0),
@@ -568,43 +568,43 @@ fn node_geom_guard_rejects_nonfinite() {
     ));
 }
 
-// E-38/P2-5 回归：zoom 护栏拒绝 0/负/超大，防算术崩。
+// E-38/P2-5 regression: the zoom guard rejects 0/negative/oversized values, preventing arithmetic crashes.
 #[test]
 fn node_geom_guard_rejects_bad_zoom() {
     let node = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 10.0, 10.0);
-    assert!(is_node_geom_valid(&node, 1.0), "正常 zoom 应通过");
-    assert!(!is_node_geom_valid(&node, 0.0), "zoom=0 应拒绝");
-    assert!(!is_node_geom_valid(&node, -2.0), "负 zoom 应拒绝");
-    assert!(!is_node_geom_valid(&node, f64::NAN), "NaN zoom 应拒绝");
+    assert!(is_node_geom_valid(&node, 1.0), "normal zoom should pass");
+    assert!(!is_node_geom_valid(&node, 0.0), "zoom=0 should be rejected");
+    assert!(!is_node_geom_valid(&node, -2.0), "negative zoom should be rejected");
+    assert!(!is_node_geom_valid(&node, f64::NAN), "NaN zoom should be rejected");
     assert!(
         !is_node_geom_valid(&node, MAX_ZOOM + 1.0),
-        "超 MAX_ZOOM 应拒绝"
+        "beyond MAX_ZOOM should be rejected"
     );
-    assert!(is_node_geom_valid(&node, MAX_ZOOM), "恰好 MAX_ZOOM 应通过");
+    assert!(is_node_geom_valid(&node, MAX_ZOOM), "exactly MAX_ZOOM should pass");
 }
 
-// E-38/P2-5 回归：合法节点（正常尺寸 + 边界值）通过护栏。
+// E-38/P2-5 regression: valid nodes (normal sizes + boundary values) pass the guard.
 #[test]
 fn node_geom_guard_accepts_valid_nodes() {
     let mk = |x: f64, y: f64, w: f64, h: f64| fd_canvas_core::PenNode::rect("n1", x, y, w, h);
     assert!(is_node_geom_valid(&mk(0.0, 0.0, 10.0, 10.0), 1.0));
     assert!(
         is_node_geom_valid(&mk(1e6, 1e6, 100.0, 100.0), 1.0),
-        "大坐标应通过"
+        "large coordinates should pass"
     );
     assert!(
         is_node_geom_valid(&mk(0.0, 0.0, MAX_NODE_DIM_PX, MAX_NODE_DIM_PX), 1.0),
-        "恰好 MAX_NODE_DIM_PX 应通过"
+        "exactly MAX_NODE_DIM_PX should pass"
     );
     assert!(
         is_node_geom_valid(&mk(0.0, 0.0, 0.0, 0.0), 1.0),
-        "零尺寸应通过"
+        "zero size should pass"
     );
 }
 
 #[test]
 fn aabb_overlap_basic() {
-    // 两个重叠矩形
+    // Two overlapping rectangles
     let a_left = 0.0f32;
     let a_right = 100.0;
     let a_top = 0.0f32;
@@ -618,7 +618,7 @@ fn aabb_overlap_basic() {
 
 #[test]
 fn aabb_no_overlap() {
-    // 两个不重叠矩形
+    // Two non-overlapping rectangles
     let a_left = 0.0f32;
     let a_right = 100.0;
     let a_top = 0.0f32;
@@ -667,57 +667,58 @@ fn compute_resize_min_size_enforced() {
 
 #[test]
 fn listeners_installed_no_dom_is_safe() {
-    // L-15：无 window/DOM 时 mark_listeners_installed 返回 true（跳过安装），
-    // 避免反复尝试安装失败。幂等安全：多次调用一致返回 true。
+    // L-15: with no window/DOM, mark_listeners_installed returns true (skips installation),
+    // avoiding repeated failed install attempts. Idempotent-safe: repeated calls consistently return true.
     assert!(
         mark_listeners_installed("fusion-dom-root"),
-        "无 DOM 环境应跳过安装（返回 true）"
+        "without a DOM environment installation should be skipped (return true)"
     );
     assert!(
         mark_listeners_installed("fusion-dom-root"),
-        "重复调用应一致返回 true"
+        "repeated calls should consistently return true"
     );
 }
 
 #[test]
 fn render_depth_limit_constant_bounded() {
-    // P2-1：递归深度上限存在且合理，防深层嵌套文档栈溢出。
-    // 编译期校验常量边界（不触发 web_sys console，避免 native 目标 panic）。
+    // P2-1: the recursion depth cap exists and is reasonable, preventing stack overflow on deeply nested documents.
+    // Compile-time check of the constant bounds (no web_sys console triggered, avoiding native-target panics).
     const _: () = assert!(MAX_RENDER_DEPTH > 0 && MAX_RENDER_DEPTH <= 256);
 }
 
 #[test]
 fn children_per_node_cap_constant_bounded() {
-    // E-38/P2-5：单节点子节点数渲染上限存在且合理。
-    // 上限须 > 合法设计稿单层扇出（数百），且与深度乘积低于 jetsam 阈值。
-    // 编译期校验（render 走 web_sys，native 目标不可调，校常量边界）。
+    // E-38/P2-5: the per-node children render cap exists and is reasonable.
+    // The cap must be > a legitimate design's single-layer fan-out (hundreds), and its product with depth
+    // must stay below the jetsam threshold.
+    // Compile-time check (render goes through web_sys, not callable on the native target, so the constant bounds are checked).
     const _: () = assert!(MAX_CHILDREN_PER_NODE >= 100 && MAX_CHILDREN_PER_NODE <= 10_000);
 }
 
 #[test]
 fn children_take_cap_truncates_oversized_sibling_list() {
-    // E-38/P2-5：10 万扁平子节点深度=1 过深度检查，须扇出护栏截断。
-    // 复现渲染循环的 .take(MAX_CHILDREN_PER_NODE) 逻辑（纯逻辑，不触 DOM）：
-    // 构造超限 children，取前 N，断言截断且数量恰等于上限。
+    // E-38/P2-5: 100k flat children at depth=1 pass the depth check, so the fan-out guard must truncate.
+    // Replicates the render loop's .take(MAX_CHILDREN_PER_NODE) logic (pure logic, no DOM touched):
+    // build an oversized children list, take the first N, assert truncation to exactly the cap.
     let oversized: Vec<u32> = (0..100_000).collect();
     let rendered: Vec<u32> = oversized
         .iter()
         .take(MAX_CHILDREN_PER_NODE)
         .copied()
         .collect();
-    assert_eq!(rendered.len(), MAX_CHILDREN_PER_NODE, "超限须截断至上限");
-    assert_eq!(rendered[0], 0, "保留首批子节点顺序");
+    assert_eq!(rendered.len(), MAX_CHILDREN_PER_NODE, "over the limit must truncate to the cap");
+    assert_eq!(rendered[0], 0, "the first children keep their order");
     assert_eq!(
         rendered[MAX_CHILDREN_PER_NODE - 1],
         (MAX_CHILDREN_PER_NODE - 1) as u32,
-        "末元素为第 N 个子节点"
+        "the last element is the Nth child"
     );
 }
 
 #[test]
 fn children_take_cap_preserves_undersized_sibling_list() {
-    // E-38/P2-5：合法小扇出不受护栏影响。500 子节点 < 上限，全量保留。
+    // E-38/P2-5: a legitimate small fan-out is unaffected by the guard. 500 children < cap, all kept.
     let normal: Vec<u32> = (0..500).collect();
     let rendered: Vec<u32> = normal.iter().take(MAX_CHILDREN_PER_NODE).copied().collect();
-    assert_eq!(rendered.len(), 500, "未超限须全量保留");
+    assert_eq!(rendered.len(), 500, "under the limit all entries must be kept");
 }

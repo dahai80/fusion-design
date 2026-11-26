@@ -1,10 +1,10 @@
-//! ARCH-10：host-web 交互事件管线。从 lib.rs 499-1528 迁出，零逻辑改。
+//! ARCH-10: host-web interaction event pipeline. Moved out of lib.rs lines 499-1528 with zero logic changes.
 //!
-//! 职责：
-//! - rAF 节流（schedule_raf）
-//! - 事件委托（click/mousedown delegate）
-//! - canvas zoom/pan/marquee 监听器
-//! - CSS 像素读写辅助（read_node_position/size/extract_css_px/replace/strip/read_css_prop_value）
+//! Responsibilities:
+//! - rAF throttling (schedule_raf)
+//! - Event delegation (click/mousedown delegate)
+//! - canvas zoom/pan/marquee listeners
+//! - CSS pixel read/write helpers (read_node_position/size/extract_css_px/replace/strip/read_css_prop_value)
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -15,39 +15,40 @@ use crate::{
     DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, MIN_MARQUEE_SIZE,
 };
 
-// ── 拖拽全局态（ARCH-10 round-3 从 lib.rs 迁入，主消费方归位）──
-// ARCH-10 round-3：3 个 thread_local + DragMoveClosure + cleanup_pending_drag 原集中
-// 定义于 lib.rs god-file，被本模块（events.rs 拖拽 on_move/on_up 存储与 take 回收）
-// 跨模块引用。主消费方在此——状态就近定义。lib.rs select_node/create_resize_handle
-// 路径经反向 pub(crate) use 消费（见 lib.rs use events::{...}）。零逻辑改，仅迁位置。
-// 可见性 pub(crate) 不变（lib.rs 仍要读）。
+// ── Drag global state (ARCH-10 round-3, moved from lib.rs to sit next to its main consumer) ──
+// ARCH-10 round-3: the 3 thread_locals + DragMoveClosure + cleanup_pending_drag were originally
+// defined in the lib.rs god-file and referenced cross-module by this module (events.rs drag
+// on_move/on_up storage and take-reclaim). The main consumer lives here — the state is defined
+// close to it. The lib.rs select_node/create_resize_handle path consumes them via a reverse
+// pub(crate) use (see lib.rs use events::{...}). Zero logic changes; relocation only.
+// Visibility stays pub(crate) (lib.rs still reads them).
 
-// R-1：拖拽/平移/框选/resize 的 on_move Closure 暂存（替代 forget 泄漏）。
-// 旧实现 .forget() 导致每次拖拽泄漏一个 FnMut Closure，长会话线性内存增长。
-// mousedown 存入，mouseup take() + remove_event_listener → Closure drop 回收内存。
-// thread_local 规避 Send 约束（Closure<dyn FnMut> 非 Send，wasm 单线程安全）。
+// R-1: stash for the drag/pan/marquee/resize on_move Closure (replaces the forget leak).
+// The old .forget() leaked one FnMut Closure per drag, growing linear memory over long sessions.
+// Stored on mousedown; on mouseup take() + remove_event_listener → Closure drop reclaims memory.
+// thread_local sidesteps the Send constraint (Closure<dyn FnMut> is not Send; safe under wasm's single thread).
 pub(crate) type DragMoveClosure = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>;
 thread_local! {
     pub(crate) static ACTIVE_DRAG_MOVE: std::cell::RefCell<Option<DragMoveClosure>> =
         const { std::cell::RefCell::new(None) };
-    // R-1 backfill：拖拽/平移/框选/resize 的 on_up Closure 暂存。
-    // 旧 .forget() 在 mouseup 未触发（鼠标拖拽中途离开窗口）时永久泄漏该 Closure。
-    // 每次 mousedown 前调 cleanup_pending_drag() 回收上一轮残留的 on_up + on_move，
-    // 消除"漏 mouseup 即泄漏"路径。on_up 触发时也 take + drop。
+    // R-1 backfill: stash for the drag/pan/marquee/resize on_up Closure.
+    // The old .forget() leaked that Closure permanently when mouseup never fired (mouse dragged out of the window mid-drag).
+    // cleanup_pending_drag() is called before every mousedown to reclaim the previous round's leftover on_up + on_move,
+    // eliminating the "missed mouseup means leak" path. Also take + drop when on_up fires.
     pub(crate) static PENDING_DRAG_UP: std::cell::RefCell<Option<DragMoveClosure>> =
         const { std::cell::RefCell::new(None) };
-    // R-1 backfill：resize handle 的 on_handle_mousedown Closure 暂存（每选中节点 8 个）。
-    // 旧 .forget() 每次 select_node 切换选中泄漏 8 个 Closure（长会话线性增长）。
-    // select_node 重建前 clear() 丢弃上一批 8 个。
+    // R-1 backfill: stash for resize-handle on_handle_mousedown Closures (8 per selected node).
+    // The old .forget() leaked 8 Closures per select_node selection change (linear growth over long sessions).
+    // select_node clear()s the previous batch of 8 before rebuilding.
     pub(crate) static RESIZE_HANDLES: std::cell::RefCell<Vec<DragMoveClosure>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-// R-1 backfill：拖拽开始前回收上一轮残留监听。
-// 处理"mouseup 漏触发"场景——鼠标拖拽中途离开窗口，mouseup 永不到达，
-// 旧 on_up（PENDING_DRAG_UP）+ on_move（ACTIVE_DRAG_MOVE）成为悬空监听 + 泄漏 Closure。
-// 此处 remove_event_listener 后 drop Closure，避免下一轮拖拽叠加 + 线性内存增长。
-// 失败仅 .ok()：监听器可能已被 on_up 触发时移除，重复移除无碍。
+// R-1 backfill: reclaim the previous round's leftover listeners before a drag starts.
+// Handles the "missed mouseup" case — the mouse leaves the window mid-drag, mouseup never arrives,
+// and the old on_up (PENDING_DRAG_UP) + on_move (ACTIVE_DRAG_MOVE) become dangling listeners + leaked Closures.
+// Here remove_event_listener is followed by dropping the Closure, avoiding listener stacking on the next drag + linear memory growth.
+// Failures are just .ok(): the listener may already have been removed when on_up fired; removing twice is harmless.
 pub(crate) fn cleanup_pending_drag() {
     if let Some(w) = web_sys::window() {
         ACTIVE_DRAG_MOVE.with(|c| {
@@ -57,7 +58,7 @@ pub(crate) fn cleanup_pending_drag() {
                     .ok();
                 drop(cl);
                 web_sys::console::warn_1(
-                    &"fd-host-web: R-1 回收上一轮残留 on_move（mouseup 漏触发）".into(),
+                    &"fd-host-web: R-1 reclaimed leftover on_move from previous round (missed mouseup)".into(),
                 );
             }
         });
@@ -68,39 +69,42 @@ pub(crate) fn cleanup_pending_drag() {
                     .ok();
                 drop(cl);
                 web_sys::console::warn_1(
-                    &"fd-host-web: R-1 回收上一轮残留 on_up（mouseup 漏触发）".into(),
+                    &"fd-host-web: R-1 reclaimed leftover on_up from previous round (missed mouseup)".into(),
                 );
             }
         });
     }
 }
 
-// R-1 余 forget 站点审计裁定回溯：
-// 剩余 .forget() 站点为容器级委托监听器（setup_delegated_* / setup_* 的 click/mousedown/
-// wheel/message）——mount 一次即应用生命周期常驻，经 mark_listeners_installed 幂等保护防重复
-// attach。事件委托模式下非逐节点绑定，节点增删不新增监听器。常驻监听器 forget 是 web_sys 惯例，
-// 不随会话长度增长，无线性内存泄漏。
-// 拖拽热路径（on_move / on_up / resize handle）已全部转 stored-thread_local：
-//   - on_move → ACTIVE_DRAG_MOVE（mouseup take 回收）
-//   - on_up   → PENDING_DRAG_UP（mouseup take + 漏触发时 cleanup_pending_drag 回收）
-//   - resize handle → RESIZE_HANDLES（select_node 重建前 clear 回收上一批 8 个）
-// 若未来需 unmount 全量回收，可在此 thread_local 旁加 Vec<Closure> + unmount() drop——
-// 当前无 unmount 调用方，stored-Vec 增复杂度不解决现存泄漏，按 Rule 2 不引入。
+// R-1 audit verdict on the remaining forget sites:
+// The remaining .forget() sites are container-level delegated listeners (setup_delegated_* / setup_*
+// click/mousedown/wheel/message) — attached once on mount and resident for the app's lifetime, with
+// mark_listeners_installed idempotence guarding against duplicate attach. Under event delegation there
+// is no per-node binding, so adding/removing nodes adds no listeners. forgetting resident listeners is
+// the web_sys convention; it does not grow with session length — no linear memory leak.
+// The drag hot paths (on_move / on_up / resize handle) have all moved to stored-thread_local:
+//   - on_move → ACTIVE_DRAG_MOVE (take-reclaimed on mouseup)
+//   - on_up   → PENDING_DRAG_UP (take on mouseup + cleanup_pending_drag when mouseup is missed)
+//   - resize handle → RESIZE_HANDLES (select_node clear()s the previous batch of 8 before rebuilding)
+// If a full unmount reclaim is needed in the future, a Vec<Closure> + unmount() drop could be added
+// alongside these thread_locals — but there is no unmount caller today, a stored Vec adds complexity
+// without solving any existing leak, and per Rule 2 it is not introduced.
 
-// ── 交互事件 ──
+// ── Interaction events ──
 
-// ── requestAnimationFrame 节流 ──
+// ── requestAnimationFrame throttling ──
 
-/// 全局 rAF 句柄，避免同一帧多次调度。
+/// Global rAF handle, avoiding multiple schedules within the same frame.
 pub(crate) static RAF_SCHEDULED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 通过 requestAnimationFrame 节流执行回调，确保每帧最多执行一次。
-/// 修复 P0-3：rAF 注册失败或回调 panic 时标志永久卡 true -> 渲染停摆。
-/// - window 不可用：立即复位标志，允许下次重试。
-/// - rAF 注册失败：立即复位。
-/// - 回调内先复位再执行；R-16：catch_unwind 兜底，回调 panic 落 console.error
-///   并复位标志，不让 panic 传播成 wasm trap 致 rAF 循环永久停摆。
+/// Run a callback throttled via requestAnimationFrame, at most once per frame.
+/// Fix P0-3: when rAF registration fails or the callback panics, the flag used to get stuck true forever → rendering stalls.
+/// - window unavailable: reset the flag immediately, allowing a retry next time.
+/// - rAF registration failure: reset immediately.
+/// - Inside the callback, reset the flag before executing; R-16: catch_unwind as a safety net so a
+///   callback panic lands in console.error and resets the flag, instead of propagating into a wasm
+///   trap that permanently stalls the rAF loop.
 fn schedule_raf<F>(callback: F)
 where
     F: FnOnce() + 'static,
@@ -110,18 +114,18 @@ where
         return;
     }
     let cb = Closure::once(Box::new(move || {
-        // 先复位标志，再执行回调；即使回调 panic 也不致永久阻塞。
+        // Reset the flag first, then run the callback; even a panicking callback cannot block forever.
         RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
-        // R-16：catch_unwind 兜底——回调 panic 不传播成 trap 致 rAF 停摆。
-        // web_sys 捕获非 UnwindSafe，用 AssertUnwindSafe 包裹（回调内不跨 unwind 持锁）。
+        // R-16: catch_unwind safety net — a callback panic does not propagate into a trap that stalls rAF.
+        // web_sys captures are not UnwindSafe, so wrap in AssertUnwindSafe (no locks held across the unwind inside the callback).
         let f = std::panic::AssertUnwindSafe(callback);
         if let Err(e) = std::panic::catch_unwind(f) {
             let msg = if let Some(s) = e.downcast_ref::<&'static str>() {
-                format!("schedule_raf 回调 panic: {s}")
+                format!("schedule_raf callback panic: {s}")
             } else if let Some(s) = e.downcast_ref::<String>() {
-                format!("schedule_raf 回调 panic: {s}")
+                format!("schedule_raf callback panic: {s}")
             } else {
-                "schedule_raf 回调 panic（非字符串 payload）".to_string()
+                "schedule_raf callback panic (non-string payload)".to_string()
             };
             web_sys::console::error_1(&msg.into());
         }
@@ -137,19 +141,19 @@ where
         .request_animation_frame(cb.as_ref().unchecked_ref())
         .is_err()
     {
-        // 注册失败：复位标志，否则后续所有 schedule_raf 静默丢弃 -> 卡死。
+        // Registration failed: reset the flag, otherwise every later schedule_raf is silently dropped → deadlock.
         RAF_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
         web_sys::console::warn_1(
-            &"schedule_raf: request_animation_frame 注册失败，已复位标志".into(),
+            &"schedule_raf: request_animation_frame registration failed, flag reset".into(),
         );
         return;
     }
     cb.forget();
 }
 
-// ── 事件委托 ──
+// ── Event delegation ──
 
-/// 容器级别 click 事件委托：从事件 target 冒泡查找 data-node-id。
+/// Container-level click event delegation: bubble up from the event target looking for data-node-id.
 pub(crate) fn setup_delegated_click_listener(container_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -172,7 +176,7 @@ pub(crate) fn setup_delegated_click_listener(container_id: &str) {
         let (x, y) = (mouse.client_x() as f32, mouse.client_y() as f32);
         let shift = mouse.shift_key();
 
-        // 从 target 冒泡查找 data-node-id
+        // Bubble up from the target looking for data-node-id
         let target = event.target();
         let node_id = target.as_ref().and_then(|t| {
             let el = t.dyn_ref::<web_sys::Element>()?;
@@ -214,7 +218,7 @@ pub(crate) fn setup_delegated_click_listener(container_id: &str) {
     web_sys::console::log_1(&"fd-host-web: delegated click listener installed".into());
 }
 
-/// 容器级别 mousedown 事件委托：拖拽启动。
+/// Container-level mousedown event delegation: drag initiation.
 pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -230,13 +234,13 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
     };
 
     let on_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
-        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        // R-1 backfill: reclaim the previous round's leftover on_up/on_move before starting a drag (missed mouseup case).
         cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
         };
-        // 从 target 冒泡查找 data-node-id
+        // Bubble up from the target looking for data-node-id
         let target = event.target();
         let node_id = target.as_ref().and_then(|t| {
             let el = t.dyn_ref::<web_sys::Element>()?;
@@ -258,7 +262,7 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
         let start_x = mouse.client_x() as f32;
         let start_y = mouse.client_y() as f32;
 
-        // 查找 DOM 元素
+        // Look up the DOM element
         let Some(window) = web_sys::window() else {
             return;
         };
@@ -354,7 +358,7 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
                 dy: final_dy,
             });
 
-            // 使用 rAF 节流 DOM 更新
+            // Use rAF throttling for DOM updates
             let el_for_raf = el_ref.clone();
             let raf_final_dx = final_dx;
             let raf_final_dy = final_dy;
@@ -382,7 +386,7 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
             .as_ref()
             .unchecked_ref::<js_sys::Function>()
             .into();
-        // R-1：存 on_mousemove 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        // R-1: store on_mousemove in a thread_local, take-reclaimed on mouseup (replaces the forget leak).
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_mousemove));
         let on_mouseup = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
@@ -391,9 +395,9 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
-            // R-1：移除监听后 take + drop on_mousemove Closure，回收线性内存。
+            // R-1: after removing the listener, take + drop the on_mousemove Closure to reclaim linear memory.
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            // R-1 backfill: also reclaim on_up itself (PENDING_DRAG_UP).
             PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (raw_dx, raw_dy) = match mm {
@@ -448,9 +452,9 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
         window
             .add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref())
             .ok();
-        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        // R-1 backfill: on_up is stashed in PENDING_DRAG_UP (cleanup_pending_drag reclaims it if mouseup is missed).
         PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_mouseup));
-        // R-1：on_mousemove 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
+        // R-1: on_mousemove is stashed in SHELL (take-reclaimed on mouseup); no more forget.
 
         event.stop_propagation();
         event.prevent_default();
@@ -462,10 +466,10 @@ pub(crate) fn setup_delegated_mousedown_listener(container_id: &str) {
     web_sys::console::log_1(&"fd-host-web: delegated mousedown listener installed".into());
 }
 
-/// 为节点 DOM 元素绑定 click / drag / resize 事件（逐节点模式，事件委托模式下不使用）。
-/// 从 DOM 元素的 style 中读取 left/top 位置。
+/// Bind click / drag / resize events to a node DOM element (per-node mode; not used under event delegation).
+/// Read the left/top position from the DOM element's style.
 pub(crate) fn read_node_position(el: &web_sys::Element) -> (f32, f32) {
-    // P-6：优先读 data-fd-x/y 缓存，缺则回退 style 串解析（兼容旧节点/无缓存渲染路径）。
+    // P-6: prefer the data-fd-x/y cached attributes, falling back to style-string parsing (compatible with old nodes / cache-less render paths).
     let x = read_attr_f32(el, "data-fd-x").unwrap_or_else(|| {
         extract_css_px(&el.get_attribute("style").unwrap_or_default(), "left").unwrap_or(0.0)
     });
@@ -475,9 +479,9 @@ pub(crate) fn read_node_position(el: &web_sys::Element) -> (f32, f32) {
     (x, y)
 }
 
-/// 从 DOM 元素的 style 中读取 width/height。
+/// Read the width/height from the DOM element's style.
 pub(crate) fn read_node_size(el: &web_sys::Element) -> (f32, f32) {
-    // P-6：优先读 data-fd-w/h 缓存，缺则回退 style 串解析。
+    // P-6: prefer the data-fd-w/h cached attributes, falling back to style-string parsing.
     let w = read_attr_f32(el, "data-fd-w").unwrap_or_else(|| {
         extract_css_px(&el.get_attribute("style").unwrap_or_default(), "width")
             .unwrap_or(DEFAULT_NODE_WIDTH)
@@ -489,7 +493,7 @@ pub(crate) fn read_node_size(el: &web_sys::Element) -> (f32, f32) {
     (w, h)
 }
 
-/// 从 CSS style 字符串中提取指定属性的 px 值。
+/// Extract the px value of a given property from a CSS style string.
 fn extract_css_px(style: &str, prop: &str) -> Option<f32> {
     let prefix = format!("{}:", prop);
     for part in style.split(';') {
@@ -502,18 +506,18 @@ fn extract_css_px(style: &str, prop: &str) -> Option<f32> {
     None
 }
 
-/// 更新 DOM 元素的 left/top 样式（拖拽实时预览）。
+/// Update a DOM element's left/top styles (live drag preview).
 pub(crate) fn update_node_position(el: &web_sys::Element, x: f32, y: f32) {
     let style = el.get_attribute("style").unwrap_or_default();
     let new_style = replace_css_prop(&style, "left", &format!("{}px", x));
     let new_style = replace_css_prop(&new_style, "top", &format!("{}px", y));
     el.set_attribute("style", &new_style).ok();
-    // P-6：同步刷新几何缓存，吸附收集读缓存免 style 串解析。
+    // P-6: refresh the geometry cache in sync, so snap collection reads the cache without style-string parsing.
     el.set_attribute("data-fd-x", &format!("{}", x)).ok();
     el.set_attribute("data-fd-y", &format!("{}", y)).ok();
 }
 
-/// 替换 CSS style 字符串中指定属性值，不存在则追加。
+/// Replace a property value in a CSS style string, appending it if absent.
 pub(crate) fn replace_css_prop(style: &str, prop: &str, value: &str) -> String {
     let prefix = format!("{}:", prop);
     let mut found = false;
@@ -539,7 +543,7 @@ pub(crate) fn replace_css_prop(style: &str, prop: &str, value: &str) -> String {
     result
 }
 
-// L3：从 CSS style 字符串中移除指定属性（用于恢复显示时去掉 display 让 CSS 默认生效）。
+// L3: remove a given property from a CSS style string (used to drop display when restoring visibility so CSS defaults apply).
 pub(crate) fn strip_css_prop(style: &str, prop: &str) -> String {
     let prefix = format!("{}:", prop);
     let parts: Vec<String> = style
@@ -551,7 +555,7 @@ pub(crate) fn strip_css_prop(style: &str, prop: &str) -> String {
     parts.join(";")
 }
 
-// L3：读取 CSS style 字符串中指定属性的原始值（非数字也适用，如 display:flex）。
+// L3: read the raw value of a given property from a CSS style string (also for non-numeric values, e.g. display:flex).
 pub(crate) fn read_css_prop_value(style: &str, prop: &str) -> Option<String> {
     let prefix = format!("{}:", prop);
     for part in style.split(';') {
@@ -563,7 +567,7 @@ pub(crate) fn read_css_prop_value(style: &str, prop: &str) -> Option<String> {
     None
 }
 
-/// 设置画布空白区域的点击事件监听。
+/// Set up the click event listener for the canvas blank area.
 pub(crate) fn setup_canvas_click_listener(container_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -592,7 +596,7 @@ pub(crate) fn setup_canvas_click_listener(container_id: &str) {
     on_click.forget();
 }
 
-/// 设置画布 wheel 缩放事件监听。
+/// Set up the canvas wheel zoom event listener.
 pub(crate) fn setup_canvas_zoom_listener(container_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -627,7 +631,7 @@ pub(crate) fn setup_canvas_zoom_listener(container_id: &str) {
     web_sys::console::log_1(&"fd-host-web: canvas zoom listener installed".into());
 }
 
-/// 设置画布中键/Space+拖拽平移事件监听。
+/// Set up the canvas middle-button / Space+drag pan event listener.
 pub(crate) fn setup_canvas_pan_listener(container_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -643,13 +647,13 @@ pub(crate) fn setup_canvas_pan_listener(container_id: &str) {
     };
 
     let on_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
-        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        // R-1 backfill: reclaim the previous round's leftover on_up/on_move before starting a drag (missed mouseup case).
         cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
         };
-        // 中键(button=1) 或 Space+左键(button=0 + shiftKey)
+        // Middle button (button=1) or Space+left button (button=0 + shiftKey)
         let is_pan = mouse.button() == 1 || (mouse.button() == 0 && mouse.shift_key());
         if !is_pan {
             return;
@@ -676,7 +680,7 @@ pub(crate) fn setup_canvas_pan_listener(container_id: &str) {
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
-        // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        // R-1: store on_move in a thread_local, take-reclaimed on mouseup (replaces the forget leak).
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
         let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
@@ -685,9 +689,9 @@ pub(crate) fn setup_canvas_pan_listener(container_id: &str) {
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
-            // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
+            // R-1: after removing the listener, take + drop the on_move Closure to reclaim linear memory.
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            // R-1 backfill: also reclaim on_up itself (PENDING_DRAG_UP).
             PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (dx, dy) = match mm {
@@ -698,9 +702,9 @@ pub(crate) fn setup_canvas_pan_listener(container_id: &str) {
         }) as Box<dyn FnMut(web_sys::Event)>);
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
-        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        // R-1 backfill: on_up is stashed in PENDING_DRAG_UP (cleanup_pending_drag reclaims it if mouseup is missed).
         PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_up));
-        // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
+        // R-1: on_move is stashed in SHELL (take-reclaimed on mouseup); no more forget.
 
         event.prevent_default();
         event.stop_propagation();
@@ -712,7 +716,8 @@ pub(crate) fn setup_canvas_pan_listener(container_id: &str) {
     web_sys::console::log_1(&"fd-host-web: canvas pan listener installed".into());
 }
 
-/// 框选监听：在画布空白区域按住拖拽 → 绘制半透明矩形 → 释放时收集矩形内节点。
+/// Marquee selection listener: press and drag on the canvas blank area → draw a translucent rectangle →
+/// collect the nodes inside the rectangle on release.
 pub(crate) fn setup_marquee_listener(container_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -728,17 +733,17 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
     };
 
     let on_mousedown = Closure::wrap(Box::new(move |event: web_sys::Event| {
-        // R-1 backfill：拖拽开始前回收上一轮残留 on_up/on_move（漏 mouseup 场景）。
+        // R-1 backfill: reclaim the previous round's leftover on_up/on_move before starting a drag (missed mouseup case).
         cleanup_pending_drag();
         let mouse = match event.dyn_ref::<web_sys::MouseEvent>() {
             Some(m) => m,
             None => return,
         };
-        // 只响应左键且不按修饰键（Shift=平移，已占用）
+        // Only respond to left button without modifier keys (Shift = pan, already taken)
         if mouse.button() != 0 || mouse.shift_key() {
             return;
         }
-        // 如果点击到了节点元素，不做框选（节点拖拽已有处理）
+        // If the click landed on a node element, skip marquee selection (node drag already handles it)
         let target = event.target();
         let target_el = target
             .as_ref()
@@ -754,7 +759,7 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
         let start_x = mouse.client_x() as f32;
         let start_y = mouse.client_y() as f32;
 
-        // 创建选框 DOM 元素
+        // Create the marquee DOM element
         let Some(window) = web_sys::window() else {
             return;
         };
@@ -764,7 +769,7 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
         let marquee_el = match doc.create_element("div") {
             Ok(el) => el,
             Err(_) => {
-                web_sys::console::warn_1(&"fd-host-web: marquee 创建选框元素失败".into());
+                web_sys::console::warn_1(&"fd-host-web: marquee failed to create marquee element".into());
                 return;
             }
         };
@@ -819,7 +824,7 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
             .ok();
 
         let move_js: JsValue = on_move.as_ref().unchecked_ref::<js_sys::Function>().into();
-        // R-1：存 on_move 到 thread_local，mouseup 时 take 回收（替代 forget 泄漏）。
+        // R-1: store on_move in a thread_local, take-reclaimed on mouseup (replaces the forget leak).
         ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = Some(on_move));
         let on_up = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let Some(w) = web_sys::window() else {
@@ -828,19 +833,19 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
             let move_ref: &js_sys::Function = move_js.unchecked_ref();
             w.remove_event_listener_with_callback("mousemove", move_ref)
                 .ok();
-            // R-1：移除监听后 take + drop on_move Closure，回收线性内存。
+            // R-1: after removing the listener, take + drop the on_move Closure to reclaim linear memory.
             ACTIVE_DRAG_MOVE.with(|c| *c.borrow_mut() = None);
-            // R-1 backfill：同步回收 on_up 自身（PENDING_DRAG_UP）。
+            // R-1 backfill: also reclaim on_up itself (PENDING_DRAG_UP).
             PENDING_DRAG_UP.with(|c| *c.borrow_mut() = None);
 
-            // 移除选框 DOM
+            // Remove the marquee DOM
             if let Some(doc) = w.document() {
                 if let Some(m) = doc.get_element_by_id("fd-marquee") {
                     m.remove();
                 }
             }
 
-            // 收集框选矩形内的节点
+            // Collect nodes inside the marquee rectangle
             let mm = event.dyn_ref::<web_sys::MouseEvent>();
             let (end_x, end_y) = match mm {
                 Some(m) => (m.client_x() as f32, m.client_y() as f32),
@@ -851,7 +856,7 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
             let rect_right = start_x.max(end_x);
             let rect_bottom = start_y.max(end_y);
 
-            // 至少 5px 才算有效框选
+            // At least 5px for a valid marquee selection
             if (rect_right - rect_left) < MIN_MARQUEE_SIZE
                 && (rect_bottom - rect_top) < MIN_MARQUEE_SIZE
             {
@@ -866,9 +871,9 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
 
         win.add_event_listener_with_callback("mouseup", on_up.as_ref().unchecked_ref())
             .ok();
-        // R-1 backfill：on_up 托管到 PENDING_DRAG_UP（漏 mouseup 时 cleanup_pending_drag 回收）。
+        // R-1 backfill: on_up is stashed in PENDING_DRAG_UP (cleanup_pending_drag reclaims it if mouseup is missed).
         PENDING_DRAG_UP.with(|c| *c.borrow_mut() = Some(on_up));
-        // R-1：on_move 已托管到 SHELL（mouseup 时 take 回收），不再 forget。
+        // R-1: on_move is stashed in SHELL (take-reclaimed on mouseup); no more forget.
     }) as Box<dyn FnMut(web_sys::Event)>);
 
     container
@@ -878,7 +883,7 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
     web_sys::console::log_1(&"fd-host-web: marquee listener installed".into());
 }
 
-/// 收集矩形区域内的所有 data-node-id 元素。
+/// Collect all data-node-id elements within the rectangle.
 fn collect_nodes_in_rect(left: f32, top: f32, right: f32, bottom: f32) -> Vec<String> {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -892,7 +897,7 @@ fn collect_nodes_in_rect(left: f32, top: f32, right: f32, bottom: f32) -> Vec<St
         Some(c) => c,
         None => return vec![],
     };
-    // L2：递归遍历子树，框选才能命中嵌套节点（原先只看一层）。
+    // L2: recurse through the subtree so marquee selection can hit nested nodes (previously only one level was checked).
     let mut result = vec![];
     let node: &web_sys::Node = container.unchecked_ref();
     collect_nodes_in_rect_inner(node, left, top, right, bottom, &mut result);
@@ -917,12 +922,12 @@ fn collect_nodes_in_rect_inner(
                     let el_top = rect.top() as f32;
                     let el_right = rect.right() as f32;
                     let el_bottom = rect.bottom() as f32;
-                    // 判断矩形重叠
+                    // Rectangle overlap check
                     if el_left < right && el_right > left && el_top < bottom && el_bottom > top {
                         out.push(node_id);
                     }
                 }
-                // 递归进入子树
+                // Recurse into the subtree
                 let child_node: &web_sys::Node = el.unchecked_ref();
                 collect_nodes_in_rect_inner(child_node, left, top, right, bottom, out);
             }
@@ -930,8 +935,8 @@ fn collect_nodes_in_rect_inner(
     }
 }
 
-/// 画布缩放视觉反馈：更新 CSS transform scale + translate。
-/// 性能优化：rAF 节流 DOM 更新 + 视口剔除增量渲染。
+/// Canvas zoom visual feedback: update CSS transform scale + translate.
+/// Performance optimization: rAF-throttled DOM updates + viewport-culled incremental rendering.
 fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -966,9 +971,9 @@ fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
         .parse()
         .unwrap_or(0.0);
 
-    // rAF 节流：避免每帧多次 DOM 更新
+    // rAF throttling: avoid multiple DOM updates per frame
     schedule_raf(move || {
-        // 重新查找容器（rAF 回调中无法持有引用）
+        // Re-look-up the container (references cannot be held across the rAF callback)
         let window = match web_sys::window() {
             Some(w) => w,
             None => return,
@@ -978,7 +983,7 @@ fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
             None => return,
         };
         if let Some(container) = document.get_element_by_id("fusion-dom-root") {
-            // L-14：仅设 transform 相关属性，不整体覆盖 style（保留容器其他 CSS）。
+            // L-14: set only the transform-related properties, not a whole-style override (preserves the container's other CSS).
             let style = container.dyn_into::<web_sys::HtmlElement>().ok();
             if let Some(el) = style {
                 let _ = el.style().set_property(
@@ -993,15 +998,16 @@ fn apply_canvas_zoom(delta: f32, _cx: f32, _cy: f32) {
                 let _ = el.style().set_property("transform-origin", "0 0");
             }
         }
-        // R-16：缩放后视口剔除——直接同步调用，不嵌套 schedule_raf。
-        // 旧实现嵌套 rAF 把 cull 推到下一帧，且复用同一 RAF_SCHEDULED 标志，
-        // 导致 transform 帧与 cull 帧竞态。同帧内 transform 先设再 cull，无嵌套。
+        // R-16: viewport cull after zoom — call synchronously, do not nest schedule_raf.
+        // The old implementation nested rAF, pushing the cull to the next frame while reusing the same
+        // RAF_SCHEDULED flag, racing the transform frame against the cull frame. Within one frame the
+        // transform is set first, then the cull runs — no nesting.
         viewport_cull_update();
     });
 }
 
-/// 画布平移视觉反馈：更新 CSS transform translate。
-/// 性能优化：rAF 节流 DOM 更新 + 视口剔除增量渲染。
+/// Canvas pan visual feedback: update CSS transform translate.
+/// Performance optimization: rAF-throttled DOM updates + viewport-culled incremental rendering.
 fn apply_canvas_pan(dx: f32, dy: f32) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -1042,7 +1048,7 @@ fn apply_canvas_pan(dx: f32, dy: f32) {
         .parse()
         .unwrap_or(1.0);
 
-    // rAF 节流：避免每帧多次 DOM 更新
+    // rAF throttling: avoid multiple DOM updates per frame
     schedule_raf(move || {
         let window = match web_sys::window() {
             Some(w) => w,
@@ -1053,7 +1059,7 @@ fn apply_canvas_pan(dx: f32, dy: f32) {
             None => return,
         };
         if let Some(container) = document.get_element_by_id("fusion-dom-root") {
-            // L-14：仅设 transform 相关属性，不整体覆盖 style。
+            // L-14: set only the transform-related properties, not a whole-style override.
             if let Ok(el) = container.dyn_into::<web_sys::HtmlElement>() {
                 let _ = el.style().set_property(
                     "transform",
@@ -1067,12 +1073,12 @@ fn apply_canvas_pan(dx: f32, dy: f32) {
                 let _ = el.style().set_property("transform-origin", "0 0");
             }
         }
-        // R-16：平移后视口剔除——直接同步调用，不嵌套 schedule_raf（同上）。
+        // R-16: viewport cull after pan — call synchronously, do not nest schedule_raf (same as above).
         viewport_cull_update();
     });
 }
 
-/// 多选节点：切换指定节点的选中状态，不影响其他已选中节点。
+/// Multi-select a node: toggle the given node's selection state without affecting other selected nodes.
 fn toggle_node_selection(node_id: &str) {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -1089,12 +1095,12 @@ fn toggle_node_selection(node_id: &str) {
     {
         let is_selected = el.get_attribute("data-fd-selected").unwrap_or_default() == "true";
         if is_selected {
-            // L4：取消选中只移除我们注入的 box-shadow，不触碰用户 outline。
+            // L4: on deselect only remove the box-shadow we injected; do not touch the user's outline.
             let style = el.get_attribute("style").unwrap_or_default();
             let clean = strip_css_prop(&style, "box-shadow");
             el.set_attribute("style", &clean).ok();
             el.remove_attribute("data-fd-selected").ok();
-            // R-17：同步从多选集合移除，selected_id 一致性见下方。
+            // R-17: remove from the multi-select set in sync; selected_id consistency handled below.
             if let Some(inner) = shell_lock().as_mut() {
                 inner.selected_ids.remove(node_id);
                 if inner.selected_id.as_deref() == Some(node_id) {
@@ -1103,11 +1109,11 @@ fn toggle_node_selection(node_id: &str) {
             }
         } else {
             el.set_attribute("data-fd-selected", "true").ok();
-            // L4：用 box-shadow 做选中高亮，保留节点自身 outline 不被覆盖。
+            // L4: use box-shadow for the selection highlight, keeping the node's own outline from being overridden.
             let style = el.get_attribute("style").unwrap_or_default();
             el.set_attribute("style", &format!("{};box-shadow:0 0 0 2px #007AFF;", style))
                 .ok();
-            // R-17：加入多选集合。无主选中时设为主选中（handles 锚点）。
+            // R-17: add to the multi-select set. When no primary selection exists, set it as the primary one (handles anchor).
             if let Some(inner) = shell_lock().as_mut() {
                 inner.selected_ids.insert(node_id.to_string());
                 if inner.selected_id.is_none() {
