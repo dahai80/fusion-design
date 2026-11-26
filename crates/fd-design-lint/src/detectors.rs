@@ -1,5 +1,5 @@
-// ARCH-10 r4：13 个检测器从 lib.rs 拆出。均为 Linter 方法，读 self.rules / self.design_system。
-// 行为零变更——纯位置迁移，可见性不变（pub(crate) 自测）。
+// ARCH-10 r4: the 13 detectors split out of lib.rs. All are Linter methods reading self.rules / self.design_system.
+// Zero behavior change — pure positional move, visibility unchanged (pub(crate) for self-tests).
 
 use fd_canvas_core::{NodeKind, PenNode};
 
@@ -14,10 +14,10 @@ impl super::Linter {
         violations: &mut Vec<LintViolation>,
         parent_fill: Option<&str>,
     ) {
-        // L-9：仅 Text 节点查对比度（矩形/圆无文字不查，消假阳性）。
-        // fg=style.fill（文字色，codegen/host-web 渲染文本用 fill 作色），
-        // bg=parent_fill（父节点背景，本节点无 fill 时文本落在父背景上）。
-        // 无父背景 → 跳过（消假阴性，不臆造黑底）。
+        // L-9: only Text nodes are checked for contrast (rects/circles carry no text; avoids false positives).
+        // fg=style.fill (text color; codegen/host-web render text using fill as the color),
+        // bg=parent_fill (parent background; when this node has no fill, text sits on the parent background).
+        // No parent background -> skip (avoids false negatives, does not invent a black backdrop).
         if node.kind != NodeKind::Text {
             return;
         }
@@ -37,9 +37,10 @@ impl super::Linter {
             return;
         }
 
-        // E-14：alpha/opacity 混合近似。节点 style.opacity < 1.0 时，前景按 alpha
-        // 混合到背景再做对比度（rgba 半透文本落在不透明背景上的有效对比度）。
-        // 简化为线性亮度混合：L_eff = alpha*fg_lum + (1-alpha)*bg_lum。
+        // E-14: alpha/opacity blending approximation. When node style.opacity < 1.0, blend the
+        // foreground into the background by alpha before computing contrast (effective contrast of
+        // rgba semi-transparent text on an opaque background).
+        // Simplified as linear luminance blending: L_eff = alpha*fg_lum + (1-alpha)*bg_lum.
         let alpha = node.style.opacity.unwrap_or(1.0);
         let fg_eff = if (0.0..1.0).contains(&alpha) {
             alpha * fg_lum + (1.0 - alpha) * bg_lum
@@ -52,16 +53,17 @@ impl super::Linter {
             violations.push(LintViolation {
                 rule: LintRule::ContrastCheck,
                 node_id: node.id.clone(),
-                message: format!("对比度 {:.1}:1 不足（最低 3:1）", ratio),
-                suggestion: "增大前景色与背景色的明度差".to_string(),
+                message: format!("Contrast {:.1}:1 insufficient (minimum 3:1)", ratio),
+                suggestion: "Increase the luminance difference between foreground and background"
+                    .to_string(),
                 severity: LintSeverity::Error,
             });
         } else if ratio < 4.5 {
             violations.push(LintViolation {
                 rule: LintRule::ContrastCheck,
                 node_id: node.id.clone(),
-                message: format!("对比度 {:.1}:1 偏低（建议 4.5:1）", ratio),
-                suggestion: "建议对比度达到 4.5:1 以满足 WCAG AA 标准".to_string(),
+                message: format!("Contrast {:.1}:1 low (recommended 4.5:1)", ratio),
+                suggestion: "Aim for a contrast of 4.5:1 to meet the WCAG AA standard".to_string(),
                 severity: LintSeverity::Warning,
             });
         }
@@ -97,8 +99,8 @@ impl super::Linter {
             violations.push(LintViolation {
                 rule: LintRule::UnlabeledInput,
                 node_id: node.id.clone(),
-                message: format!("输入控件 '{}' 缺少标签", node.name),
-                suggestion: "添加 label 或 placeholder 子节点".to_string(),
+                message: format!("Input control '{}' is missing a label", node.name),
+                suggestion: "Add a label or placeholder child node".to_string(),
                 severity: LintSeverity::Error,
             });
         }
@@ -119,8 +121,9 @@ impl super::Linter {
                 violations.push(LintViolation {
                     rule: LintRule::TextEffects,
                     node_id: node.id.clone(),
-                    message: format!("文本节点 '{}' 使用了渐变填充", node.name),
-                    suggestion: "文本渐变降低可读性，建议使用纯色填充".to_string(),
+                    message: format!("Text node '{}' uses a gradient fill", node.name),
+                    suggestion: "Text gradients reduce readability; prefer a solid fill"
+                        .to_string(),
                     severity: LintSeverity::Warning,
                 });
             }
@@ -138,16 +141,26 @@ impl super::Linter {
             violations.push(LintViolation {
                 rule: LintRule::AbnormalRotation,
                 node_id: node.id.clone(),
-                message: format!("节点 '{}' 旋转角度 {:.1}° 超过 90°", node.name, rotation),
-                suggestion: "超过 90° 的旋转可能导致内容不可读，请确认是否正确".to_string(),
+                message: format!(
+                    "Node '{}' rotation angle {:.1} deg exceeds 90 deg",
+                    node.name, rotation
+                ),
+                suggestion:
+                    "Rotation over 90 deg can make content unreadable; confirm it is intended"
+                        .to_string(),
                 severity: LintSeverity::Error,
             });
         } else if rotation != 0.0 && (rotation % 15.0).abs() > 0.01 {
             violations.push(LintViolation {
                 rule: LintRule::AbnormalRotation,
                 node_id: node.id.clone(),
-                message: format!("节点 '{}' 旋转角度 {:.1}° 非 15° 倍数", node.name, rotation),
-                suggestion: "建议使用 15° 倍数的旋转角度以保持对齐一致".to_string(),
+                message: format!(
+                    "Node '{}' rotation angle {:.1} deg is not a multiple of 15 deg",
+                    node.name, rotation
+                ),
+                suggestion:
+                    "Prefer rotation angles in multiples of 15 deg to keep alignment consistent"
+                        .to_string(),
                 severity: LintSeverity::Info,
             });
         }
@@ -161,8 +174,12 @@ impl super::Linter {
                 violations.push(LintViolation {
                     rule: LintRule::EmptyEffects,
                     node_id: node.id.clone(),
-                    message: format!("节点 '{}' 声明了填充色但值为空", node.name),
-                    suggestion: "移除空的填充声明或设置颜色值".to_string(),
+                    message: format!(
+                        "Node '{}' declares a fill but its value is empty",
+                        node.name
+                    ),
+                    suggestion: "Remove the empty fill declaration or set a color value"
+                        .to_string(),
                     severity: LintSeverity::Warning,
                 });
             }
@@ -173,8 +190,12 @@ impl super::Linter {
                 violations.push(LintViolation {
                     rule: LintRule::EmptyEffects,
                     node_id: node.id.clone(),
-                    message: format!("节点 '{}' 声明了描边色但值为空", node.name),
-                    suggestion: "移除空的描边声明或设置颜色值".to_string(),
+                    message: format!(
+                        "Node '{}' declares a stroke but its value is empty",
+                        node.name
+                    ),
+                    suggestion: "Remove the empty stroke declaration or set a color value"
+                        .to_string(),
                     severity: LintSeverity::Warning,
                 });
             }
@@ -185,8 +206,12 @@ impl super::Linter {
                 violations.push(LintViolation {
                     rule: LintRule::EmptyEffects,
                     node_id: node.id.clone(),
-                    message: format!("节点 '{}' 声明了字体族但值为空", node.name),
-                    suggestion: "移除空的字体声明或设置字体族".to_string(),
+                    message: format!(
+                        "Node '{}' declares a font family but its value is empty",
+                        node.name
+                    ),
+                    suggestion: "Remove the empty font declaration or set a font family"
+                        .to_string(),
                     severity: LintSeverity::Warning,
                 });
             }
@@ -212,10 +237,10 @@ impl super::Linter {
                     rule: LintRule::TokenInconsistency,
                     node_id: node.id.clone(),
                     message: format!(
-                        "节点 '{}' 填充色 '{}' 匹配 Token '{}'，建议直接引用 Token",
+                        "Node '{}' fill '{}' matches Token '{}'; prefer referencing the Token directly",
                         node.name, fill, token_name
                     ),
-                    suggestion: format!("使用 Token 引用替代硬编码值: {}", token_name),
+                    suggestion: format!("Use a Token reference instead of the hardcoded value: {}", token_name),
                     severity: LintSeverity::Info,
                 });
             }
@@ -227,10 +252,10 @@ impl super::Linter {
                     rule: LintRule::TokenInconsistency,
                     node_id: node.id.clone(),
                     message: format!(
-                        "节点 '{}' 描边色 '{}' 匹配 Token '{}'，建议直接引用 Token",
+                        "Node '{}' stroke '{}' matches Token '{}'; prefer referencing the Token directly",
                         node.name, stroke, token_name
                     ),
-                    suggestion: format!("使用 Token 引用替代硬编码值: {}", token_name),
+                    suggestion: format!("Use a Token reference instead of the hardcoded value: {}", token_name),
                     severity: LintSeverity::Info,
                 });
             }
@@ -243,8 +268,11 @@ impl super::Linter {
             violations.push(LintViolation {
                 rule: LintRule::UnnamedNode,
                 node_id: node.id.clone(),
-                message: format!("节点 '{}' 使用默认名称，缺少语义标识", node.name),
-                suggestion: "为节点设置有意义的名称便于维护".to_string(),
+                message: format!(
+                    "Node '{}' uses a default name, lacking a semantic identifier",
+                    node.name
+                ),
+                suggestion: "Give the node a meaningful name for maintainability".to_string(),
                 severity: LintSeverity::Warning,
             });
         }
@@ -254,14 +282,14 @@ impl super::Linter {
         if node.kind != NodeKind::Text {
             return;
         }
-        // L-11：仅当文本非空且尺寸装不下才标溢出。
-        // 旧实现零维 + 空文本也标 Error = 假阳性（占位/空文本节点被误报）。
+        // L-11: only flag overflow when text is non-empty and the size cannot fit it.
+        // The old impl flagged zero dims + empty text as Error = false positive (placeholder/empty text nodes were mis-reported).
         let text = node.text.as_deref().unwrap_or("").trim();
         if text.is_empty() {
             return;
         }
         let font_size = node.style.font_size.unwrap_or(16.0);
-        // 粗略估算：每字符宽 ≈ font_size，需求宽度 = 字符数 × font_size。
+        // Rough estimate: each character is ~font_size wide; needed width = char count x font_size.
         let needed_w = text.chars().count() as f64 * font_size;
         if node.w > 0.0 && needed_w <= node.w {
             return;
@@ -270,13 +298,13 @@ impl super::Linter {
             rule: LintRule::TextOverflow,
             node_id: node.id.clone(),
             message: format!(
-                "文本节点 '{}' 内容将溢出（w={}, h={}, 文本长={}）",
+                "Text node '{}' content will overflow (w={}, h={}, text length={})",
                 node.name,
                 node.w,
                 node.h,
                 text.chars().count()
             ),
-            suggestion: "为文本节点设置宽高，或使用自适应布局".to_string(),
+            suggestion: "Set width/height on the text node, or use adaptive layout".to_string(),
             severity: LintSeverity::Error,
         });
     }
@@ -286,19 +314,19 @@ impl super::Linter {
         siblings: &[PenNode],
         violations: &mut Vec<LintViolation>,
     ) {
-        // PERF-3：兄弟组节点数 > 阈值时降级——O(n²) worst-case 无界。
-        // 小文档（≤200）保持精确检测，大文档 warn + skip（fail visibly）。
+        // PERF-3: degrade when the sibling group exceeds the threshold — O(n^2) worst-case is unbounded.
+        // Small documents (<=200) keep exact detection; large documents warn + skip (fail visibly).
         const OVERLAP_CHECK_THRESHOLD: usize = 200;
         if siblings.len() > OVERLAP_CHECK_THRESHOLD {
             tracing::warn!(
                 count = siblings.len(),
                 threshold = OVERLAP_CHECK_THRESHOLD,
-                "节点过多跳过重叠检测（O(n²) 降级），worst-case 退化"
+                "too many nodes, skipping overlap detection (O(n^2) degradation), worst-case blowup"
             );
             return;
         }
-        // E-25：旧实现 `a.z_index == b.z_index` 才检测 → 不同 z_index 的重叠（如弹层叠按钮）漏检。
-        // 改为检测视觉重叠（bbox 相交）即报，z_index 差值大时降级为 Info（可能有意叠层）。
+        // E-25: the old impl only checked when `a.z_index == b.z_index` -> overlaps across different z_index (e.g. a modal over a button) were missed.
+        // Now reports on visual overlap (intersecting bboxes); a large z_index difference downgrades to Info (possibly intentional stacking).
         for i in 0..siblings.len() {
             for j in (i + 1)..siblings.len() {
                 let a = &siblings[i];
@@ -315,8 +343,13 @@ impl super::Linter {
                 violations.push(LintViolation {
                     rule: LintRule::OverlappingNodes,
                     node_id: format!("{}+{}", a.id, b.id),
-                    message: format!("节点 '{}' 与 '{}' 边界框重叠", a.name, b.name),
-                    suggestion: "调整节点位置或使用不同的 z-index 避免遮挡".to_string(),
+                    message: format!(
+                        "Nodes '{}' and '{}' have overlapping bounding boxes",
+                        a.name, b.name
+                    ),
+                    suggestion:
+                        "Adjust node positions or use different z-index values to avoid occlusion"
+                            .to_string(),
                     severity,
                 });
             }
@@ -337,10 +370,11 @@ impl super::Linter {
                         rule: LintRule::HardcodedSpacing,
                         node_id: node.id.clone(),
                         message: format!(
-                            "节点 '{}' Flex gap={} 未引用设计 Token",
+                            "Node '{}' Flex gap={} does not reference a design Token",
                             node.name, flex.gap
                         ),
-                        suggestion: "使用 design_token_refs 引用 spacing Token".to_string(),
+                        suggestion: "Use design_token_refs to reference a spacing Token"
+                            .to_string(),
                         severity: LintSeverity::Info,
                     });
                 }
@@ -352,10 +386,11 @@ impl super::Linter {
                         rule: LintRule::HardcodedSpacing,
                         node_id: node.id.clone(),
                         message: format!(
-                            "节点 '{}' padding(t={}/r={}/b={}/l={}) 未引用设计 Token",
+                            "Node '{}' padding(t={}/r={}/b={}/l={}) does not reference a design Token",
                             node.name, p.top, p.right, p.bottom, p.left
                         ),
-                        suggestion: "使用 design_token_refs 引用 spacing Token".to_string(),
+                        suggestion: "Use design_token_refs to reference a spacing Token"
+                            .to_string(),
                         severity: LintSeverity::Info,
                     });
                 }
@@ -368,10 +403,11 @@ impl super::Linter {
                         rule: LintRule::HardcodedSpacing,
                         node_id: node.id.clone(),
                         message: format!(
-                            "节点 '{}' Grid gap=({}, {}) 未引用设计 Token",
+                            "Node '{}' Grid gap=({}, {}) does not reference a design Token",
                             node.name, grid.gap.0, grid.gap.1
                         ),
-                        suggestion: "使用 design_token_refs 引用 spacing Token".to_string(),
+                        suggestion: "Use design_token_refs to reference a spacing Token"
+                            .to_string(),
                         severity: LintSeverity::Info,
                     });
                 }
@@ -390,8 +426,11 @@ impl super::Linter {
                 violations.push(LintViolation {
                     rule: LintRule::HardcodedFontSize,
                     node_id: node.id.clone(),
-                    message: format!("节点 '{}' font_size={} 未引用设计 Token", node.name, fs),
-                    suggestion: "使用 design_token_refs 引用 typography Token".to_string(),
+                    message: format!(
+                        "Node '{}' font_size={} does not reference a design Token",
+                        node.name, fs
+                    ),
+                    suggestion: "Use design_token_refs to reference a typography Token".to_string(),
                     severity: LintSeverity::Info,
                 });
             }
@@ -429,8 +468,11 @@ impl super::Linter {
             violations.push(LintViolation {
                 rule: LintRule::MissingInteractionState,
                 node_id: node.id.clone(),
-                message: format!("交互控件 '{}' 缺少 hover/active 状态定义", node.name),
-                suggestion: "添加 hover/active/focus 状态子节点".to_string(),
+                message: format!(
+                    "Interactive control '{}' is missing hover/active state definitions",
+                    node.name
+                ),
+                suggestion: "Add hover/active/focus state child nodes".to_string(),
                 severity: LintSeverity::Warning,
             });
         }
@@ -463,10 +505,10 @@ impl super::Linter {
                     rule: LintRule::LayoutInconsistency,
                     node_id: format!("{}+{}", siblings[0].id, sibling.id),
                     message: format!(
-                        "同级节点 '{}' 使用 {} 布局，'{}' 使用 {} 布局，不一致",
+                        "Sibling nodes inconsistent: '{}' uses {} layout, '{}' uses {} layout",
                         siblings[0].name, first_layout_mode, sibling.name, mode
                     ),
-                    suggestion: "同级节点建议使用统一的布局模式".to_string(),
+                    suggestion: "Sibling nodes should use a consistent layout mode".to_string(),
                     severity: LintSeverity::Warning,
                 });
             }

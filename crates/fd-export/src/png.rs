@@ -1,5 +1,5 @@
-// ARCH-10 r4：PNG 光栅化从 lib.rs 拆出。经 svg::render_svg 产 SVG 串再经
-// resvg 光栅化。尺寸/总像素门控防 OOM。零行为变更。
+// ARCH-10 r4: PNG rasterization split out of lib.rs. Produces an SVG string via svg::render_svg,
+// then rasterizes with resvg. Size/total-pixel gates prevent OOM. Zero behavior change.
 
 use std::path::Path;
 
@@ -10,13 +10,13 @@ pub(super) fn render_png(page: &CanvasPage, file: &Path) -> Result<(), ExportErr
     let svg_str = render_svg(page);
     let opt = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_str(&svg_str, &opt)
-        .map_err(|e| ExportError::RenderFailed(format!("SVG 解析失败: {e}")))?;
+        .map_err(|e| ExportError::RenderFailed(format!("SVG parse failed: {e}")))?;
     let pixmap_size = tree.size();
     let width = pixmap_size.width() as u32;
     let height = pixmap_size.height() as u32;
     if width == 0 || height == 0 {
         return Err(ExportError::RenderFailed(
-            "页面尺寸为零，无法渲染 PNG".into(),
+            "page size is zero, cannot render PNG".into(),
         ));
     }
     if width > MAX_CANVAS_DIM || height > MAX_CANVAS_DIM {
@@ -24,13 +24,13 @@ pub(super) fn render_png(page: &CanvasPage, file: &Path) -> Result<(), ExportErr
             width,
             height,
             limit = MAX_CANVAS_DIM,
-            "画布尺寸超出光栅化上限，拒绝渲染 PNG"
+            "canvas size exceeds rasterization limit, refusing to render PNG"
         );
         return Err(ExportError::RenderFailed(format!(
-            "画布尺寸 {width}x{height} 超出光栅化上限 {MAX_CANVAS_DIM}x{MAX_CANVAS_DIM}，拒绝渲染 PNG 防止 OOM"
+            "canvas size {width}x{height} exceeds rasterization limit {MAX_CANVAS_DIM}x{MAX_CANVAS_DIM}, refusing to render PNG to prevent OOM"
         )));
     }
-    // R-A16：单边限制不够，16384²×4=1GB 仍 OOM。总像素门控。
+    // R-A16: an edge-only limit is not enough, 16384^2 x 4 = 1GB would still OOM. Total-pixel gate.
     let total_pixels = width as u64 * height as u64;
     if total_pixels > MAX_CANVAS_PIXELS {
         tracing::warn!(
@@ -38,14 +38,15 @@ pub(super) fn render_png(page: &CanvasPage, file: &Path) -> Result<(), ExportErr
             height,
             total_pixels,
             limit = MAX_CANVAS_PIXELS,
-            "画布总像素超出上限，拒绝渲染 PNG"
+            "canvas total pixels exceed the limit, refusing to render PNG"
         );
         return Err(ExportError::RenderFailed(format!(
-            "画布总像素 {total_pixels} ({width}x{height}) 超出上限 {MAX_CANVAS_PIXELS}，拒绝渲染 PNG 防止 OOM"
+            "canvas total pixels {total_pixels} ({width}x{height}) exceed limit {MAX_CANVAS_PIXELS}, refusing to render PNG to prevent OOM"
         )));
     }
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| ExportError::RenderFailed(format!("无法创建 pixmap ({width}x{height})")))?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
+        ExportError::RenderFailed(format!("failed to create pixmap ({width}x{height})"))
+    })?;
     resvg::render(
         &tree,
         resvg::tiny_skia::Transform::identity(),
@@ -53,8 +54,8 @@ pub(super) fn render_png(page: &CanvasPage, file: &Path) -> Result<(), ExportErr
     );
     let png_data = pixmap
         .encode_png()
-        .map_err(|e| ExportError::RenderFailed(format!("PNG 编码失败: {e}")))?;
+        .map_err(|e| ExportError::RenderFailed(format!("PNG encoding failed: {e}")))?;
     std::fs::write(file, &png_data)?;
-    tracing::info!(?file, "PNG 已导出");
+    tracing::info!(?file, "PNG exported");
     Ok(())
 }

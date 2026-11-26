@@ -1,7 +1,7 @@
-// ARCH-10 r4：SwiftUI 渲染从 lib.rs 拆出。render_page_swiftui/node_to_swiftui/
+// ARCH-10 r4: SwiftUI rendering split out of lib.rs. render_page_swiftui/node_to_swiftui/
 // swift_ui_color/escape_swift_string/TokenExt/collect_token_extensions/
-// render_token_extensions。调 util（MAX_CODEGEN_DEPTH）+ fd_canvas_core::parse_hex_color。
-// 零行为变更。
+// render_token_extensions. Calls util (MAX_CODEGEN_DEPTH) + fd_canvas_core::parse_hex_color.
+// Zero behavior change.
 
 use std::collections::HashMap;
 
@@ -42,15 +42,15 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
         ));
     }
     if let Some(fill) = &node.style.fill {
-        // R-6：fill 入 swift_ui_color("...") 的 Swift 字面量，须转义防注入。
+        // R-6: fill goes into the swift_ui_color("...") Swift literal; escape it to prevent injection.
         mods.push(format!(
             ".background(swift_ui_color(\"{}\"))",
             escape_swift_string(fill)
         ));
     }
     if let Some(stroke) = &node.style.stroke {
-        // E-8：stroke_width 而非硬编码 lineWidth:1（对齐 HTML/Tailwind 路径）。
-        // R-6：stroke 同入 Swift 字面量，转义。
+        // E-8: stroke_width instead of hardcoded lineWidth:1 (aligned with the HTML/Tailwind paths).
+        // R-6: stroke also goes into a Swift literal; escape it.
         let sw = node.style.stroke_width.unwrap_or(1.0);
         mods.push(format!(".overlay(RoundedRectangle(cornerRadius: {}).stroke(swift_ui_color(\"{}\"), lineWidth: {}))",
             node.style.radius.unwrap_or(0.0) as i32, escape_swift_string(stroke), sw as i32));
@@ -65,8 +65,8 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
             mods.push(format!(".opacity({})", op));
         }
     }
-    // E-8：SwiftUI 路径补 rotation/z_index/font_family（此前仅 font_size，
-    // 对齐 HTML/Tailwind/React 路径 5 维完整渲染）。
+    // E-8: the SwiftUI path adds rotation/z_index/font_family (previously font_size only,
+    // now aligned with the full 5-dim rendering of the HTML/Tailwind/React paths).
     if node.rotation != 0.0 {
         mods.push(format!(
             ".rotationEffect(.degrees({}))",
@@ -78,7 +78,7 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
     }
     if let Some(fs) = node.style.font_size {
         if let Some(ff) = &node.style.font_family {
-            // R-6：font_family 入字面量，转义防注入
+            // R-6: font_family goes into a literal; escape it to prevent injection
             mods.push(format!(
                 ".font(.custom(\"{}\", size: {}))",
                 escape_swift_string(ff),
@@ -168,7 +168,7 @@ fn node_to_swiftui_inner(node: &PenNode, indent: usize, depth: usize) -> String 
         }
     };
 
-    // 非 Group 叶子节点带子节点：用 ZStack 承载叶子 + 子节点，避免丢嵌套（#7）
+    // Non-Group leaf node with children: host the leaf + children in a ZStack, avoiding lost nesting (#7)
     if !matches!(node.kind, NodeKind::Group) && !node.children.is_empty() {
         let mut out = format!("{}ZStack {{\n", pad);
         out.push_str(&rendered);
@@ -188,19 +188,19 @@ pub(crate) fn swift_ui_color(color: &str) -> String {
     if let Some(rest) = color.strip_prefix("token:") {
         return format!("DesignTokens.{}", rest.replace('.', "_"));
     }
-    // C-2/A-2：经共享 parse_hex_color（ASCII 门控，CJK/emoji 返 None 不 panic）。
+    // C-2/A-2: via the shared parse_hex_color (ASCII-gated; CJK/emoji returns None without panicking).
     if let Some([r, g, b]) = parse_hex_color(color) {
         format!("Color(red: {}/255, green: {}/255, blue: {}/255)", r, g, b)
     } else {
-        // R-6：非 hex/token 的颜色名（如 CSS 命名色）入 Color("...") 字符串字面量，
-        // 须转义引号/反斜杠/换行，防 `red"); evil(); /*` 注入可执行 Swift。
+        // R-6: non-hex/non-token color names (e.g. CSS named colors) go into a Color("...") string literal;
+        // escape quotes/backslashes/newlines to prevent `red"); evil(); /*` injecting executable Swift.
         format!("Color(\"{}\")", escape_swift_string(color))
     }
 }
 
-/// R-6：Swift 字符串字面量转义。注入面：fill/stroke/font_family/color 经 format!
-/// 塞入 `"...""` 字面量，未转义的 `"`/`\`/换行可闭合字面量注入可执行代码。
-/// 转义顺序：先 `\`（避免二次转义后续插入的反斜杠），再 `"`，再换行符。
+/// R-6: Swift string literal escaping. Injection surface: fill/stroke/font_family/color are spliced via format!
+/// into `"..."` literals; unescaped `"`/`\`/newlines can close the literal and inject executable code.
+/// Escape order: `\` first (avoiding double-escaping backslashes inserted later), then `"`, then newlines.
 pub(crate) fn escape_swift_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")

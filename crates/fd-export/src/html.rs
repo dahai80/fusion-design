@@ -1,12 +1,12 @@
-// ARCH-10 r4：HTML 渲染从 lib.rs 拆出。render_html 包一层 SVG + 页名转义。
-// 调 svg::render_svg + util::xml_escape。零行为变更。
+// ARCH-10 r4: HTML rendering split out of lib.rs. render_html wraps an SVG layer + escaped page name.
+// Calls svg::render_svg + util::xml_escape. Zero behavior change.
 
 use crate::svg::render_svg;
 use crate::{util::xml_escape, CanvasPage};
 
 pub(super) fn render_html(page: &CanvasPage) -> String {
     let svg = render_svg(page);
-    // E-21：page.name 经 IPC/AI 可含 </title><script>…，转义防 HTML 注入（WKWebView 原生桥接=XSS=原生执行）。
+    // E-21: page.name may contain </title><script>... via IPC/AI; escape it to prevent HTML injection (WKWebView native bridge = XSS = native execution).
     let safe_name = xml_escape(&page.name);
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>{name}</title>\

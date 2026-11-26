@@ -1,44 +1,45 @@
 // Callers: DesignBridge.swift, fd-cli codegen subcommand
 // Affected API: CodegenTarget::SwiftUi added, SwiftUiCodegen struct, node_to_swiftui/render_page_swiftui helpers
 // Data schemas: PenDocument→SwiftUI View code, Flex→HStack/VStack, Grid→SwiftUI Grid, Token→Color/Font extension
-// User instruction: "按照P1~P6顺序实施所有未完成的任务" — Task #33 P5-4 SwiftUI 导出 target
+// User instruction: "implement all unfinished tasks in P1~P6 order" — Task #33 P5-4 SwiftUI export target
 
-//! Fusion-Design 代码导出 — 消费 `fd-canvas-core::PenDocument`，
-//! 生成 HTML / React / Tailwind / SwiftUI 代码。
+//! Fusion-Design code export — consumes `fd-canvas-core::PenDocument`,
+//! generating HTML / React / Tailwind / SwiftUI code.
 //!
-//! 对应 PRD 模块 4「Fusion Code 双向打通」的正向导出能力。
-//! 设计参照 OpenPencil `op-codegen` 的 `Codegen` trait 形状，
-//! 但消费自研的 `PenDocument`（非 jian-ops-schema），零外部依赖。
+//! Covers the forward export capability of PRD module 4 "Fusion Code two-way bridge".
+//! Modeled on the `Codegen` trait shape of OpenPencil's `op-codegen`,
+//! but consumes the in-house `PenDocument` (not jian-ops-schema), zero external dependencies.
 
-// ARCH-10 r4：god-file 拆分第四轮。HTML/React/SwiftUI 渲染辅助 + 通用工具
-// 迁至 html.rs / react.rs / swiftui.rs / util.rs，lib.rs 仅留类型定义、Codegen
-// trait 与四个生成器实现、resolve_tokens token 解析。纯位置迁移，零行为变更。
+// ARCH-10 r4: fourth round of god-file splitting. HTML/React/SwiftUI rendering helpers + shared
+// utilities moved to html.rs / react.rs / swiftui.rs / util.rs; lib.rs keeps only type definitions,
+// the Codegen trait with its four generator impls, and resolve_tokens token parsing.
+// Pure positional move, zero behavior change.
 
 mod html;
 mod react;
 mod swiftui;
 mod util;
 
-// 测试经 `use super::*` 裸调 escape_swift_string / swift_ui_color（迁至 swiftui.rs），
-// 须在此 re-export 供 `mod tests` 解析。
+// Tests call escape_swift_string / swift_ui_color (moved to swiftui.rs) directly via `use super::*`,
+// so they must be re-exported here for `mod tests` to resolve.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use swiftui::{escape_swift_string, swift_ui_color};
 
-// 测试经 `use super::*` 裸调 fd_canvas_core 类型（LayoutMode/FlexDirection/
-// FlexParams/GridParams/NodeKind/Page/PenDocument/PenNode 等），须在此 re-export。
+// Tests call fd_canvas_core types (LayoutMode/FlexDirection/
+// FlexParams/GridParams/NodeKind/Page/PenDocument/PenNode etc.) directly via `use super::*`, so they must be re-exported here.
 use fd_canvas_core::*;
 use fd_design_system::DesignSystemRegistry;
 
-/// 代码生成目标框架。
+/// Code generation target framework.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodegenTarget {
-    /// 纯 HTML + 内联 CSS（静态预览）。
+    /// Plain HTML + inline CSS (static preview).
     Html,
-    /// React 函数组件 + Tailwind class。
+    /// React function component + Tailwind classes.
     ReactTailwind,
-    /// 仅 Tailwind class 字符串（供嵌入）。
+    /// Tailwind class string only (for embedding).
     TailwindOnly,
-    /// SwiftUI View 代码。
+    /// SwiftUI View code.
     SwiftUi,
 }
 
@@ -53,13 +54,13 @@ impl CodegenTarget {
     }
 }
 
-/// 代码生成器 trait。
+/// Code generator trait.
 pub trait Codegen {
     fn target(&self) -> CodegenTarget;
     fn generate(&self, doc: &PenDocument) -> String;
 }
 
-/// HTML 静态生成器。
+/// Static HTML generator.
 pub struct HtmlCodegen;
 
 impl Codegen for HtmlCodegen {
@@ -80,7 +81,7 @@ impl Codegen for HtmlCodegen {
     }
 }
 
-/// React + Tailwind 生成器。
+/// React + Tailwind generator.
 pub struct ReactTailwindCodegen {
     pub component_name: String,
 }
@@ -108,7 +109,7 @@ impl Codegen for ReactTailwindCodegen {
     }
 }
 
-/// Tailwind-only 生成器（仅 class 字符串）。
+/// Tailwind-only generator (class string only).
 pub struct TailwindOnlyCodegen;
 
 impl Codegen for TailwindOnlyCodegen {
@@ -127,7 +128,7 @@ impl Codegen for TailwindOnlyCodegen {
     }
 }
 
-/// SwiftUI View 生成器。
+/// SwiftUI View generator.
 pub struct SwiftUiCodegen {
     pub view_name: String,
 }
@@ -160,10 +161,11 @@ impl Codegen for SwiftUiCodegen {
     }
 }
 
-/// 按 design system 解析 token 引用（如 `color.bg` → 实际 hex）。
+/// Resolve token references against the design system (e.g. `color.bg` -> actual hex).
 ///
-/// H-A11：递归遍历 children——旧实现只处理 page.nodes 顶层，嵌套节点的 token
-/// 引用未被解析，codegen 输出残留 `token:xxx` 浏览器不认 / SwiftUI 未定义符号。
+/// H-A11: recurse into children — the old impl only handled the top level of page.nodes, so
+/// token references on nested nodes were never resolved and codegen output retained `token:xxx`,
+/// which browsers ignore / SwiftUI treats as undefined symbols.
 pub fn resolve_tokens(doc: &PenDocument, reg: &DesignSystemRegistry) -> PenDocument {
     let mut resolved = doc.clone();
     let resolve = |v: &Option<String>| -> Option<String> {
@@ -191,8 +193,8 @@ fn resolve_tokens_recursive(
 ) {
     node.style.fill = resolve(&node.style.fill);
     node.style.stroke = resolve(&node.style.stroke);
-    // E-16：font_family 旧实现未经 resolve，token:font.mono 引用无法解析为实际字体栈。
-    // robot-sim font.mono=String("SF Mono, Menlo, monospace")，经 resolve 闭包的 String arm 解析。
+    // E-16: font_family was previously not resolved, so token:font.mono references could not resolve to an actual font stack.
+    // robot-sim font.mono=String("SF Mono, Menlo, monospace"), resolved via the String arm of the resolve closure.
     node.style.font_family = resolve(&node.style.font_family);
     for child in &mut node.children {
         resolve_tokens_recursive(child, resolve);
@@ -235,8 +237,8 @@ mod tests {
         assert!(out.contains("bg-[#FFF]"));
     }
 
-    // E-10 回归：node.id 含 `" onclick="alert(1)` 应转义，不得注入属性；
-    // fill 含 `red;} * {background:url(http://evil)}` 应净化，不得逃逸 CSS 属性边界。
+    // E-10 regression: node.id containing `" onclick="alert(1)` must be escaped, not injected as an attribute;
+    // fill containing `red;} * {background:url(http://evil)}` must be sanitized, not escape the CSS property boundary.
     #[test]
     fn codegen_escapes_xss_id_and_css() {
         let mut doc = PenDocument::new();
@@ -249,18 +251,24 @@ mod tests {
         let html = HtmlCodegen.generate(&doc);
         assert!(
             !html.contains("onclick=\"alert(1)\""),
-            "原始 onclick 不得残留"
+            "raw onclick must not survive"
         );
         assert!(
             html.contains("data-id=\"a&quot; onclick=&quot;alert(1)\""),
-            "id 引号应转义为 &quot;"
+            "id quotes must be escaped to &quot;"
         );
-        assert!(!html.contains("url(http://evil)"), "fill url() 应被剥离");
-        assert!(!html.contains("} * {"), "CSS 属性逃逸花括号应被剔除");
-        // fill 含 url() → 降级 transparent，不得泄漏外网地址。
+        assert!(
+            !html.contains("url(http://evil)"),
+            "fill url() must be stripped"
+        );
+        assert!(
+            !html.contains("} * {"),
+            "CSS property escape braces must be removed"
+        );
+        // fill containing url() -> degrades to transparent, must not leak the external address.
         assert!(
             html.contains("background:transparent"),
-            "危险 fill 应降级 transparent"
+            "dangerous fill must degrade to transparent"
         );
 
         let gen = ReactTailwindCodegen {
@@ -269,7 +277,7 @@ mod tests {
         let react = gen.generate(&doc);
         assert!(
             !react.contains("url(http://evil)"),
-            "Tailwind bg-[...] url() 应被剥离"
+            "Tailwind bg-[...] url() must be stripped"
         );
     }
 
@@ -327,7 +335,7 @@ mod tests {
         assert!(out.contains("data-id=\"inner\""));
     }
 
-    // F1/XSS 回归：node.text 含脚本载荷，HTML 输出必须转义，不可执行。
+    // F1/XSS regression: node.text contains a script payload, HTML output must escape it, not execute it.
     #[test]
     fn html_text_escapes_script_payload() {
         let mut doc = PenDocument::new();
@@ -338,12 +346,12 @@ mod tests {
         let out = HtmlCodegen.generate(&doc);
         assert!(
             !out.contains("<img src=x onerror"),
-            "原始标签不得残留在 HTML 输出"
+            "raw tag must not survive in HTML output"
         );
-        assert!(out.contains("&lt;img"), "必须转义为实体");
+        assert!(out.contains("&lt;img"), "must be escaped to entities");
     }
 
-    // F1/XSS 回归：React 输出同样转义。
+    // F1/XSS regression: React output escapes the same way.
     #[test]
     fn react_text_escapes_script_payload() {
         let mut doc = PenDocument::new();
@@ -357,15 +365,18 @@ mod tests {
         let out = gen.generate(&doc);
         assert!(
             !out.contains("<script>"),
-            "原始 script 标签不得残留在 JSX 输出"
+            "raw script tag must not survive in JSX output"
         );
-        assert!(out.contains("&lt;script&gt;"), "必须转义为实体");
+        assert!(
+            out.contains("&lt;script&gt;"),
+            "must be escaped to entities"
+        );
     }
 
     #[test]
     fn rect_with_children_renders_nested() {
-        // parse-html 把带子节点的 <div> 映射为 Rect（非 Group）；
-        // codegen 必须递归渲染其 children，否则往返丢失嵌套（#7）。
+        // parse-html maps a <div> with children to a Rect (not a Group);
+        // codegen must render its children recursively, otherwise the round-trip loses nesting (#7).
         let mut doc = PenDocument::new();
         let mut page = Page::new("p", "P", 100.0, 100.0);
         let mut container = PenNode::rect("container", 0.0, 0.0, 80.0, 60.0);
@@ -383,12 +394,12 @@ mod tests {
         assert!(out.contains("data-id=\"title\""));
         assert!(out.contains("data-id=\"btn\""));
         assert!(out.contains("标题"));
-        // 子节点须出现在父节点开标签之后（嵌套而非丢弃）
+        // Children must appear after the parent's opening tag (nested, not dropped)
         let c_pos = out.find("data-id=\"container\"").unwrap();
         let t_pos = out.find("data-id=\"title\"").unwrap();
         let b_pos = out.find("data-id=\"btn\"").unwrap();
-        assert!(t_pos > c_pos, "title 应嵌套在 container 内");
-        assert!(b_pos > c_pos, "btn 应嵌套在 container 内");
+        assert!(t_pos > c_pos, "title must be nested inside container");
+        assert!(b_pos > c_pos, "btn must be nested inside container");
     }
 
     #[test]
@@ -411,8 +422,8 @@ mod tests {
         let c_pos = out.find("data-id=\"container\"").unwrap();
         let t_pos = out.find("data-id=\"title\"").unwrap();
         let b_pos = out.find("data-id=\"btn\"").unwrap();
-        assert!(t_pos > c_pos, "title 应嵌套在 container 内");
-        assert!(b_pos > c_pos, "btn 应嵌套在 container 内");
+        assert!(t_pos > c_pos, "title must be nested inside container");
+        assert!(b_pos > c_pos, "btn must be nested inside container");
     }
 
     #[test]
@@ -458,7 +469,7 @@ mod tests {
         );
     }
 
-    // H-A11：resolve_tokens 须递归 children——旧实现只处理顶层，嵌套 token 残留。
+    // H-A11: resolve_tokens must recurse into children — the old impl only handled the top level, leaving nested tokens unresolved.
     #[test]
     fn resolve_tokens_recurses_children() {
         use fd_design_system::DesignSystemRegistry;
@@ -467,7 +478,7 @@ mod tests {
         reg.activate("apple-hig").unwrap();
         let mut doc = PenDocument::new();
         let mut page = Page::new("p", "P", 100.0, 100.0);
-        // 顶层节点带嵌套子节点，子节点 fill 用 token 引用
+        // Top-level node with a nested child; the child's fill uses a token reference
         let mut child = PenNode::rect("child", 0.0, 0.0, 5.0, 5.0);
         child.style.fill = Some("token:color.accent".into());
         let mut parent = PenNode::group("parent", 0.0, 0.0, vec![child]);
@@ -476,19 +487,20 @@ mod tests {
         doc.add_page(page);
         let resolved = resolve_tokens(&doc, &reg);
         let p = &resolved.pages[0].nodes[0];
-        // 顶层解析
+        // Top level resolved
         assert_eq!(p.style.fill.as_deref(), Some("#007AFF"));
-        // 嵌套 children 也解析（H-A11 修复前此处残留 token:color.accent）
+        // Nested children resolved too (before the H-A11 fix this retained token:color.accent)
         assert_eq!(
             p.children[0].style.fill.as_deref(),
             Some("#007AFF"),
-            "嵌套子节点的 token 引用应被递归解析"
+            "token reference on a nested child must be resolved recursively"
         );
     }
 
-    // E-16 回归：resolve_tokens_recursive 旧实现仅处理 fill/stroke，font_family
-    // 的 `token:font.mono` 引用无法解析为实际字体栈，codegen 输出残留 token 字面量。
-    // 修复后 font_family 经 resolve 闭包的 String arm 解析。
+    // E-16 regression: resolve_tokens_recursive previously only handled fill/stroke, so a
+    // `token:font.mono` reference in font_family could not resolve to an actual font stack
+    // and codegen output retained the token literal.
+    // After the fix font_family resolves via the String arm of the resolve closure.
     #[test]
     fn resolve_tokens_resolves_font_family_token_ref() {
         use fd_design_system::DesignSystemRegistry;
@@ -505,7 +517,7 @@ mod tests {
         assert_eq!(
             resolved.pages[0].nodes[0].style.font_family.as_deref(),
             Some("SF Mono, Menlo, monospace"),
-            "font_family token 引用应解析为实际字体栈（E-16）"
+            "font_family token reference must resolve to the actual font stack (E-16)"
         );
     }
 
@@ -639,7 +651,7 @@ mod tests {
 
     #[test]
     fn swiftui_rect_with_children_wraps_zstack() {
-        // 非 Group 叶子节点带子节点：SwiftUI 用 ZStack 承载，子节点不得丢失（#7）
+        // Non-Group leaf node with children: SwiftUI hosts them in a ZStack, children must not be dropped (#7)
         let mut doc = PenDocument::new();
         let mut page = Page::new("p", "P", 100.0, 100.0);
         let mut container = PenNode::rect("container", 0.0, 0.0, 80.0, 60.0);
@@ -652,12 +664,18 @@ mod tests {
             view_name: "NestView".into(),
         };
         let out = gen.generate(&doc);
-        assert!(out.contains("ZStack {"), "非 Group 容器应外裹 ZStack");
-        assert!(out.contains("Color.clear"), "叶子 Rect 应渲染");
-        assert!(out.contains("Text(\"标题\")"), "子节点 Text 不得丢失");
+        assert!(
+            out.contains("ZStack {"),
+            "non-Group container must be wrapped in ZStack"
+        );
+        assert!(out.contains("Color.clear"), "leaf Rect must render");
+        assert!(
+            out.contains("Text(\"标题\")"),
+            "child Text must not be dropped"
+        );
     }
 
-    // E-8 回归：codegen 必须输出 rotation/z_index/stroke_width/font_family/font_size 5 维。
+    // E-8 regression: codegen must emit all 5 style dims: rotation/z_index/stroke_width/font_family/font_size.
     #[test]
     fn codegen_emits_all_style_dims_html() {
         let mut node = PenNode::rect("n1", 10.0, 20.0, 50.0, 30.0);
@@ -672,19 +690,28 @@ mod tests {
         let mut doc = PenDocument::new();
         doc.add_page(page);
         let out = HtmlCodegen.generate(&doc);
-        assert!(out.contains("transform:rotate(15deg)"), "应输出 rotation");
-        assert!(out.contains("z-index:10"), "应输出 z_index");
+        assert!(
+            out.contains("transform:rotate(15deg)"),
+            "must output rotation"
+        );
+        assert!(out.contains("z-index:10"), "must output z_index");
         assert!(
             out.contains("border:5px solid"),
-            "应输出 stroke_width=5 非 2"
+            "must output stroke_width=5, not 2"
         );
-        assert!(out.contains("font-size:16px"), "应输出 font_size");
-        assert!(out.contains("font-family:system-ui"), "应输出 font_family");
-        // 旧实现固定 border:2px，回归确认不再固定 2px。
-        assert!(!out.contains("border:2px solid"), "不得固定 2px 边框");
+        assert!(out.contains("font-size:16px"), "must output font_size");
+        assert!(
+            out.contains("font-family:system-ui"),
+            "must output font_family"
+        );
+        // The old impl hardcoded border:2px; regression confirms 2px is no longer fixed.
+        assert!(
+            !out.contains("border:2px solid"),
+            "must not hardcode a 2px border"
+        );
     }
 
-    // E-8 回归：Tailwind 路径同样输出 5 维。
+    // E-8 regression: the Tailwind path must emit the same 5 dims.
     #[test]
     fn codegen_emits_all_style_dims_tailwind() {
         let mut node = PenNode::rect("n1", 10.0, 20.0, 50.0, 30.0);
@@ -701,17 +728,26 @@ mod tests {
             component_name: "C".into(),
         };
         let out = gen.generate(&doc);
-        assert!(out.contains("rotate-[15deg]"), "Tailwind 应输出 rotation");
-        assert!(out.contains("z-[10]"), "Tailwind 应输出 z_index");
+        assert!(
+            out.contains("rotate-[15deg]"),
+            "Tailwind must output rotation"
+        );
+        assert!(out.contains("z-[10]"), "Tailwind must output z_index");
         assert!(
             out.contains("border-[5px]"),
-            "Tailwind 应输出 stroke_width=5"
+            "Tailwind must output stroke_width=5"
         );
-        assert!(out.contains("text-[16px]"), "Tailwind 应输出 font_size");
-        assert!(!out.contains("border-2"), "Tailwind 不得固定 border-2");
+        assert!(
+            out.contains("text-[16px]"),
+            "Tailwind must output font_size"
+        );
+        assert!(
+            !out.contains("border-2"),
+            "Tailwind must not hardcode border-2"
+        );
     }
 
-    // E-9 回归：Flex 布局节点不得输出 absolute + left/top，应输出 display:flex + flex 属性。
+    // E-9 regression: Flex layout nodes must not output absolute + left/top; they must output display:flex + flex properties.
     #[test]
     fn codegen_flex_not_absolute_html() {
         use fd_canvas_core::FlexParams;
@@ -722,15 +758,21 @@ mod tests {
         let mut doc = PenDocument::new();
         doc.add_page(page);
         let out = HtmlCodegen.generate(&doc);
-        assert!(out.contains("display:flex"), "Flex 应输出 display:flex");
-        assert!(out.contains("flex-direction:row"), "应输出 flex-direction");
+        assert!(
+            out.contains("display:flex"),
+            "Flex must output display:flex"
+        );
+        assert!(
+            out.contains("flex-direction:row"),
+            "must output flex-direction"
+        );
         assert!(
             !out.contains("position:absolute"),
-            "Flex 容器不得 absolute 定位"
+            "Flex container must not use absolute positioning"
         );
     }
 
-    // E-9 回归：Tailwind Flex 路径输出 flex 类，不输出 absolute。
+    // E-9 regression: the Tailwind Flex path outputs flex classes, not absolute.
     #[test]
     fn codegen_flex_not_absolute_tailwind() {
         use fd_canvas_core::FlexParams;
@@ -746,16 +788,16 @@ mod tests {
         let out = gen.generate(&doc);
         assert!(
             out.contains("flex flex-row"),
-            "Tailwind 应输出 flex flex-row"
+            "Tailwind must output flex flex-row"
         );
         assert!(
             !out.contains("absolute"),
-            "Tailwind Flex 不得 absolute 定位"
+            "Tailwind Flex must not use absolute positioning"
         );
     }
 
-    // E-8 回归（SwiftUI 路径）：rotation/z_index/stroke_width/font_family 4 维
-    // 此前 SwiftUI 仅渲染 font_size，对齐 HTML/Tailwind/React 5 维完整渲染。
+    // E-8 regression (SwiftUI path): rotation/z_index/stroke_width/font_family — 4 dims;
+    // previously SwiftUI rendered font_size only, now aligned with the full 5-dim rendering of HTML/Tailwind/React.
     #[test]
     fn swiftui_renders_rotation_zindex_stroke_width_font_family() {
         let mut doc = PenDocument::new();
@@ -776,27 +818,27 @@ mod tests {
         let out = gen.generate(&doc);
         assert!(
             out.contains(".rotationEffect(.degrees(45))"),
-            "SwiftUI 应渲染 rotation: {}",
+            "SwiftUI must render rotation: {}",
             out
         );
         assert!(
             out.contains(".zIndex(5)"),
-            "SwiftUI 应渲染 z_index: {}",
+            "SwiftUI must render z_index: {}",
             out
         );
         assert!(
             out.contains("lineWidth: 3"),
-            "SwiftUI stroke 应使用 stroke_width 而非硬编码 1: {}",
+            "SwiftUI stroke must use stroke_width instead of hardcoded 1: {}",
             out
         );
         assert!(
             out.contains(".font(.custom(\"Helvetica\", size: 18))"),
-            "SwiftUI 应渲染 font_family + font_size: {}",
+            "SwiftUI must render font_family + font_size: {}",
             out
         );
     }
 
-    // E-8 回归（SwiftUI 路径）：font_family 无 font_size 时回退 size:16。
+    // E-8 regression (SwiftUI path): font_family without font_size falls back to size:16.
     #[test]
     fn swiftui_font_family_without_size_falls_back() {
         let mut doc = PenDocument::new();
@@ -811,14 +853,14 @@ mod tests {
         let out = gen.generate(&doc);
         assert!(
             out.contains(".font(.custom(\"Menlo\", size: 16))"),
-            "font_family 无 size 应回退 16: {}",
+            "font_family without size must fall back to 16: {}",
             out
         );
     }
 
     #[test]
     fn escape_swift_string_escapes_injection_chars() {
-        // R-6：反斜杠/引号/换行须转义
+        // R-6: backslashes/quotes/newlines must be escaped
         assert_eq!(escape_swift_string("red"), "red");
         assert_eq!(
             escape_swift_string(r#"red"); evil(); /*"#),
@@ -830,17 +872,17 @@ mod tests {
 
     #[test]
     fn swift_ui_color_escapes_named_color_injection() {
-        // R-6：非 hex 命名色入 Color("...") 字面量。转义后每个 " 前必有 \。
-        // 危险模式 = 裸 "（未被 \ 转义）闭合字面量。检查：恶意输入含 "，
-        // 输出中所有 " 必须紧跟在 \ 之后（即 \" 形态），无裸 "。
+        // R-6: non-hex named colors go into a Color("...") literal. After escaping, every " must be preceded by \.
+        // Dangerous pattern = a bare " (not escaped by \) closing the literal. Check: malicious input contains ",
+        // so every " in the output must immediately follow a \ (i.e. \" form), with no bare ".
         let evil = r#"red"); evil(); /*"#;
         let out = swift_ui_color(evil);
         assert!(
             out.contains("\\\""),
             "quote must be escaped to backslash-quote: {out}"
         );
-        // 输出含 \" 表示已转义；进一步校验不存在未被转义的裸引号闭合注入：
-        // 去掉所有 \" 后，剩余的 " 必为字面量定界符（恰好 2 个：Color(" 和 ")）。
+        // Output containing \" means escaped; further verify no unescaped bare quote closes an injection:
+        // after removing all \", the remaining " must be literal delimiters (exactly 2: Color(" and ")).
         let stripped = out.replace("\\\"", "");
         let bare_quotes = stripped.matches('"').count();
         assert_eq!(
@@ -851,8 +893,8 @@ mod tests {
 
     #[test]
     fn swiftui_font_family_injection_blocked() {
-        // R-6 端到端：font_family 注入面经 escape_swift_string 拦截。
-        // 校验逻辑同上：去 \" 后仅余字面量定界引号。
+        // R-6 end-to-end: the font_family injection surface is intercepted by escape_swift_string.
+        // Same verification logic as above: after removing \", only literal delimiter quotes remain.
         let mut doc = PenDocument::new();
         let mut page = Page::new("p1", "P", 100.0, 100.0);
         let mut n = PenNode::rect("n1", 0.0, 0.0, 50.0, 30.0);
@@ -871,7 +913,7 @@ mod tests {
 
     #[test]
     fn swiftui_fill_injection_blocked() {
-        // R-6 端到端：非 hex fill 经 swift_ui_color 转义。
+        // R-6 end-to-end: non-hex fill is escaped by swift_ui_color.
         let mut doc = PenDocument::new();
         let mut page = Page::new("p1", "P", 100.0, 100.0);
         let mut n = PenNode::rect("n1", 0.0, 0.0, 50.0, 30.0);

@@ -1,13 +1,13 @@
 // Callers: fd-cli (lint subcommand → Linter::lint()), DesignBridge.swift (Process → fusion-design lint)
 // Affected API: Linter::new(), Linter::with_rules(), Linter::with_design_system(), Linter::lint(), LintResult, LintViolation, LintRule, LintSeverity
 // Data schemas: PenDocument→Vec<LintViolation> (13 rules), DesignSystem Token→HashMap for cross-ref, LintStats summary
-// User instruction: "现在开始实施" — Task #17 P3-6 design_lint Skill（基础检测器）
+// User instruction: "start implementing now" — Task #17 P3-6 design_lint Skill (basic detectors)
 //! Fusion-Design design lint — 13 detectors for design specification compliance.
 //!
-//! ARCH-10 r4：god-file 拆分。lib.rs 仅保留公共类型 + Lint 编排（lint/lint_children/
-//! lint_siblings/lint_node 调度）。13 个检测器迁 `detectors.rs`，颜色/对比度纯函数迁
-//! `color.rs`，auto-fix + Token 映射迁 `fix.rs`。build_token_map/build_numeric_token_map
-//! 为共享叶子辅助（detectors + fix + 测试均消费），留 lib.rs 作单一真相源。
+//! ARCH-10 r4: god-file split. lib.rs keeps only public types + Lint orchestration (lint/lint_children/
+//! lint_siblings/lint_node dispatch). The 13 detectors moved to `detectors.rs`, color/contrast pure
+//! functions to `color.rs`, auto-fix + Token mapping to `fix.rs`. build_token_map/build_numeric_token_map
+//! are shared leaf helpers (consumed by detectors + fix + tests), kept in lib.rs as the single source of truth.
 
 mod color;
 mod detectors;
@@ -70,29 +70,29 @@ impl LintRule {
 
     pub fn description(&self) -> &str {
         match self {
-            LintRule::ContrastCheck => "前景色与背景色对比度不足，影响可读性",
-            LintRule::UnlabeledInput => "输入控件缺少标签（label/placeholder）",
-            LintRule::TextEffects => "文本节点使用了特效（渐变等），影响可读性",
-            LintRule::AbnormalRotation => "节点旋转角度异常（超过90°或非15°倍数）",
-            LintRule::EmptyEffects => "节点声明了样式但参数为空，属于冗余",
-            LintRule::TokenInconsistency => "样式值未使用设计系统 Token，存在不一致风险",
-            LintRule::UnnamedNode => "节点使用默认名称，缺少语义标识",
-            LintRule::TextOverflow => "文本节点尺寸为零，内容将溢出",
-            LintRule::OverlappingNodes => "同级节点边界框重叠，可能导致遮挡",
-            LintRule::HardcodedSpacing => "间距值未引用设计 Token，维护性差",
-            LintRule::HardcodedFontSize => "字号未引用设计 Token，维护性差",
-            LintRule::MissingInteractionState => "交互控件缺少 hover/active 状态定义",
-            LintRule::LayoutInconsistency => "同级节点布局模式不一致",
+            LintRule::ContrastCheck => "Foreground/background contrast is insufficient, hurting readability",
+            LintRule::UnlabeledInput => "Input control is missing a label (label/placeholder)",
+            LintRule::TextEffects => "Text node uses effects (gradient etc.), hurting readability",
+            LintRule::AbnormalRotation => "Node rotation angle is abnormal (over 90 deg or not a multiple of 15 deg)",
+            LintRule::EmptyEffects => "Node declares a style with empty parameters, which is redundant",
+            LintRule::TokenInconsistency => "Style value does not use a design system Token, risking inconsistency",
+            LintRule::UnnamedNode => "Node uses a default name, lacking a semantic identifier",
+            LintRule::TextOverflow => "Text node has zero size, content will overflow",
+            LintRule::OverlappingNodes => "Sibling node bounding boxes overlap, which may cause occlusion",
+            LintRule::HardcodedSpacing => "Spacing value does not reference a design Token, hurting maintainability",
+            LintRule::HardcodedFontSize => "Font size does not reference a design Token, hurting maintainability",
+            LintRule::MissingInteractionState => "Interactive control is missing hover/active state definitions",
+            LintRule::LayoutInconsistency => "Sibling nodes use inconsistent layout modes",
             LintRule::BareColorLiteral => {
-                "颜色为裸 hex/rgb 字面量且不匹配任何设计 Token（desigma 准入门禁）"
+                "Color is a bare hex/rgb literal matching no design Token (desigma acceptance gate)"
             }
             LintRule::OffTokenSpacing => {
-                "间距值不在设计 Token 刻度上且未引用 Token（desigma 准入门禁）"
+                "Spacing value is off the design Token scale and references no Token (desigma acceptance gate)"
             }
             LintRule::OffTokenRadius => {
-                "圆角值不在设计 Token 刻度上且未引用 Token（desigma 准入门禁）"
+                "Radius value is off the design Token scale and references no Token (desigma acceptance gate)"
             }
-            LintRule::MissingDarkPair => "颜色匹配的 Token 缺少暗色模式配对（desigma 准入门禁）",
+            LintRule::MissingDarkPair => "Token matched by color lacks a dark-mode pair (desigma acceptance gate)",
         }
     }
 
@@ -232,7 +232,10 @@ impl Linter {
     }
 
     pub fn lint(&self, doc: &PenDocument) -> LintResult {
-        info!("lint: 开始检测 PenDocument, 规则数={}", self.rules.len());
+        info!(
+            "lint: starting PenDocument check, rules={}",
+            self.rules.len()
+        );
         let mut violations = Vec::new();
         let mut total_nodes = 0usize;
 
@@ -259,7 +262,7 @@ impl Linter {
             .count();
 
         info!(
-            "lint: 检测完成, 总节点={}, 违规={}, error={}, warning={}, info={}",
+            "lint: check finished, total_nodes={}, violations={}, error={}, warning={}, info={}",
             total_nodes,
             violations.len(),
             errors,
@@ -285,8 +288,8 @@ impl Linter {
         violations: &mut Vec<LintViolation>,
         total_nodes: &mut usize,
     ) {
-        // L-10：lint_siblings 移出 for child 循环——每兄弟集只查一次，
-        // 旧实现每 child 调一次 = N× 重复扫描 + N× 重复违规。
+        // L-10: lint_siblings moved out of the for-child loop — each sibling set is checked once;
+        // the old impl called it once per child = N x repeated scans + N x repeated violations.
         self.lint_siblings(&node.children, violations);
         let parent_fill = node.style.fill.as_deref();
         for child in &node.children {
@@ -383,9 +386,9 @@ fn build_numeric_token_map(system: &DesignSystem) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for token in &system.tokens {
         match &token.value {
-            // E-13：Number token（内置规范 spacing/font_size/radius 多用 Number），
-            // 旧实现仅处理 String 可解析数字，漏掉 Number 变体——gap=16 无法匹配
-            // `spacing.md` token 引用，auto-fix 失效。补 Number arm 入 map。
+            // E-13: Number tokens (builtin specs use Number for spacing/font_size/radius mostly);
+            // the old impl only handled parseable String digits and missed the Number variant —
+            // gap=16 could not match a `spacing.md` token reference, breaking auto-fix. Added the Number arm to the map.
             TokenValue::Number(n) => {
                 map.insert(format!("{}", n), token.name.clone());
             }
@@ -402,7 +405,7 @@ fn build_numeric_token_map(system: &DesignSystem) -> HashMap<String, String> {
 
 impl Linter {
     pub fn auto_fix(&self, doc: &mut PenDocument) -> FixResult {
-        info!("auto_fix: 开始自动修复, 规则数={}", self.rules.len());
+        info!("auto_fix: starting auto-fix, rules={}", self.rules.len());
         let mut result = FixResult {
             fixes_applied: 0,
             fixes_skipped: 0,
@@ -415,11 +418,11 @@ impl Linter {
             result.details.extend(token_result.details);
         } else {
             result.fixes_skipped += 1;
-            info!("auto_fix: 无设计规范, 跳过 Token 修复");
+            info!("auto_fix: no design system, skipping Token fixes");
         }
 
         info!(
-            "auto_fix: 完成, applied={}, skipped={}",
+            "auto_fix: finished, applied={}, skipped={}",
             result.fixes_applied, result.fixes_skipped
         );
         result
@@ -497,8 +500,8 @@ mod tests {
 
     #[test]
     fn contrast_low_ratio_detected() {
-        // L-9 正确语义：fg=Text 节点 fill（文字色），bg=父节点 fill（背景）。
-        // 父 rect fill=#333333 深灰背景 + 子 Text fill=#000000 黑字 → 对比度 ~1.6:1 → 应检出。
+        // L-9 correct semantics: fg = Text node fill (text color), bg = parent node fill (background).
+        // Parent rect fill=#333333 dark-gray background + child Text fill=#000000 black text -> contrast ~1.6:1 -> must be detected.
         let parent = rect_node(
             "r1",
             "box",
@@ -525,14 +528,14 @@ mod tests {
             .collect();
         assert!(
             !contrast_violations.is_empty(),
-            "深灰背景上的黑字对比度不足应检出"
+            "black text on a dark-gray background with insufficient contrast must be detected"
         );
     }
 
     #[test]
     fn contrast_good_ratio_no_violation() {
-        // E-28 正确语义：fill=#ffffff 白背景 + 默认黑字 → 对比度 21:1 → 无违规。
-        // 旧测试 fill=#000/stroke=#fff 把 stroke 当背景，是 bug 行为，已纠正。
+        // E-28 correct semantics: fill=#ffffff white background + default black text -> contrast 21:1 -> no violation.
+        // The old test fill=#000/stroke=#fff treated stroke as background — that was buggy behavior, now corrected.
         let style = NodeStyle {
             fill: Some("#ffffff".into()),
             stroke: Some("#000000".into()),
@@ -548,8 +551,8 @@ mod tests {
         assert!(contrast_violations.is_empty());
     }
 
-    // E-14 回归：rgb()/rgba()/命名色旧实现 luminance 返 -1.0 跳过 → 假阴性漏检。
-    // 修复后 rgb/rgba/命名色可解析，深底浅字应检出对比度不足。
+    // E-14 regression: the old impl returned -1.0 luminance and skipped for rgb()/rgba()/named colors -> false-negative misses.
+    // After the fix rgb/rgba/named colors parse, so dark background + light text must be detected as insufficient contrast.
     #[test]
     fn contrast_rgb_color_detected() {
         let parent = rect_node(
@@ -578,7 +581,7 @@ mod tests {
             .collect();
         assert!(
             !contrast_violations.is_empty(),
-            "rgb() 深灰背景上的黑字应检出对比度不足（E-14 修复后不再返 -1.0 跳过）"
+            "black text on an rgb() dark-gray background must be detected (after the E-14 fix, no longer returns -1.0 and skips)"
         );
     }
 
@@ -593,7 +596,7 @@ mod tests {
             },
         );
         let mut parent = parent;
-        // white on black = 21:1，无违规（验证命名色解析后正确通过）
+        // white on black = 21:1, no violation (verifies named colors pass correctly after parsing)
         parent.children = vec![text_node(
             "t1",
             "label",
@@ -611,13 +614,13 @@ mod tests {
             .collect();
         assert!(
             contrast_violations.is_empty(),
-            "white on black 命名色对比度 21:1 应无违规"
+            "white on black named colors with 21:1 contrast must have no violation"
         );
     }
 
     #[test]
     fn contrast_rgba_parsing_no_skip() {
-        // rgba 应解析成功（非 -1.0 跳过）。黑底 rgba(255,255,255,1.0) 白字 = 21:1，无违规。
+        // rgba must parse successfully (not skipped as -1.0). White text rgba(255,255,255,1.0) on black = 21:1, no violation.
         let parent = rect_node(
             "r1",
             "box",
@@ -644,12 +647,12 @@ mod tests {
             .collect();
         assert!(
             contrast_violations.is_empty(),
-            "rgba() 白字黑底 21:1 应无违规（E-14 解析 rgba 不再跳过）"
+            "rgba() white on black at 21:1 must have no violation (E-14 parses rgba instead of skipping)"
         );
     }
 
-    // E-28 回归：stroke（边框）不得当背景。仅设 stroke 无 fill → 背景透明 → 跳过，
-    // 不得检出对比度违规（旧实现 bg=stroke 会误报边框对比度）。
+    // E-28 regression: stroke (border) must not be treated as background. stroke-only with no fill -> transparent background -> skip;
+    // must not detect a contrast violation (the old impl used bg=stroke and mis-reported border contrast).
     #[test]
     fn contrast_stroke_only_not_treated_as_bg() {
         let style = NodeStyle {
@@ -666,7 +669,7 @@ mod tests {
             .collect();
         assert!(
             contrast_violations.is_empty(),
-            "无 fill（透明背景）应跳过对比度，不得把 stroke 当背景误报"
+            "no fill (transparent background) must skip contrast and must not mis-report stroke as background"
         );
     }
 
@@ -803,7 +806,7 @@ mod tests {
 
     #[test]
     fn lint_stats_counts_correct() {
-        // L-9/L-11 回归：用 Text 节点带溢出文本触发 TextOverflow，保证 stats 非空。
+        // L-9/L-11 regression: trigger TextOverflow with a Text node carrying overflowing text, ensuring stats are non-empty.
         let mut t = text_node(
             "t1",
             "label",
@@ -846,8 +849,8 @@ mod tests {
 
     #[test]
     fn hex_color_3_digit_parsing() {
-        // E-28 正确语义：fill=#fff 白背景 + 默认黑字 → 高对比度，无违规；
-        // 同时验证 3 位 hex 颜色能被 luminance 正确解析。
+        // E-28 correct semantics: fill=#fff white background + default black text -> high contrast, no violation;
+        // also verifies 3-digit hex colors parse correctly in luminance.
         let style = NodeStyle {
             fill: Some("#fff".into()),
             stroke: Some("#000".into()),
@@ -865,31 +868,31 @@ mod tests {
 
     #[test]
     fn hex_color_4_and_8_digit_alpha_ignored() {
-        // E-30/P3：4 位(#RGBA)/8 位(#RRGGBBAA) hex 必须可解析，alpha 通道忽略。
-        // 8 位 #FF0000FF（红，全不透明）应等价于 6 位 #FF0000。
+        // E-30/P3: 4-digit (#RGBA)/8-digit (#RRGGBBAA) hex must parse, alpha channel ignored.
+        // 8-digit #FF0000FF (red, fully opaque) must be equivalent to 6-digit #FF0000.
         assert_eq!(parse_hex_color("#FF0000FF"), Some([255, 0, 0]));
-        // 8 位 半透明 #00FF0080 应等价于 6 位 #00FF00。
+        // 8-digit semi-transparent #00FF0080 must be equivalent to 6-digit #00FF00.
         assert_eq!(parse_hex_color("#00FF0080"), Some([0, 255, 0]));
-        // 4 位 #F00F（红，全不透明）应等价于 3 位 #F00 = [255,0,0]。
+        // 4-digit #F00F (red, fully opaque) must be equivalent to 3-digit #F00 = [255,0,0].
         assert_eq!(parse_hex_color("#F00F"), Some([255, 0, 0]));
-        // 4 位 #0F0F 应等价于 3 位 #0F0 = [0,255,0]。
+        // 4-digit #0F0F must be equivalent to 3-digit #0F0 = [0,255,0].
         assert_eq!(parse_hex_color("#0F0F"), Some([0, 255, 0]));
-        // 无 # 前缀同样支持。
+        // Without a # prefix is supported too.
         assert_eq!(parse_hex_color("FF0000FF"), Some([255, 0, 0]));
         assert_eq!(parse_hex_color("F00F"), Some([255, 0, 0]));
-        // 3 位仍兼容：#FF0 = RGB(F,F,0) = [255,255,0]。
+        // 3-digit stays compatible: #FF0 = RGB(F,F,0) = [255,255,0].
         assert_eq!(parse_hex_color("#FF0"), Some([255, 255, 0]));
-        // 4 位 #FF00 = RGBA(F,F,0,alpha=0 忽略) = [255,255,0]。
+        // 4-digit #FF00 = RGBA(F,F,0,alpha=0 ignored) = [255,255,0].
         assert_eq!(parse_hex_color("#FF00"), Some([255, 255, 0]));
-        // 长度非法（5 位）返回 None。
+        // Invalid length (5 digits) returns None.
         assert_eq!(parse_hex_color("#FF000"), None);
         assert_eq!(parse_hex_color("#FF0000"), Some([255, 0, 0]));
     }
 
     #[test]
     fn hex_color_8_digit_contrast_no_false_violation() {
-        // E-30/P3 端到端：8 位 hex fill 在对比度检测中不应因解析失败假告警。
-        // #FFFFFF（白）背景 + #000000FF（黑，alpha=FF 忽略）字 → 高对比，无违规。
+        // E-30/P3 end-to-end: an 8-digit hex fill must not trigger a false contrast alert due to parse failure.
+        // #FFFFFF (white) background + #000000FF (black, alpha=FF ignored) text -> high contrast, no violation.
         let style = NodeStyle {
             fill: Some("#FFFFFF".into()),
             stroke: Some("#000000FF".into()),
@@ -904,7 +907,7 @@ mod tests {
             .collect();
         assert!(
             contrast_violations.is_empty(),
-            "8 位 hex 不应触发对比度假告警: {:?}",
+            "8-digit hex must not trigger a false contrast alert: {:?}",
             contrast_violations
         );
     }
@@ -987,7 +990,7 @@ mod tests {
 
     #[test]
     fn text_overflow_zero_size_detected() {
-        // L-11：零维 + 非空文本 → 溢出应检出（旧实现空文本也误报，已纠）。
+        // L-11: zero dims + non-empty text -> overflow must be detected (the old impl also mis-reported empty text, now corrected).
         let mut node = text_node("t1", "Text", NodeStyle::default());
         node.w = 0.0;
         node.h = 0.0;
@@ -1051,9 +1054,9 @@ mod tests {
 
     #[test]
     fn check_overlapping_skips_when_over_threshold() {
-        // PERF-3：>200 节点兄弟组应 warn + 跳过 O(n²) 重叠检测 → 0 OverlappingNodes 违规。
-        // 注：check_overlapping_nodes 为私有方法，经 Linter::new().lint(&doc) → lint_siblings 到达。
-        // 201 节点全重叠（同 bbox 同 z_index），无阈值会产 ~20100 对 OverlappingNodes。
+        // PERF-3: a >200-node sibling group should warn + skip the O(n^2) overlap check -> 0 OverlappingNodes violations.
+        // Note: check_overlapping_nodes is a private method, reached via Linter::new().lint(&doc) -> lint_siblings.
+        // 201 nodes all overlapping (same bbox, same z_index) would produce ~20100 OverlappingNodes pairs without the threshold.
         let mut siblings = Vec::new();
         for i in 0..201 {
             siblings.push(PenNode {
@@ -1078,7 +1081,7 @@ mod tests {
                 .violations
                 .iter()
                 .any(|v| v.rule == LintRule::OverlappingNodes),
-            ">200 节点应跳过重叠检测，不应产出 OverlappingNodes 违规"
+            ">200 nodes should skip the overlap check and produce no OverlappingNodes violations"
         );
     }
 
@@ -1120,8 +1123,8 @@ mod tests {
             .any(|v| v.rule == LintRule::OverlappingNodes));
     }
 
-    // E-25 回归：旧实现 `a.z_index == b.z_index` 才检测重叠，不同 z_index 的重叠漏检。
-    // 修复后不同 z_index 仍检测：z_index 差值 > 1 降级 Info（有意叠层），差值 ≤ 1 保持 Warning。
+    // E-25 regression: the old impl only checked overlap when `a.z_index == b.z_index`, missing overlaps across different z_index values.
+    // After the fix, different z_index values are still checked: a z_index difference > 1 downgrades to Info (intentional stacking), a difference <= 1 stays Warning.
     #[test]
     fn overlapping_different_zindex_detected_as_info() {
         let a = PenNode {
@@ -1161,13 +1164,13 @@ mod tests {
             .collect();
         assert!(
             !overlap_violations.is_empty(),
-            "不同 z_index 的重叠节点应检出（E-25 修复后不再因 z_index 不等跳过）"
+            "overlapping nodes with different z_index must be detected (after the E-25 fix, no longer skipped due to unequal z_index)"
         );
         assert!(
             overlap_violations
                 .iter()
                 .all(|v| v.severity == LintSeverity::Info),
-            "z_index 差值 > 1 的叠层应降级为 Info"
+            "stacking with a z_index difference > 1 must downgrade to Info"
         );
     }
 
@@ -1390,10 +1393,10 @@ mod tests {
 
     #[test]
     fn auto_fix_names_cjk_id_no_panic() {
-        // E-29 回归：含 CJK 的 node.id 走 auto_name 不得 panic。
-        // 旧 `&node.id[..8]` 字节切片在「登录」(e7 99 bb e5 bd 95) 第 8 字节
-        // 落在字符中间 → byte index 8 is not a char boundary panic。
-        // 现按字符边界取前 8 字符。
+        // E-29 regression: auto_name on a node.id containing CJK must not panic.
+        // The old `&node.id[..8]` byte slice cut "登录" (e7 99 bb e5 bd 95) at byte 8,
+        // which lands mid-character -> "byte index 8 is not a char boundary" panic.
+        // Now takes the first 8 characters on char boundaries.
         let mut reg = fd_design_system::DesignSystemRegistry::new();
         reg.register_builtin();
         let system = reg.get("apple-hig").expect("apple-hig").clone();
@@ -1406,7 +1409,7 @@ mod tests {
         assert!(result.details.iter().any(|d| d.action == "auto_name"));
         let renamed = &doc.pages[0].nodes[0].name;
         assert!(renamed.starts_with("rect_"), "renamed={renamed}");
-        // 前缀应含完整 CJK 字符（不切断多字节字符）
+        // The prefix must contain complete CJK characters (not cutting multi-byte characters)
         assert!(renamed.contains("登录"), "renamed={renamed}");
     }
 
@@ -1444,20 +1447,20 @@ mod tests {
         assert!(result.fixes_skipped > 0);
     }
 
-    // E-13：build_numeric_token_map 遗漏 TokenValue::Number 变体——内置规范
-    // spacing/font_size/radius 多用 Number，旧实现仅 String 可解析数字入 map，
-    // 导致 gap=8 无法匹配 robot-sim `spacing.gauge`（Number(8.0)），auto-fix 失效。
+    // E-13: build_numeric_token_map missed the TokenValue::Number variant — builtin specs
+    // mostly use Number for spacing/font_size/radius; the old impl only put parseable String
+    // digits into the map, so gap=8 could not match robot-sim `spacing.gauge` (Number(8.0)), breaking auto-fix.
     #[test]
     fn build_numeric_token_map_includes_number_variant() {
         let mut reg = fd_design_system::DesignSystemRegistry::new();
         reg.register_builtin();
         let system = reg.get("robot-sim").expect("robot-sim").clone();
         let map = build_numeric_token_map(&system);
-        // robot-sim spacing.gauge = Number(8.0) → key "8" → value "spacing.gauge"
+        // robot-sim spacing.gauge = Number(8.0) -> key "8" -> value "spacing.gauge"
         assert_eq!(map.get("8"), Some(&"spacing.gauge".to_string()));
-        // radius.panel = Number(4.0) → key "4"
+        // radius.panel = Number(4.0) -> key "4"
         assert_eq!(map.get("4"), Some(&"radius.panel".to_string()));
-        // font.size.body = Number(13.0) → key "13"
+        // font.size.body = Number(13.0) -> key "13"
         assert_eq!(map.get("13"), Some(&"font.size.body".to_string()));
     }
 
@@ -1485,7 +1488,7 @@ mod tests {
             .collect();
         assert!(
             !gap_fixes.is_empty(),
-            "gap=8 应匹配 robot-sim spacing.gauge Number(8.0) token ref"
+            "gap=8 must match the robot-sim spacing.gauge Number(8.0) token ref"
         );
         assert_eq!(
             doc.pages[0].nodes[0].style.design_token_refs.get("gap"),

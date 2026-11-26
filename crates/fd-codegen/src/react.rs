@@ -1,6 +1,6 @@
-// ARCH-10 r4：React/Tailwind 渲染从 lib.rs 拆出。render_page_react/node_to_react/
-// node_to_tailwind。调 util（escape_attr/escape_html/sanitize_css_color/MAX_CODEGEN_DEPTH）。
-// 零行为变更：纯位置迁移，不改任何渲染逻辑。
+// ARCH-10 r4: React/Tailwind rendering split out of lib.rs. render_page_react/node_to_react/
+// node_to_tailwind. Calls util (escape_attr/escape_html/sanitize_css_color/MAX_CODEGEN_DEPTH).
+// Zero behavior change: pure positional move, no rendering logic altered.
 
 use fd_canvas_core::{FlexDirection, LayoutMode, NodeKind, Page, PenNode};
 
@@ -23,7 +23,7 @@ fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
         return "{/* codegen depth limit reached */}\n".to_string();
     }
     let cls = node_to_tailwind(node);
-    // 同 node_to_html：统一收集子节点并注入各分支，修复叶子节点丢嵌套（#7）。
+    // Same as node_to_html: collect children uniformly and inject them in every branch, fixing leaf nodes losing nesting (#7).
     let children: String = node
         .children
         .iter()
@@ -68,7 +68,7 @@ fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
                     escape_attr(&node.id)
                 )
             } else {
-                // <img> 自闭合；有子节点时外裹 div 承载
+                // <img> is self-closing; with children, wrap in a div to host them
                 format!(
                     "      <div className=\"{}\" data-id=\"{}\"><img alt=\"\"/>{}</div>\n",
                     cls,
@@ -92,7 +92,7 @@ fn node_to_react_inner(node: &PenNode, depth: usize) -> String {
 
 pub(super) fn node_to_tailwind(node: &PenNode) -> String {
     let mut cls: Vec<String> = Vec::new();
-    // E-9：仅 Free 布局输出 absolute + left/top；Flex/Grid 走文档流。
+    // E-9: only Free layout outputs absolute + left/top; Flex/Grid use document flow.
     match &node.style.layout {
         LayoutMode::Free => {
             cls.push("absolute".into());
@@ -143,8 +143,8 @@ pub(super) fn node_to_tailwind(node: &PenNode) -> String {
             );
         }
         LayoutMode::Grid(_) => {
-            // Tailwind Grid 精细类需模板生成，此处用 arbitrary value 兜底；
-            // 真实 grid 布局建议走 format_style_inline（grid-template-columns）。
+            // Fine-grained Tailwind Grid classes would need template generation; arbitrary values are the fallback here;
+            // for a real grid layout prefer format_style_inline (grid-template-columns).
             cls.push("relative".into());
             cls.push("grid".into());
         }
@@ -159,7 +159,7 @@ pub(super) fn node_to_tailwind(node: &PenNode) -> String {
         cls.push(format!("bg-[{}]", sanitize_css_color(fill)));
     }
     if let Some(stroke) = &node.style.stroke {
-        // E-8：输出 stroke_width 而非固定 border-2。
+        // E-8: output stroke_width instead of a fixed border-2.
         let sw = node.style.stroke_width.unwrap_or(1.0);
         cls.push(format!("border-[{}px]", sw as i32));
         cls.push(format!("border-[{}]", sanitize_css_color(stroke)));
@@ -170,7 +170,7 @@ pub(super) fn node_to_tailwind(node: &PenNode) -> String {
     if let Some(op) = node.style.opacity {
         cls.push(format!("opacity-[{}]", op));
     }
-    // E-8：rotation / z_index / font。
+    // E-8: rotation / z_index / font.
     if node.rotation != 0.0 {
         cls.push(format!("rotate-[{}deg]", node.rotation));
     }

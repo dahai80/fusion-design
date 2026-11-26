@@ -1,5 +1,5 @@
-// ARCH-10 r4：HTML 渲染从 lib.rs 拆出。render_page_html/node_to_html/format_style_inline/
-// flex_css/grid_css。调 util（escape_attr/sanitize_css_color/MAX_CODEGEN_DEPTH）。零行为变更。
+// ARCH-10 r4: HTML rendering split out of lib.rs. render_page_html/node_to_html/format_style_inline/
+// flex_css/grid_css. Calls util (escape_attr/sanitize_css_color/MAX_CODEGEN_DEPTH). Zero behavior change.
 
 use fd_canvas_core::{LayoutMode, NodeKind, Page, PenNode};
 
@@ -26,8 +26,8 @@ fn node_to_html_inner(node: &PenNode, depth: usize) -> String {
         return "<!-- codegen depth limit reached -->\n".to_string();
     }
     let style = format_style_inline(node);
-    // 子节点对任意 kind 均可能存在（parse-html 把带子节点的 <div> 映射为 Rect），
-    // 统一收集后在各分支注入，避免叶子节点静默丢弃嵌套结构（#7）。
+    // Children can exist for any kind (parse-html maps a <div> with children to a Rect);
+    // collect them uniformly and inject in every branch, avoiding leaf nodes silently dropping nested structure (#7).
     let children: String = node
         .children
         .iter()
@@ -73,7 +73,7 @@ fn node_to_html_inner(node: &PenNode, depth: usize) -> String {
                     style
                 )
             } else {
-                // <img> 为 void 元素；有子节点时外裹 div 承载嵌套结构
+                // <img> is a void element; with children, wrap in a div to host the nested structure
                 format!(
                     "<div data-id=\"{}\" style=\"{}\"><img style=\"{}\" alt=\"\"/>{}</div>\n",
                     escape_attr(&node.id),
@@ -98,8 +98,8 @@ fn node_to_html_inner(node: &PenNode, depth: usize) -> String {
 
 pub(super) fn format_style_inline(node: &PenNode) -> String {
     let mut parts: Vec<String> = Vec::new();
-    // E-9：仅 Free 布局输出 absolute + left/top；Flex/Grid 容器走文档流，
-    // 由 display:flex/grid 驱动子元素排列，不强制 absolute。
+    // E-9: only Free layout outputs absolute + left/top; Flex/Grid containers use document flow,
+    // with child arrangement driven by display:flex/grid, not forced absolute.
     match &node.style.layout {
         LayoutMode::Free => {
             parts.push(format!(
@@ -129,7 +129,7 @@ pub(super) fn format_style_inline(node: &PenNode) -> String {
         ));
     }
     if let Some(stroke) = &node.style.stroke {
-        // E-8：输出 stroke_width 而非固定 2px。
+        // E-8: output stroke_width instead of a fixed 2px.
         let sw = node.style.stroke_width.unwrap_or(1.0);
         parts.push(format!(
             "border:{}px solid {};",
@@ -143,14 +143,14 @@ pub(super) fn format_style_inline(node: &PenNode) -> String {
     if let Some(op) = node.style.opacity {
         parts.push(format!("opacity:{};", op));
     }
-    // E-8：rotation / z_index。
+    // E-8: rotation / z_index.
     if node.rotation != 0.0 {
         parts.push(format!("transform:rotate({}deg);", node.rotation));
     }
     if node.z_index != 0 {
         parts.push(format!("z-index:{};", node.z_index));
     }
-    // E-8：font_family / font_size（Text 节点字号字体，非 Text 节点亦输出供容器继承）。
+    // E-8: font_family / font_size (font size/family for Text nodes; also emitted on non-Text nodes for container inheritance).
     if let Some(fs) = node.style.font_size {
         parts.push(format!("font-size:{}px;", fs as i32));
     }
@@ -163,7 +163,7 @@ pub(super) fn format_style_inline(node: &PenNode) -> String {
     parts.join("")
 }
 
-/// E-9：FlexParams → CSS 声明片段（对齐 host-web 渲染约定）。
+/// E-9: FlexParams -> CSS declaration fragment (aligned with host-web rendering conventions).
 fn flex_css(p: &fd_canvas_core::FlexParams) -> Vec<String> {
     use fd_canvas_core::{AlignItems, FlexDirection, FlexWrap, JustifyContent};
     let mut v = vec!["display:flex;".to_string()];
@@ -222,7 +222,7 @@ fn flex_css(p: &fd_canvas_core::FlexParams) -> Vec<String> {
     v
 }
 
-/// E-9：GridParams → CSS 声明片段。
+/// E-9: GridParams -> CSS declaration fragment.
 fn grid_css(g: &fd_canvas_core::GridParams) -> Vec<String> {
     use fd_canvas_core::TrackSizing;
     let mut v = vec!["display:grid;".to_string()];

@@ -1,21 +1,21 @@
-//! Fusion-Design HTML → PenDocument 解析器。
+//! Fusion-Design HTML -> PenDocument parser.
 //!
-//! A-2：从 fd-ai-adapter 拆出的叶子 crate。将 AI 响应中的 HTML artifact
-//! 转换为 PenDocument 节点树。与 adapter 内部（FusionMlxClient/SkillRegistry）
-//! 零耦合，独立成 crate 便于复用与测试。
+//! A-2: leaf crate split out of fd-ai-adapter. Converts HTML artifacts in AI
+//! responses into a PenDocument node tree. Zero coupling with adapter internals
+//! (FusionMlxClient/SkillRegistry); an independent crate for reuse and testability.
 
 use anyhow::Result;
 use fd_canvas_core::{NodeKind, NodeStyle, Page, PenDocument, PenNode};
 use scraper::{ElementRef, Html, Node, Selector};
 
-// ── HTML → PenDocument 解析器 ──
+// -- HTML -> PenDocument parser --
 //
-// AI 响应中常包含 HTML artifact（如 <artifact type="html">... 或 ```html...``` 代码块）。
-// 本解析器将 HTML 元素转换为 PenDocument 节点树，支持：
-// - 基础元素映射：div/section/main→Rect, h1-h6/p/span/a→Text, img→Image, button→Rect
-// - 样式提取：width/height/left/top/background/color/font-size/border-radius
-// - 嵌套子元素递归解析
-// - class→token 引用（如 class="bg-primary" → fill=var(--color-primary)）
+// AI responses often contain HTML artifacts (e.g. <artifact type="html">... or ```html...``` code blocks).
+// This parser converts HTML elements into a PenDocument node tree, supporting:
+// - basic element mapping: div/section/main->Rect, h1-h6/p/span/a->Text, img->Image, button->Rect
+// - style extraction: width/height/left/top/background/color/font-size/border-radius
+// - recursive parsing of nested child elements
+// - class -> token references (e.g. class="bg-primary" -> fill=var(--color-primary))
 
 pub fn html_to_pen_document(html: &str, page_name: &str) -> Result<PenDocument> {
     let extracted = extract_html_artifact(html);
@@ -59,7 +59,7 @@ pub fn html_to_pen_document(html: &str, page_name: &str) -> Result<PenDocument> 
 
     doc.add_page(page);
     tracing::info!(
-        "html_to_pen_document: 解析完成，{} 个节点",
+        "html_to_pen_document: parsing finished, {} nodes",
         doc.pages.first().map(|p| p.nodes.len()).unwrap_or(0)
     );
     Ok(doc)
@@ -109,7 +109,10 @@ fn html_element_to_node(
 ) -> Option<PenNode> {
     const MAX_PARSE_HTML_DEPTH: usize = 64;
     if depth > MAX_PARSE_HTML_DEPTH {
-        tracing::warn!(depth, "parse-html 嵌套深度超限，截断子树");
+        tracing::warn!(
+            depth,
+            "parse-html: nesting depth over limit, truncating subtree"
+        );
         return None;
     }
     let el = el_ref.value();
@@ -233,7 +236,10 @@ fn html_element_to_node(
     *counter += 1;
     const MAX_PARSE_HTML_TOTAL: u32 = 100_000;
     if *counter > MAX_PARSE_HTML_TOTAL {
-        tracing::warn!(total = *counter, "parse-html 节点总数超限，截断剩余子树");
+        tracing::warn!(
+            total = *counter,
+            "parse-html: total node count over limit, truncating remaining subtree"
+        );
         return None;
     }
     let id = format!("n_{}", counter);
@@ -410,7 +416,10 @@ mod tests {
             html.push_str("</div>");
         }
         let result = html_to_pen_document(&html, "DeepPage");
-        assert!(result.is_ok(), "深度嵌套 HTML 必须被深度守卫截断而非崩溃");
+        assert!(
+            result.is_ok(),
+            "deeply nested HTML must be truncated by the depth guard, not crash"
+        );
     }
 
     #[test]

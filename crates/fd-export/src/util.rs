@@ -1,13 +1,13 @@
-// ARCH-10 r4：通用工具从 lib.rs 拆出——文件名清洗、image href 白名单、
-// Token 颜色解析、元素收集、XML 转义。跨渲染模块共享，零行为变更。
+// ARCH-10 r4: shared utilities split out of lib.rs — filename sanitizing, image href whitelist,
+// token color resolution, element collection, XML escaping. Shared across rendering modules, zero behavior change.
 
 use fd_design_system::DesignSystemRegistry;
 
 use crate::{CanvasElement, CanvasPage};
 
 pub(super) fn sanitize_filename(name: &str) -> String {
-    // E-20/P3：空名/全非法字符 → "" → 文件名 ".svg"（隐藏文件，同名页面互相覆盖）。
-    // 空结果回退 "page"，保非隐藏、可区分。
+    // E-20/P3: empty name / all-illegal chars -> "" -> filename ".svg" (hidden file, same-named pages overwrite each other).
+    // An empty result falls back to "page", keeping it non-hidden and distinguishable.
     let sanitized: String = name
         .chars()
         .map(|c| {
@@ -32,26 +32,26 @@ pub(super) fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// R-5：SVG `<image href>` 协议白名单。SVG 可被嵌入 HTML/直接打开，`<image href>`
-/// 是 XSS/SSRF 注入面——`javascript:`/`data:text/html` 可执行脚本，`http(s)://`
-/// 触发出站请求（违反离线约束）。仅放行：
-///   - `data:image/*`（合法内嵌位图/SVG，离线自包含）
-///   - 相对/无协议路径（本地资源，不出网）
+/// R-5: protocol whitelist for SVG `<image href>`. SVG can be embedded in HTML or opened directly, and
+/// `<image href>` is an XSS/SSRF injection surface — `javascript:`/`data:text/html` can execute scripts,
+/// and `http(s)://` triggers outbound requests (violating the offline constraint). Only allow:
+///   - `data:image/*` (legitimate embedded bitmap/SVG, offline self-contained)
+///   - relative/protocol-less paths (local resources, no outbound traffic)
 ///
-/// 非白名单一律返空串（omit href，渲染空图框而非执行注入）。
+/// Anything not whitelisted returns an empty string (omit href, rendering an empty image frame instead of executing the injection).
 pub(super) fn sanitize_image_url(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    // 协议判断：取冒号前部分（小写）。无冒号视为相对路径，放行。
+    // Protocol check: take the part before the colon (lowercased). No colon is treated as a relative path and allowed.
     let lower = trimmed.to_lowercase();
     if lower.starts_with("data:") {
-        // 仅放行 data:image/*，拒 data:text/html 等
+        // Only allow data:image/*, reject data:text/html etc.
         if lower.starts_with("data:image/") {
             return trimmed.to_string();
         }
-        tracing::warn!(url = %trimmed, "SVG image href 拒绝非 image data URI");
+        tracing::warn!(url = %trimmed, "SVG image href: rejecting non-image data URI");
         return String::new();
     }
     if lower.starts_with("javascript:")
@@ -61,22 +61,22 @@ pub(super) fn sanitize_image_url(raw: &str) -> String {
         || lower.starts_with("ftp:")
         || lower.starts_with("file:")
     {
-        tracing::warn!(url = %trimmed, "SVG image href 拒绝出网/可执行协议");
+        tracing::warn!(url = %trimmed, "SVG image href: rejecting outbound/executable protocol");
         return String::new();
     }
-    // SEC-N3：无协议前缀路径放行前检查 .. 段防路径穿越。
-    // 离线 SVG 无出网，但相对路径可解析到文件系统敏感位置（理论风险）。
+    // SEC-N3: before allowing protocol-less paths, check for .. segments to prevent path traversal.
+    // Offline SVG has no outbound traffic, but a relative path could resolve to a sensitive filesystem location (theoretical risk).
     if trimmed.contains("/../") || trimmed.starts_with("../") || trimmed == ".." {
-        tracing::warn!(url = %trimmed, "SVG image href 拒绝含 .. 的路径穿越意图");
+        tracing::warn!(url = %trimmed, "SVG image href: rejecting path traversal attempt containing ..");
         return String::new();
     }
-    // 无协议前缀：相对路径或纯文件名，放行（本地资源，不出网）
+    // No protocol prefix: relative path or bare filename, allow (local resource, no outbound traffic)
     trimmed.to_string()
 }
 
-/// 解析单个颜色值中的 Token 引用为实际色值。
-/// 兼容 `var(--color.accent)`（dot）、`var(--color-accent)`（dash）与 `token:color.accent` 三种形式。
-/// 未配置设计规范或 token 未定义时保留原值并告警（usvg 会回退黑色，但不影响其他格式导出）。
+/// Resolve Token references in a single color value to the actual color.
+/// Supports three forms: `var(--color.accent)` (dot), `var(--color-accent)` (dash), and `token:color.accent`.
+/// When no design system is configured or the token is undefined, keeps the original value and logs a warning (usvg would fall back to black, but other export formats are unaffected).
 pub(super) fn resolve_color_var(
     value: &Option<String>,
     reg: &DesignSystemRegistry,
@@ -89,16 +89,16 @@ pub(super) fn resolve_color_var(
         .map(|rest| rest.trim())
         .or_else(|| trimmed.strip_prefix("token:").map(|rest| rest.trim()));
     if let Some(name) = token_name {
-        // L-13：解析 token 链——旧实现只认 TokenValue::Color，链引用（String→token:xxx）漏。
-        // 经 DesignSystem::resolve_reference 递归解析（带环检测），再取颜色。
+        // L-13: resolve token chains — the old impl only recognized TokenValue::Color and missed chain references (String -> token:xxx).
+        // Resolve recursively via DesignSystem::resolve_reference (with cycle detection), then take the color.
         let normalized = name.replace('-', ".");
         for candidate in [name, normalized.as_str()] {
             if let Some(tv) = reg.lookup(candidate) {
                 if let Some(system) = reg.active() {
                     let mut visited = std::collections::HashSet::new();
                     let resolved = system.resolve_reference(tv, &mut visited);
-                    // resolve_reference 对非 Color 返回 css 值；颜色直接用，
-                    // 非颜色（如 Number/Shadow）回退保留原 var 以免污染 fill。
+                    // resolve_reference returns the css value for non-Color tokens; use colors directly,
+                    // and for non-colors (e.g. Number/Shadow) fall back to keeping the original var to avoid polluting fill.
                     if let fd_design_system::TokenValue::Color(c) = tv {
                         return Some(c.clone());
                     }
@@ -108,12 +108,12 @@ pub(super) fn resolve_color_var(
                 }
             }
         }
-        tracing::warn!(var = %name, "Token 颜色变量未能在当前设计规范中解析，保留原值");
+        tracing::warn!(var = %name, "Token color variable could not be resolved in the active design system, keeping original value");
     }
     Some(s.to_string())
 }
 
-/// 对整页元素的 fill/stroke 解析 Token 引用（就地替换）。
+/// Resolve Token references for the fill/stroke of all elements on a page (in-place replacement).
 pub(super) fn resolve_page_token_vars(page: &mut CanvasPage, reg: &DesignSystemRegistry) {
     for el in &mut page.elements {
         el.fill = resolve_color_var(&el.fill, reg);

@@ -1,30 +1,30 @@
-//! Fusion-Design CSS 安全工具 — 颜色解析 + 值净化。
+//! Fusion-Design CSS safety utilities — color parsing + value sanitization.
 //!
-//! A-5：从 fd-canvas-core 下沉为独立叶子 crate（无 fd-* 依赖），
-//! 供 fd-canvas-core（re-export）/fd-codegen/fd-export/fd-design-lint/
-//! fd-host-web/fd-design-system 共享。
+//! A-5: sunk from fd-canvas-core into an independent leaf crate (no fd-* deps),
+//! shared by fd-canvas-core (re-export)/fd-codegen/fd-export/fd-design-lint/
+//! fd-host-web/fd-design-system.
 //!
-//! 离线硬约束：净化器拦截 url()/expression()/@import/javascript: 等危险函数，
-//! 剥离可逃逸字符（;{}<>"），防 CSS 注入逃逸。
+//! Hard offline constraint: the sanitizer intercepts dangerous functions such as url()/expression()/@import/javascript:,
+//! and strips escape-capable characters (;{}<>"), preventing CSS injection escape.
 
-/// 解析 hex 颜色为 RGB 三元组。支持 #RGB/#RGBA/#RRGGBB/#RRGGBBAA（alpha 忽略），
-/// 带/不带 # 前缀，前后空白容忍。CJK/emoji 等非 ASCII 字节 ASCII 门控拒（返 None）。
+/// Parse a hex color into an RGB triple. Supports #RGB/#RGBA/#RRGGBB/#RRGGBBAA (alpha ignored),
+/// with or without a # prefix, tolerant of surrounding whitespace. Non-ASCII bytes such as CJK/emoji are rejected by the ASCII gate (returns None).
 pub fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.trim().trim_start_matches('#');
-    // ASCII hex 门控：非 ASCII 字节（CJK/emoji 多字节）直接拒，避免字节切片越界。
+    // ASCII hex gate: non-ASCII bytes (CJK/emoji multi-byte) are rejected outright, avoiding byte-slice out-of-bounds.
     if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let b = s.as_bytes();
     let (r, g, bl) = match b.len() {
         3 => (
-            // #RGB：每位展开 ×17（如 f→ff=255）
+            // #RGB: each digit expanded x17 (e.g. f -> ff = 255)
             u8::from_str_radix(&s[0..1], 16).ok()? * 17,
             u8::from_str_radix(&s[1..2], 16).ok()? * 17,
             u8::from_str_radix(&s[2..3], 16).ok()? * 17,
         ),
         4 => (
-            // #RGBA：忽略末位 alpha，3 位展开 ×17
+            // #RGBA: trailing alpha ignored, 3 digits expanded x17
             u8::from_str_radix(&s[0..1], 16).ok()? * 17,
             u8::from_str_radix(&s[1..2], 16).ok()? * 17,
             u8::from_str_radix(&s[2..3], 16).ok()? * 17,
@@ -35,7 +35,7 @@ pub fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
             u8::from_str_radix(&s[4..6], 16).ok()?,
         ),
         8 => (
-            // #RRGGBBAA：忽略末 2 位 alpha
+            // #RRGGBBAA: trailing 2 alpha digits ignored
             u8::from_str_radix(&s[0..2], 16).ok()?,
             u8::from_str_radix(&s[2..4], 16).ok()?,
             u8::from_str_radix(&s[4..6], 16).ok()?,
@@ -45,9 +45,10 @@ pub fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     Some([r, g, bl])
 }
 
-/// 净化 CSS 值（颜色/字体等）。含危险函数（url()/expression()/@import/javascript:）
-/// 返 fallback；否则剥可逃逸字符（;{}<>"）。纯函数，rejection 时 tracing::warn
-/// 记录（fail visibly）。颜色传 fallback="transparent"，字体传 ""。
+/// Sanitize a CSS value (color/font etc.). Values containing dangerous functions
+/// (url()/expression()/@import/javascript:) return the fallback; otherwise escape-capable
+/// characters (;{}<>") are stripped. Pure function; rejections are logged via tracing::warn
+/// (fail visibly). Pass fallback="transparent" for colors, "" for fonts.
 pub fn sanitize_css_value(raw: &str, fallback: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("url(")
@@ -55,7 +56,10 @@ pub fn sanitize_css_value(raw: &str, fallback: &str) -> String {
         || lower.contains("@import")
         || lower.contains("javascript:")
     {
-        tracing::warn!(raw = raw, "CSS 值含危险函数，降级为 fallback（离线约束）");
+        tracing::warn!(
+            raw = raw,
+            "CSS value contains a dangerous function, degrading to fallback (offline constraint)"
+        );
         return fallback.to_string();
     }
     raw.chars()
@@ -67,14 +71,14 @@ pub fn sanitize_css_value(raw: &str, fallback: &str) -> String {
 mod tests {
     use super::*;
 
-    // A-2：CJK/emoji 输入绝不 panic（旧实现字节切片越界）。
+    // A-2: CJK/emoji input must never panic (the old impl had a byte-slice out-of-bounds).
     #[test]
     fn parse_hex_color_ascii_gate_rejects_cjk() {
         assert_eq!(parse_hex_color("蓝"), None);
         assert_eq!(parse_hex_color("#中"), None);
         assert_eq!(parse_hex_color("#中文ab"), None);
         assert_eq!(parse_hex_color("😀"), None);
-        // 混合 ASCII + CJK：含非 hex 字节即拒
+        // Mixed ASCII + CJK: any non-hex byte means rejection
         assert_eq!(parse_hex_color("#a蓝b"), None);
     }
 
@@ -82,17 +86,17 @@ mod tests {
     fn parse_hex_color_valid_forms() {
         assert_eq!(parse_hex_color("#fff"), Some([255, 255, 255]));
         assert_eq!(parse_hex_color("fff"), Some([255, 255, 255]));
-        assert_eq!(parse_hex_color("#abcd"), Some([170, 187, 204])); // #RGBA，alpha 忽略
+        assert_eq!(parse_hex_color("#abcd"), Some([170, 187, 204])); // #RGBA, alpha ignored
         assert_eq!(parse_hex_color("#aabbcc"), Some([170, 187, 204]));
-        assert_eq!(parse_hex_color("#aabbccff"), Some([170, 187, 204])); // #RRGGBBAA，alpha 忽略
-                                                                         // 带空白
+        assert_eq!(parse_hex_color("#aabbccff"), Some([170, 187, 204])); // #RRGGBBAA, alpha ignored
+                                                                         // with whitespace
         assert_eq!(parse_hex_color("  #FF8800  "), Some([255, 136, 0]));
     }
 
     #[test]
     fn parse_hex_color_rejects_invalid_length() {
-        assert_eq!(parse_hex_color("#12345"), None); // 5 位
-        assert_eq!(parse_hex_color("#1234567"), None); // 7 位
+        assert_eq!(parse_hex_color("#12345"), None); // 5 digits
+        assert_eq!(parse_hex_color("#1234567"), None); // 7 digits
         assert_eq!(parse_hex_color(""), None);
     }
 
@@ -102,7 +106,7 @@ mod tests {
         assert_eq!(parse_hex_color("#12gh34"), None);
     }
 
-    // A-3：危险函数返 fallback（离线硬约束）。
+    // A-3: dangerous functions return the fallback (hard offline constraint).
     #[test]
     fn sanitize_css_value_rejects_url() {
         assert_eq!(
@@ -125,7 +129,7 @@ mod tests {
             sanitize_css_value("javascript:alert(1)", "transparent"),
             "transparent"
         );
-        // 大小写不敏感
+        // case-insensitive
         assert_eq!(
             sanitize_css_value("URL(HTTP://X)", "transparent"),
             "transparent"
@@ -134,7 +138,7 @@ mod tests {
 
     #[test]
     fn sanitize_css_value_strips_quote() {
-        // C-6：`"` 被 Tailwind 任意值语法 `bg-[{v}]` 用作属性逃逸点，必须剥。
+        // C-6: `"` is used as a property escape point by the Tailwind arbitrary value syntax `bg-[{v}]`, must be stripped.
         assert_eq!(sanitize_css_value(r#"a"b"#, "transparent"), "ab");
         assert_eq!(sanitize_css_value(r#"red"{"#, "transparent"), "red");
     }
