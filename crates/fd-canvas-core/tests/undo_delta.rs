@@ -103,12 +103,12 @@ fn delta_stack_serde_roundtrip() {
 
 #[test]
 fn old_snapshot_history_migrates_with_warn() {
-    // 旧快照式序列化（无 current 字段，纯 VecDeque<PenDocument>）→ 反序列化失败。
-    // 旧格式: {"undo_stack":[{...PenDocument...}],"redo_stack":[]}
+    // Old snapshot-style serialization (no current field, pure VecDeque<PenDocument>) -> deserialization fails.
+    // Old format: {"undo_stack":[{...PenDocument...}],"redo_stack":[]}
     let old = r#"{"undo_stack":[{"schema_version":1,"pages":[{"id":"p0","name":"P0","width":100,"height":100,"nodes":[{"id":"a","kind":"rect","name":"a","x":0,"y":0,"w":10,"h":10,"rotation":0,"z_index":0}]}],"variables":null,"active_design_system":null}],"redo_stack":[]}"#;
     let result: Result<UndoRedoStack, _> = serde_json::from_str(old);
     assert!(
         result.is_err(),
-        "旧快照式格式应反序列化失败（缺 current 字段）触发迁移"
+        "old snapshot-style format should fail to deserialize (missing current field), triggering migration"
     );
 }

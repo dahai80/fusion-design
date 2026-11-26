@@ -1,13 +1,14 @@
-//! fusion-artifacts-engine REST 客户端（Artifacts 落地页数据源）。
+//! fusion-artifacts-engine REST client (data source for the Artifacts landing page).
 //!
-//! 只读消费本机 `127.0.0.1:11451` 的 `/api/v1/artifacts` 列表接口：
-//! 100% 离线约束不变（validate_localhost 强校验，公网 endpoint 直接拒绝）。
-//! 鉴权双通道对齐引擎：`X-API-Key`（env `FUSION_ARTIFACTS_API_KEY` 或
-//! `~/.fusion/artifacts/config.yaml` 的 `security.api_key`）与
-//! `Authorization: Bearer`（同 key）。
+//! Read-only consumption of the local `/api/v1/artifacts` list endpoint at `127.0.0.1:11451`:
+//! the 100% offline constraint still holds (validate_localhost enforces it; public endpoints are
+//! rejected outright). Auth dual-channel aligned with the engine: `X-API-Key` (env
+//! `FUSION_ARTIFACTS_API_KEY` or `security.api_key` in `~/.fusion/artifacts/config.yaml`) and
+//! `Authorization: Bearer` (same key).
 //!
-//! 降级契约：引擎不可达/未配 key 时返回 Err，调用方（fd-server）转成
-//! 「空列表 + degraded」响应，绝不 500 打断落地页。
+//! Degradation contract: when the engine is unreachable or no key is configured, return Err; the
+//! caller (fd-server) converts that into an "empty list + degraded" response, never a 500 that
+//! breaks the landing page.
 
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_ARTIFACTS_URL: &str = "http://127.0.0.1:11451";
 
-/// 列表查询参数。字段名与引擎 filters 对齐，未设置的项不下发。
+/// List query parameters. Field names align with the engine's filters; unset fields are not sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactQuery {
     pub page: u32,
@@ -39,7 +40,8 @@ impl Default for ArtifactQuery {
     }
 }
 
-/// 落地页单条卡片所需的字段子集（引擎 model_dump 的超集会被忽略）。
+/// Field subset needed for a single landing-page card (extra fields beyond the engine's
+/// model_dump are ignored).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ArtifactSummary {
     pub id: String,
@@ -71,7 +73,7 @@ pub struct ArtifactPage {
     pub total: u64,
 }
 
-/// 新建产物入参（引擎 `artifact.create` 的 REST 形状）。
+/// Input for creating an artifact (REST shape of the engine's `artifact.create`).
 #[derive(Debug, Clone)]
 pub struct NewArtifact {
     pub session_id: String,
@@ -91,8 +93,8 @@ struct EngineListResponse {
     total: u64,
 }
 
-/// 引擎客户端。每次请求构造（reqwest 连接池随构造重建），
-/// 落地页并发量极低，换取 env/config 热改后即时生效。
+/// Engine client. Rebuilt per request (the reqwest connection pool is recreated with it) — the
+/// landing page has very low concurrency, traded for immediate effect after env/config hot changes.
 #[derive(Debug, Clone)]
 pub struct ArtifactsClient {
     base_url: String,
@@ -114,8 +116,8 @@ impl ArtifactsClient {
         })
     }
 
-    /// env `FUSION_ARTIFACTS_URL` / `FUSION_ARTIFACTS_API_KEY`，key 缺省回退
-    /// 引擎自身配置文件（`FUSION_ARTIFACTS_CONFIG` > `~/.fusion/artifacts/config.yaml`）。
+    /// env `FUSION_ARTIFACTS_URL` / `FUSION_ARTIFACTS_API_KEY`; when the key is absent it falls
+    /// back to the engine's own config file (`FUSION_ARTIFACTS_CONFIG` > `~/.fusion/artifacts/config.yaml`).
     pub fn from_env() -> anyhow::Result<Self> {
         let base = std::env::var("FUSION_ARTIFACTS_URL")
             .ok()
@@ -134,7 +136,7 @@ impl ArtifactsClient {
         &self.base_url
     }
 
-    /// 查询串构造：filters 以 JSON 下发（引擎 `_parse_json_query` 解析）。
+    /// Query-string construction: filters are sent as JSON (parsed by the engine's `_parse_json_query`).
     pub fn build_url(&self, q: &ArtifactQuery) -> String {
         let mut url = format!(
             "{}/api/v1/artifacts?page={}&page_size={}&sort={}",
@@ -166,8 +168,9 @@ impl ArtifactsClient {
         url
     }
 
-    /// 新建产物（`POST /api/v1/artifacts/create`，引擎返回 201）。
-    /// fd-server 的「存 Artifacts」走这条，产物才会出现在落地页列表里。
+    /// Creates an artifact (`POST /api/v1/artifacts/create`, the engine returns 201).
+    /// fd-server's "save to Artifacts" goes through this so the artifact shows up in the
+    /// landing-page list.
     pub async fn create(&self, n: &NewArtifact) -> anyhow::Result<ArtifactSummary> {
         let mut body = serde_json::json!({
             "session_id": n.session_id,
@@ -197,23 +200,23 @@ impl ArtifactsClient {
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
             anyhow::bail!(
-                "artifacts-engine 新建失败 status={} body={}",
+                "artifacts-engine create failed status={} body={}",
                 status.as_u16(),
                 text.chars().take(160).collect::<String>()
             );
         }
         let parsed: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("artifacts-engine 新建响应非 JSON: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("artifacts-engine create response is not JSON: {e}"))?;
         let artifact = parsed
             .get("artifact")
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("artifacts-engine 新建响应缺 artifact"))?;
+            .ok_or_else(|| anyhow::anyhow!("artifacts-engine create response missing artifact"))?;
         let summary: ArtifactSummary = serde_json::from_value(artifact)?;
-        tracing::info!(id = %summary.id, name = %summary.name, "artifacts-engine 新建成功");
+        tracing::info!(id = %summary.id, name = %summary.name, "artifacts-engine create succeeded");
         Ok(summary)
     }
 
-    /// 单个产物元数据（查看器页头）。
+    /// Metadata for a single artifact (viewer page header).
     pub async fn get(&self, id: &str) -> anyhow::Result<ArtifactSummary> {
         let parsed = self
             .get_json(&format!("/api/v1/artifacts/{}", urlencode(id)))
@@ -221,11 +224,11 @@ impl ArtifactsClient {
         let artifact = parsed
             .get("artifact")
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("artifacts-engine 响应缺 artifact"))?;
+            .ok_or_else(|| anyhow::anyhow!("artifacts-engine response missing artifact"))?;
         Ok(serde_json::from_value(artifact)?)
     }
 
-    /// 指定版本正文（查看器内容）。version=None 时取最新版本。
+    /// Content of a given version (viewer content). When version is None, the latest is fetched.
     pub async fn content(&self, id: &str, version: Option<u32>) -> anyhow::Result<String> {
         let n = match version {
             Some(v) => v,
@@ -242,7 +245,7 @@ impl ArtifactsClient {
             .get("version")
             .and_then(|v| v.get("content"))
             .and_then(|c| c.as_str())
-            .ok_or_else(|| anyhow::anyhow!("artifacts-engine 版本响应缺 content"))?;
+            .ok_or_else(|| anyhow::anyhow!("artifacts-engine version response missing content"))?;
         Ok(content.to_string())
     }
 
@@ -260,14 +263,14 @@ impl ArtifactsClient {
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
             anyhow::bail!(
-                "artifacts-engine {} 失败 status={} body={}",
+                "artifacts-engine {} failed status={} body={}",
                 path,
                 status.as_u16(),
                 text.chars().take(160).collect::<String>()
             );
         }
         serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("artifacts-engine 响应非 JSON: {e}"))
+            .map_err(|e| anyhow::anyhow!("artifacts-engine response is not JSON: {e}"))
     }
 
     pub async fn list(&self, q: &ArtifactQuery) -> anyhow::Result<ArtifactPage> {
@@ -285,7 +288,7 @@ impl ArtifactsClient {
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!(
-                "artifacts-engine 列表失败 status={} body={}",
+                "artifacts-engine list failed status={} body={}",
                 status.as_u16(),
                 body.chars().take(160).collect::<String>()
             );
@@ -296,7 +299,7 @@ impl ArtifactsClient {
             page_size = q.page_size,
             got = parsed.artifacts.len(),
             total = parsed.total,
-            "artifacts-engine 列表返回"
+            "artifacts-engine list returned"
         );
         Ok(ArtifactPage {
             artifacts: parsed.artifacts,
@@ -305,8 +308,9 @@ impl ArtifactsClient {
     }
 }
 
-/// 从引擎配置文件里取 security.api_key（避免为一个字段引入 yaml 依赖）。
-/// 只做「首个 api_key: 行」扫描；admin_key / 注释行不误取。
+/// Reads security.api_key from the engine config file (avoids pulling in a yaml dependency for a
+/// single field). Only scans for the first `api_key:` line; admin_key / comment lines are not
+/// mistaken for it.
 fn read_engine_api_key() -> String {
     let path = std::env::var("FUSION_ARTIFACTS_CONFIG")
         .ok()
@@ -321,7 +325,7 @@ fn read_engine_api_key() -> String {
         return String::new();
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
-        tracing::debug!(path = %path.display(), "artifacts 配置文件不可读，无 API key");
+        tracing::debug!(path = %path.display(), "artifacts config file unreadable, no API key");
         return String::new();
     };
     for line in text.lines() {
@@ -332,7 +336,7 @@ fn read_engine_api_key() -> String {
         if let Some(rest) = t.strip_prefix("api_key:") {
             let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
             if !v.is_empty() {
-                tracing::debug!(path = %path.display(), "读入 artifacts-engine API key");
+                tracing::debug!(path = %path.display(), "read artifacts-engine API key");
                 return v.to_string();
             }
         }
@@ -369,20 +373,21 @@ mod tests {
             sort: "updated_at".into(),
             artifact_type: Some("html".into()),
             ownership_type: None,
+            // i18n: user-facing
             name_search: Some("登录 页".into()),
         };
         let url = client().build_url(&q);
         assert!(url.starts_with("http://127.0.0.1:11451/api/v1/artifacts?page=2&page_size=10"));
         assert!(url.contains("sort=updated_at"));
         assert!(url.contains("filters="));
-        assert!(!url.contains(' '), "查询串须无裸空格: {url}");
-        assert!(url.contains("%22type%22"), "filters 须 URL 编码后下发");
+        assert!(!url.contains(' '), "query string must contain no bare spaces: {url}");
+        assert!(url.contains("%22type%22"), "filters must be URL-encoded when sent");
     }
 
     #[test]
     fn url_omits_empty_filters() {
         let url = client().build_url(&ArtifactQuery::default());
-        assert!(!url.contains("filters="), "无过滤条件不下发 filters");
+        assert!(!url.contains("filters="), "filters must not be sent when there are no filters");
         assert!(url.contains("page_size=24"));
     }
 
@@ -397,20 +402,22 @@ mod tests {
 
     #[test]
     fn non_local_endpoint_rejected() {
-        let err = ArtifactsClient::new("http://example.com:11451", "k").expect_err("公网须拒");
-        assert!(err.to_string().contains("离线硬约束"), "err={err}");
+        let err = ArtifactsClient::new("http://example.com:11451", "k").expect_err("public endpoint must be rejected");
+        assert!(err.to_string().contains("offline hard constraint"), "err={err}");
         assert!(ArtifactsClient::new("http://192.168.1.9:11451", "k").is_ok());
     }
 
     #[tokio::test]
     async fn unreachable_engine_returns_error() {
-        // 端口 1 无监听：连接立刻拒绝，验证降级路径不会挂起。
+        // Port 1 has no listener: the connection is refused immediately, verifying the
+        // degradation path never hangs.
         let c = ArtifactsClient::new("http://127.0.0.1:1", "k").expect("client");
         assert!(c.list(&ArtifactQuery::default()).await.is_err());
     }
 
     #[test]
     fn summary_deserializes_engine_shape() {
+        // i18n: user-facing
         let raw = r#"{"artifacts":[{"id":"art_1","name":"登录页","type":"html","kind":"app",
             "summary":"s","current_version":2,"created_at":1.5,"updated_at":2.5,
             "is_starred":true,"is_pinned":false,"share_id":null,

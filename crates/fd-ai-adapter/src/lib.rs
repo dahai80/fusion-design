@@ -1,27 +1,32 @@
-//! Fusion-Design AI adapter — 实现 OpenPencil `ChatProvider` trait，
-//! 后端对接 fusion-mlx 本地多模态推理。
+//! Fusion-Design AI adapter — implements the OpenPencil `ChatProvider` trait,
+//! backed by fusion-mlx local multimodal inference.
 //!
-//! 【禁云端硬约束】本 crate 是 fusion-design 唯一允许发起 HTTP 请求的模块，
-//! 请求目标被 `FusionMlxClient` 限制为本地/局域网（回环 + RFC1918 + 链路本地），
-//! 见 `validate_localhost`——杜绝一切公网调用路径。
+//! [No-cloud hard constraint] This crate is the only module in fusion-design allowed to issue
+//! HTTP requests; request targets are restricted by `FusionMlxClient` to local/LAN
+//! (loopback + RFC1918 + link-local), see `validate_localhost` — every public-internet call
+//! path is eliminated.
 //!
-//! 【RouteGuard 鉴权】所有出站请求附加 `X-Fusion-Route: fusion-design` 头
-//! （fusion-mlx v0.7.0+ 默认强制，缺失则 403 missing_route），并在
-//! `FUSION_CLIENT_KEY`（或迁移期 legacy 兜底 `FUSION_MLX_API_KEY`）设置时
-//! 附加 `Authorization: Bearer <key>`。
+//! [RouteGuard auth] Every outbound request attaches the `X-Fusion-Route: fusion-design` header
+//! (enforced by default since fusion-mlx v0.7.0+; missing it yields 403 missing_route), and when
+//! `FUSION_CLIENT_KEY` (or the migration-period legacy fallback `FUSION_MLX_API_KEY`) is set,
+//! attaches `Authorization: Bearer <key>`.
 //!
-//! 【M-5 重试退避】fusion-mlx 模型加载期间返回 503、节点模型被驱逐回 502/503。
-//! 三处 HTTP 路径（`blocking_post` / `chat_stream_messages` / `check_generate`）
-//! 对 502/503 瞬时错误指数退避重试（500ms→1s→2s→4s→8s 封顶，默认最多 4 次），
-//! 4xx 永久错误（鉴权/请求格式）直接失败不重试。`FUSION_MLX_RETRY_MAX` 环境变量
-//! 调最大尝试次数（含首次），设 1 即关闭重试。流式仅覆盖建连阶段，中途断流不重试。
+//! [M-5 retry backoff] fusion-mlx returns 503 while a model is loading, and returns 502/503 when
+//! a node's model is evicted. The three HTTP paths (`blocking_post` / `chat_stream_messages` /
+//! `check_generate`) retry transient 502/503 errors with exponential backoff (500ms→1s→2s→4s→8s
+//! cap, default max 4 attempts); 4xx permanent errors (auth/request format) fail immediately
+//! without retry. The `FUSION_MLX_RETRY_MAX` env var tunes the max attempt count (including the
+//! first); setting 1 disables retry. Streaming only covers the connection phase; mid-stream
+//! disconnects are not retried.
 //!
-//! 【H-A7 流式塌缩修复】`ChatProvider::send` 受 op-ai trait 同步语义约束
-//! （`Box<dyn Iterator<Item=ChatDelta>>`，非 async Stream），无法做真 SSE 流。
-//! 旧实现把 `chat_sync_messages` 全文包成单个 `TextDelta`，消费方等全文生成完
-//! 才见首个 delta。改为按行分块：每行（含换行）一个 `TextDelta`，消费方逐行收
-//! 增量序列；空文本不产 `TextDelta` 仅 `Done`。真流式仍走 `chat_stream_messages`
-//! （CLI `chat` + studio），trait 路径为同步消费方提供增量逼近。
+//! [H-A7 stream collapse fix] `ChatProvider::send` is constrained by the op-ai trait's synchronous
+//! semantics (`Box<dyn Iterator<Item=ChatDelta>>`, not an async Stream), so true SSE streaming is
+//! impossible. The old implementation wrapped the entire `chat_sync_messages` output into a single
+//! `TextDelta`, so consumers saw the first delta only after the full text finished generating.
+//! Now chunked per line: each line (including its newline) is one `TextDelta`, and the consumer
+//! receives an incremental sequence; empty text produces no `TextDelta`, only `Done`. True
+//! streaming still goes through `chat_stream_messages` (CLI `chat` + studio); the trait path
+//! gives synchronous consumers an incremental approximation.
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
@@ -34,17 +39,18 @@ mod stream;
 pub use artifacts::{ArtifactPage, ArtifactQuery, ArtifactSummary, ArtifactsClient, NewArtifact};
 pub use stream::parse_sse_line;
 
-// ── fusion-mlx 本地推理客户端 ──
+// ── fusion-mlx local inference client ──
 //
-// fusion-mlx 以本地 HTTP 服务（127.0.0.1:port）暴露 chat completions 接口，
-// 兼容 OpenAI API 形状（/v1/chat/completions），便于复用既有生态工具。
-// 真实端口由 fusion-mlx 启动时分配，写入本地配置文件。
+// fusion-mlx exposes a chat completions endpoint as a local HTTP service (127.0.0.1:port),
+// compatible with the OpenAI API shape (/v1/chat/completions) so existing ecosystem tools
+// can be reused. The actual port is assigned by fusion-mlx at startup and written to its
+// local config file.
 
 const DEFAULT_MLX_ENDPOINT: &str = "http://127.0.0.1:11432";
 
-/// A-1：把逗号分隔的 endpoint 串拆成去空 trim 后的 Vec。
-/// `"http://a:11432,http://b:11432"` → `["http://a:11432","http://b:11432"]`。
-/// 空串 → `[DEFAULT_MLX_ENDPOINT]`（保证至少 1 条，交由 with_endpoints 校验）。
+/// A-1: splits a comma-separated endpoint string into a trimmed Vec.
+/// `"http://a:11432,http://b:11432"` → `["http://a:11432","http://b:11432"]`.
+/// Empty string → `[DEFAULT_MLX_ENDPOINT]` (guarantees at least one; validated by with_endpoints).
 fn parse_endpoints(raw: &str) -> Vec<String> {
     let parts: Vec<String> = raw
         .split(',')
@@ -58,16 +64,17 @@ fn parse_endpoints(raw: &str) -> Vec<String> {
     }
 }
 
-/// fusion-mlx RouteGuard 要求的来源标识头（存在即放行）。
-/// 方案B（netlayer-compliance-plan.md，用户 2026-08-07 裁定）：fusion-design
-/// 统一经 fusion-gateway `:11432` 调用 fusion-mlx，不再直连 11434。
-/// gateway 自身完成鉴权后转发，route 头对 gateway 透传无害。
-/// 历史：方案A（直连 11434）已否决，见 issue #11。
+/// Origin identification header required by fusion-mlx RouteGuard (presence alone grants pass).
+/// Plan B (netlayer-compliance-plan.md, ruled by the user 2026-08-07): fusion-design calls
+/// fusion-mlx uniformly via fusion-gateway `:11432`, no longer direct to 11434.
+/// The gateway authenticates itself before forwarding; passing the route header through the
+/// gateway is harmless.
+/// History: Plan A (direct 11434) was rejected, see issue #11.
 const FUSION_ROUTE_HEADER: (&str, &str) = ("X-Fusion-Route", "fusion-design");
 
-// DEFAULT_MAX_TOKENS 迁出 fd-skills（ARCH-11），本文件经 re-export 引用。
+// DEFAULT_MAX_TOKENS was moved out to fd-skills (ARCH-11); this file references it via re-export.
 
-/// fusion-mlx chat 请求体（OpenAI 兼容形状）。
+/// fusion-mlx chat request body (OpenAI-compatible shape).
 #[derive(Debug, Serialize)]
 struct MlxChatPayload<'a> {
     model: &'a str,
@@ -83,15 +90,15 @@ struct MlxMessage<'a> {
     content: &'a str,
 }
 
-/// 公开对话消息：role + content，供调用方注入多轮历史。
-/// role 透传到 OpenAI 兼容 API（system/user/assistant）。
+/// Public chat message: role + content, letting callers inject multi-turn history.
+/// role is passed through to the OpenAI-compatible API (system/user/assistant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MlxChatMessage {
     pub role: String,
     pub content: String,
 }
 
-/// fusion-mlx chat 响应体（OpenAI 兼容形状，裁剪）。
+/// fusion-mlx chat response body (OpenAI-compatible shape, trimmed).
 #[derive(Debug, Deserialize)]
 struct MlxChatResponse {
     choices: Vec<MlxChoice>,
@@ -107,28 +114,30 @@ struct MlxResponseMessage {
     content: String,
 }
 
-/// fusion-mlx 本地推理客户端。
+/// fusion-mlx local inference client.
 ///
-/// 所有 HTTP 请求目标均为 `127.0.0.1`，构造时强校验，
-/// 杜绝任何公网调用路径（对应 PRD「全链路离线」硬约束）。
+/// All HTTP request targets are `127.0.0.1`-bound and strongly validated at construction,
+/// eliminating any public-internet call path (the PRD "fully offline" hard constraint).
 #[derive(Clone)]
 pub struct FusionMlxClient {
     endpoint: String,
-    // A-1：多节点 failover。单节点时 `endpoints == vec![endpoint]`。
-    // `FUSION_MLX_BASE_URL` 逗号分隔多值时，每 endpoint 各经 validate_localhost。
+    // A-1: multi-node failover. With a single node, `endpoints == vec![endpoint]`.
+    // When `FUSION_MLX_BASE_URL` is comma-separated multi-value, each endpoint is individually
+    // validated by validate_localhost.
     endpoints: Vec<String>,
-    // A-1：轮询计数器。每请求/重试 attempt fetch_add 取下一 endpoint，
-    // 单节点负载均衡 + 502/503 即切下一节点（被动故障转移）。
+    // A-1: round-robin counter. Each request/retry attempt fetch_adds to pick the next endpoint,
+    // giving single-node load balancing plus 502/503 failover to the next node (passive failover).
     rr: Arc<std::sync::atomic::AtomicU32>,
     http: reqwest::Client,
 }
 
 impl FusionMlxClient {
-    /// 用默认 endpoint 构造；优先读 `FUSION_MLX_BASE_URL` 环境变量
-    /// （支持显式指回 fusion-mlx 直连 11434 等本地端点），缺省回退
-    /// `http://127.0.0.1:11432`（方案B：经 fusion-gateway 统一网关）。
-    /// 鉴权：gateway 需 `FUSION_CLIENT_KEY` 设为 gateway key（如 master_key）；
-    /// 迁移期兜底读 legacy 名 `FUSION_MLX_API_KEY`（2027-01-01 起删除）。
+    /// Builds with the default endpoint; prefers the `FUSION_MLX_BASE_URL` env var
+    /// (supports explicitly pointing back at fusion-mlx direct 11434 and other local endpoints),
+    /// falling back to `http://127.0.0.1:11432` (Plan B: unified via fusion-gateway).
+    /// Auth: the gateway requires `FUSION_CLIENT_KEY` set to a gateway key (e.g. master_key);
+    /// during migration the legacy name `FUSION_MLX_API_KEY` is read as fallback (removed from
+    /// 2027-01-01).
     pub fn new() -> anyhow::Result<Self> {
         let endpoint = match std::env::var("FUSION_MLX_BASE_URL") {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
@@ -137,18 +146,20 @@ impl FusionMlxClient {
         Self::with_endpoint(&endpoint)
     }
 
-    /// 用指定 endpoint 构造；强校验 host 为 `127.0.0.1` 或 `localhost`。
-    /// `endpoint` 逗号分隔多值时（A-1）按多节点构造，每 endpoint 各校验。
+    /// Builds with the given endpoint; strictly validates the host is `127.0.0.1` or `localhost`.
+    /// When `endpoint` is comma-separated multi-value (A-1), builds multi-node and validates each
+    /// endpoint.
     pub fn with_endpoint(endpoint: &str) -> anyhow::Result<Self> {
         let endpoints = parse_endpoints(endpoint);
         Self::with_endpoints(endpoints)
     }
 
-    /// A-1：多节点构造器。`endpoints` 不可空，每条经 validate_localhost；
-    /// 全部合法才建 client。`endpoint` 字段取首条（兼容旧单 endpoint 读字段路径）。
+    /// A-1: multi-node constructor. `endpoints` must be non-empty and each entry passes
+    /// validate_localhost; the client is built only if all are valid. The `endpoint` field takes
+    /// the first entry (compat with the old single-endpoint field-read path).
     pub fn with_endpoints(endpoints: Vec<String>) -> anyhow::Result<Self> {
         if endpoints.is_empty() {
-            anyhow::bail!("endpoints 列表为空，至少需 1 个本地/局域网 endpoint");
+            anyhow::bail!("endpoints list is empty, at least 1 local/LAN endpoint is required");
         }
         for ep in &endpoints {
             validate_localhost(ep)?;
@@ -160,16 +171,17 @@ impl FusionMlxClient {
             rr: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                // C8：缺超时则 fusion-mlx 挂起时请求永久阻塞，调用方
-                // （fusion-studio subprocess）卡死。连接短超时 + 总超时兜底。
+                // C8: without timeouts, a hung fusion-mlx blocks requests forever and the caller
+                // (fusion-studio subprocess) deadlocks. Short connect timeout + total timeout backstop.
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(180))
                 .build()?,
         })
     }
 
-    /// A-1：按 attempt 轮询选 endpoint。round-robin 计数器 fetch_add 取模，
-    /// 让相邻请求/重试落不同节点；单节点时恒返首条。
+    /// A-1: picks an endpoint per attempt via round-robin. The round-robin counter fetch_add is
+    /// taken modulo so adjacent requests/retries land on different nodes; single-node always
+    /// returns the first.
     fn endpoint_for_attempt(&self, attempt: u32) -> &str {
         if self.endpoints.len() == 1 {
             return &self.endpoint;
@@ -182,16 +194,17 @@ impl FusionMlxClient {
             endpoint = %ep,
             pos,
             n = self.endpoints.len(),
-            "endpoint_for_attempt: 轮询选节点"
+            "endpoint_for_attempt: round-robin node selection"
         );
         ep
     }
 
-    /// 解析 CLI `--endpoint` 实参到最终 endpoint 列表。
-    /// CLI 层把 `--endpoint` 默认值设为空串；空串时读 `FUSION_MLX_BASE_URL`，
-    /// 缺省回退 `http://127.0.0.1:11432`（方案B 经 gateway）。非空串直接透传
-    /// （用户显式传 `--endpoint` 优先级最高）。逗号分隔多值各校验（A-1）。
-    /// 返回 endpoints 列表供 `with_endpoints` 使用。
+    /// Resolves the CLI `--endpoint` argument into the final endpoint list.
+    /// The CLI layer defaults `--endpoint` to an empty string; when empty it reads
+    /// `FUSION_MLX_BASE_URL`, falling back to `http://127.0.0.1:11432` (Plan B via gateway).
+    /// A non-empty string is passed through as-is (an explicit `--endpoint` has top priority).
+    /// Comma-separated multi-values are each validated (A-1).
+    /// Returns the endpoints list for `with_endpoints`.
     pub fn resolve_endpoint(cli_endpoint: &str) -> anyhow::Result<Vec<String>> {
         let raw = match cli_endpoint.trim() {
             "" => match std::env::var("FUSION_MLX_BASE_URL") {
@@ -207,10 +220,10 @@ impl FusionMlxClient {
         Ok(endpoints)
     }
 
-    /// 同步发送 chat 请求（阻塞当前线程，供 `ChatProvider::send` 调用）。
+    /// Sends a chat request synchronously (blocks the current thread; used by `ChatProvider::send`).
     ///
-    /// 对应 PRD「AI 推理沙箱隔离」——本方法只读写 fusion-mlx 本地服务，
-    /// 不接触系统文件。
+    /// Corresponds to the PRD "AI inference sandbox isolation" — this method only reads/writes the
+    /// fusion-mlx local service and never touches system files.
     pub fn chat_sync(
         &self,
         model: &str,
@@ -238,22 +251,25 @@ impl FusionMlxClient {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("fusion-mlx 返回空 choices"))?
+            .ok_or_else(|| anyhow::anyhow!("fusion-mlx returned empty choices"))?
             .message
             .content)
     }
 
-    /// 多轮同步 chat：messages 由调用方构造（system + 多轮 user/assistant 历史 + 当前 user）。
-    /// H-A9：`ChatProvider::send` 旧实现只用 system_prompt+user_message，静默丢弃
-    /// `request.history`（多轮上下文丢失）、`thinking`/`effort`/`attachments`（无 wire 支持）。
-    /// 此方法把完整 messages[] 透传到 OpenAI 兼容 API，恢复多轮上下文。
+    /// Multi-turn synchronous chat: messages are built by the caller (system + multi-turn
+    /// user/assistant history + current user).
+    /// H-A9: the old `ChatProvider::send` implementation used only system_prompt+user_message,
+    /// silently dropping `request.history` (multi-turn context lost) and
+    /// `thinking`/`effort`/`attachments` (no wire support).
+    /// This method passes the full messages[] through to the OpenAI-compatible API, restoring
+    /// multi-turn context.
     pub fn chat_sync_messages(
         &self,
         model: &str,
         messages: Vec<MlxChatMessage>,
         max_tokens: u32,
     ) -> anyhow::Result<String> {
-        // 持有 owned String，构造 &'a str 的 MlxMessage 借用本帧局部。
+        // Holds owned Strings; the &'a str MlxMessage values borrow from this frame's locals.
         let owned: Vec<(String, String)> =
             messages.into_iter().map(|m| (m.role, m.content)).collect();
         let mlx_msgs: Vec<MlxMessage> = owned
@@ -274,7 +290,7 @@ impl FusionMlxClient {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("fusion-mlx 返回空 choices"))?
+            .ok_or_else(|| anyhow::anyhow!("fusion-mlx returned empty choices"))?
             .message
             .content)
     }
@@ -282,25 +298,26 @@ impl FusionMlxClient {
 
 impl Default for FusionMlxClient {
     fn default() -> Self {
-        // L10/C9：旧实现 .expect() — FUSION_MLX_BASE_URL 坏值即 panic。
-        // 改回退到安全的本地缺省 endpoint（DEFAULT_MLX_ENDPOINT，已 validate_localhost 校验）。
+        // L10/C9: the old implementation used .expect() — a bad FUSION_MLX_BASE_URL value panicked.
+        // Now falls back to the safe local default endpoint (DEFAULT_MLX_ENDPOINT, already
+        // validated by validate_localhost).
         match Self::new() {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!(error = %e, "默认 endpoint 构造失败，回退本地缺省");
+                tracing::error!(error = %e, "default endpoint construction failed, falling back to local default");
                 Self::with_endpoint(DEFAULT_MLX_ENDPOINT)
-                    .expect("DEFAULT_MLX_ENDPOINT 必为合法 localhost（编译期保证）")
+                    .expect("DEFAULT_MLX_ENDPOINT must be a valid localhost (guaranteed at compile time)")
             }
         }
     }
 }
 
-/// fusion-mlx RouteGuard 鉴权：所有出站请求附加 X-Fusion-Route + Bearer。
+/// fusion-mlx RouteGuard auth: every outbound request attaches X-Fusion-Route + Bearer.
 impl FusionMlxClient {
-    /// 鉴权 key 别名链解析（config-conventions §4）：
-    /// `FUSION_CLIENT_KEY`（规范名）→ `FUSION_MLX_API_KEY`（legacy 兜底，
-    /// Phase 3 于 2027-01-01 删除，issue #30）→ 未设置 WARN（fail visibly）。
-    /// 不在构造时缓存：支持运行期 Key 轮换与测试隔离。
+    /// Auth key alias-chain resolution (config-conventions §4):
+    /// `FUSION_CLIENT_KEY` (canonical name) → `FUSION_MLX_API_KEY` (legacy fallback,
+    /// removed in Phase 3 on 2027-01-01, issue #30) → unset WARN (fail visibly).
+    /// Not cached at construction: supports runtime key rotation and test isolation.
     fn bearer_token(&self) -> Option<String> {
         if let Ok(k) = std::env::var("FUSION_CLIENT_KEY") {
             if !k.trim().is_empty() {
@@ -310,20 +327,20 @@ impl FusionMlxClient {
         match std::env::var("FUSION_MLX_API_KEY") {
             Ok(k) if !k.trim().is_empty() => {
                 tracing::warn!(
-                    "FUSION_MLX_API_KEY 为 legacy 名（迁移期兜底，2027-01-01 起删除），请改设 FUSION_CLIENT_KEY"
+                    "FUSION_MLX_API_KEY is a legacy name (migration-period fallback, removed from 2027-01-01); switch to FUSION_CLIENT_KEY"
                 );
                 Some(format!("Bearer {}", k.trim()))
             }
             _ => {
                 tracing::warn!(
-                    "FUSION_CLIENT_KEY 未设置或为空；若 fusion-mlx 启用 API Key 鉴权，请求将被拒绝"
+                    "FUSION_CLIENT_KEY is unset or empty; requests will be rejected if fusion-mlx enables API key auth"
                 );
                 None
             }
         }
     }
 
-    /// 为请求附加 RouteGuard + Bearer 鉴权头（对应 issue #6：修复 403 missing_route）。
+    /// Attaches RouteGuard + Bearer auth headers to a request (issue #6: fixes 403 missing_route).
     fn authed(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let builder = builder.header(FUSION_ROUTE_HEADER.0, FUSION_ROUTE_HEADER.1);
         match self.bearer_token() {
@@ -333,10 +350,12 @@ impl FusionMlxClient {
     }
 }
 
-// A-6：统一鉴权头附加。retry_async_post / chat_stream_messages / check_generate 三处
-// 原各自手写 route header + bearer match，逻辑分叉易漏（如只加 route 忘 bearer）。
-// 此 helper 收口：route header 恒加 + 可选 bearer。bearer 由调用方预算（避免重试循环
-// 每次重读 env，性能），与 authed 方法互补——authed 即时读 env（低频单次请求场景）。
+// A-6: unified auth-header attachment. retry_async_post / chat_stream_messages / check_generate
+// each used to hand-write route header + bearer matching, a forked logic prone to omissions
+// (e.g. adding route but forgetting bearer). This helper consolidates: route header always added
+// + optional bearer. The bearer is resolved once by the caller (avoids re-reading env on every
+// retry-loop iteration, for performance) and complements the authed method — authed reads env
+// eagerly (low-frequency single-request scenarios).
 fn attach_route_bearer(
     builder: reqwest::RequestBuilder,
     bearer: Option<&str>,
@@ -348,7 +367,7 @@ fn attach_route_bearer(
     }
 }
 
-/// 异步版本（供 `fd-ecosystem` 任务队列调用）。
+/// Async variants (used by the `fd-ecosystem` task queue).
 impl FusionMlxClient {
     pub async fn chat_async(
         &self,
@@ -372,8 +391,9 @@ impl FusionMlxClient {
             max_tokens,
             temperature: None,
         };
-        // R-3：经 retry_async_post 重试（瞬时错误退避，4xx 永久失败，deadline 封顶）。
-        // A-1：failover 经 endpoints+rr 轮询，单节点 502/503 即切下一节点。
+        // R-3: retries via retry_async_post (transient-error backoff, 4xx permanent failure,
+        // deadline cap).
+        // A-1: failover via endpoints+rr round-robin; a single node's 502/503 switches to the next.
         let bearer = self.bearer_token();
         let bearer_ref: Option<&str> = bearer.as_deref();
         let parsed: MlxChatResponse = retry_async_post(
@@ -389,28 +409,29 @@ impl FusionMlxClient {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("fusion-mlx 返回空 choices"))?
+            .ok_or_else(|| anyhow::anyhow!("fusion-mlx returned empty choices"))?
             .message
             .content)
     }
 }
 
-/// 强校验 endpoint host 为本地/局域网，杜绝公网调用路径。
+/// Strictly validates that an endpoint host is local/LAN, eliminating public-internet call paths.
 ///
-/// H-A1/P2-1：旧实现仅放行 `127.0.0.1`/`localhost`/`::1`，把 fusion-mlx 集群
-/// 入口焊死——用户无法指向局域网内的 MLX worker（如 `10.x`/`192.168.x`）。
-/// 现放行回环 + RFC1918 私有段 + 链路本地（169.254/fe80）+ 唯一本地（fc00::/7），
-/// 仍拒绝一切公网 IP 与公网域名。离线硬约束（无公网调用）保持不变。
+/// H-A1/P2-1: the old implementation only allowed `127.0.0.1`/`localhost`/`::1`, welding shut the
+/// fusion-mlx cluster entry — users could not point at LAN MLX workers (e.g. `10.x`/`192.168.x`).
+/// Now allows loopback + RFC1918 private ranges + link-local (169.254/fe80) + unique-local
+/// (fc00::/7), while still rejecting all public IPs and public domains. The offline hard
+/// constraint (no public calls) is unchanged.
 fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
     let url = reqwest::Url::parse(endpoint)
-        .map_err(|e| anyhow::anyhow!("无效 endpoint {endpoint:?}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid endpoint {endpoint:?}: {e}"))?;
     let host = url.host_str().unwrap_or("");
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    // localhost 名义放行（回环别名）
+    // Allow "localhost" by name (loopback alias)
     if host == "localhost" {
         return Ok(());
     }
-    // IP 字面量：按 IpAddr 判定私有/回环/链路本地
+    // IP literals: classify private/loopback/link-local via IpAddr
     if let Ok(ip) = host.parse::<IpAddr>() {
         if ip.is_loopback() {
             return Ok(());
@@ -418,17 +439,20 @@ fn validate_localhost(endpoint: &str) -> anyhow::Result<()> {
         if is_private_or_local(&ip) {
             return Ok(());
         }
-        anyhow::bail!("违反离线硬约束：endpoint host {host:?} 为公网 IP，禁止公网调用");
+        anyhow::bail!("offline hard constraint violated: endpoint host {host:?} is a public IP, public calls are forbidden");
     }
-    // 非localhost域名一律拒（DNS 可能解析到公网，无法在静态期保证离线）
-    anyhow::bail!("违反离线硬约束：endpoint host {host:?} 非 localhost/私有IP，禁止公网调用");
+    // Non-localhost domains are always rejected (DNS may resolve to a public address; offline
+    // cannot be guaranteed statically)
+    anyhow::bail!("offline hard constraint violated: endpoint host {host:?} is not localhost/private IP, public calls are forbidden");
 }
 
-/// 判定 IP 是否为私有段（RFC1918）或链路本地/唯一本地地址。
-/// 公网 IP（含 8.8.8.8、1.1.1.1 等）返回 false。
-/// E-2：移除 is_unspecified()——0.0.0.0/:: 非"本地可达"地址，放行它等于允许
-/// 绑定任意网卡（含公网）的 endpoint，击穿离线约束。loopback 已在 validate_localhost
-/// 上层判定；此处仅私有/链路本地/唯一本地段，集群 worker（10.x/192.168.x/fe80）保留。
+/// Decides whether an IP is in a private range (RFC1918) or link-local/unique-local.
+/// Public IPs (e.g. 8.8.8.8, 1.1.1.1) return false.
+/// E-2: removed is_unspecified() — 0.0.0.0/:: are not "locally reachable" addresses; allowing
+/// them is equivalent to allowing endpoints bound on any interface (including public), piercing
+/// the offline constraint. Loopback is already decided at the validate_localhost layer above;
+/// this covers only private/link-local/unique-local ranges, keeping cluster workers
+/// (10.x/192.168.x/fe80) allowed.
 fn is_private_or_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -437,49 +461,52 @@ fn is_private_or_local(ip: &IpAddr) -> bool {
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // 唯一本地 fc00::/7
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // 链路本地 fe80::/10
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
         }
     }
 }
 
-/// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
+/// Blocking POST (uses a dedicated tokio runtime to avoid nested-runtime panics).
 ///
-/// 设计：创建一个 `LazyLock` 初始化的 multi-thread 专用 runtime，
-/// 所有 `chat_sync` / `ChatProvider::send` 的异步请求在此 runtime 上执行。
-/// 解决了以下问题：
-/// - 在 `#[tokio::test]` 内调用 `chat_sync` 时，`block_on` 嵌套 panic
-/// - 在同步上下文（如 `ChatProvider::send`）中，需要异步能力
-/// - 每次调用都新建 runtime 的性能开销
+/// Design: a `LazyLock`-initialized dedicated multi-thread runtime runs all async requests from
+/// `chat_sync` / `ChatProvider::send`. Solves:
+/// - `block_on` nested panic when calling `chat_sync` inside `#[tokio::test]`
+/// - needing async capability in synchronous contexts (e.g. `ChatProvider::send`)
+/// - the performance cost of building a new runtime per call
 ///
-/// 专用 runtime 是 multi-thread 的，因此 `block_in_place` 可用，
-/// `reqwest` 的 DNS/TLS 解析不会阻塞主线程。
+/// The dedicated runtime is multi-thread, so `block_in_place` works and `reqwest`'s DNS/TLS
+/// resolution does not block the main thread.
 ///
-/// H-A6：worker_threads 自适应机器核数（最少 4）。旧值 1 使所有并发 block_on
-/// 串行化到单线程，首个 180s 长推理请求饿死后续请求（FIFO 头阻塞），多面板并发
-/// UI 冻结。multi-thread runtime 保持 block_in_place 可用，不引入嵌套 runtime panic。
-/// A-10：固定 4 在高核机器仍瓶颈，改为 available_parallelism 自适应（回退 4）。
+/// H-A6: worker_threads adapts to machine core count (min 4). The old value of 1 serialized all
+/// concurrent block_on onto a single thread, starving later requests behind the first 180s long
+/// inference (FIFO head-of-line blocking), freezing multi-panel concurrent UI. The multi-thread
+/// runtime keeps block_in_place available without introducing nested-runtime panics.
+/// A-10: a fixed 4 is still a bottleneck on high-core machines; switched to
+/// available_parallelism adaptation (fallback 4).
 static BLOCKING_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .max(4);
-    tracing::info!(workers, "BLOCKING_RT: 自适应 worker 线程数");
+    tracing::info!(workers, "BLOCKING_RT: adaptive worker thread count");
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_all()
         .build()
-        .expect("blocking tokio runtime 创建失败")
+        .expect("failed to create blocking tokio runtime")
 });
 
-// ── M-5：502/503 指数退避重试 ──
-// fusion-mlx 模型加载期间返回 503（"model loading"），集群节点模型被驱逐回 502/503。
-// 旧实现直接 bail!，首次请求即失败不等待加载。改瞬时错误退避重试，永久错误直接失败。
-// FUSION_MLX_RETRY_MAX 环境变量调最大尝试次数（含首次），缺省 4。设 1 即关闭重试。
+// ── M-5: 502/503 exponential backoff retry ──
+// fusion-mlx returns 503 ("model loading") while loading; cluster nodes return 502/503 when a
+// model is evicted. The old implementation bailed! immediately, failing the first request without
+// waiting for load. Now transient errors back off and retry; permanent errors fail directly.
+// FUSION_MLX_RETRY_MAX env var tunes the max attempt count (including the first), default 4.
+// Setting 1 disables retry.
 const RETRY_BACKOFF_BASE_MS: u64 = 500;
 const RETRY_MAX_BACKOFF_MS: u64 = 8_000;
 const RETRY_DEFAULT_MAX_ATTEMPTS: u32 = 4;
-// R-12：SSE buffer 残留上限。FUSION_MLX_SSE_BUFFER_CAP 可调（字节），缺省 8MB。
+// R-12: SSE buffer leftover cap. FUSION_MLX_SSE_BUFFER_CAP tunable (bytes), default 8MB.
 const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 
 fn sse_buffer_cap() -> usize {
@@ -491,7 +518,7 @@ fn sse_buffer_cap() -> usize {
 }
 
 fn retry_max_attempts() -> u32 {
-    // FUSION_MLX_RETRY_MAX 覆盖；<1 视为缺省。0/1 = 不重试（仅首次）。
+    // FUSION_MLX_RETRY_MAX override; <1 counts as default. 0/1 = no retry (first attempt only).
     std::env::var("FUSION_MLX_RETRY_MAX")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -500,15 +527,17 @@ fn retry_max_attempts() -> u32 {
 }
 
 fn is_transient_status(code: u16) -> bool {
-    // L-7：扩展瞬时错误集。
-    // 502/503/504 = 网关/服务端瞬时（模型加载中/被驱逐/网关临时不可达/超时）。
-    // 429 = 限流（Too Many Requests），529 = 上游过载（Anthropic 风格透传）。
-    // 其余 4xx = 永久，不重试。
+    // L-7: expanded transient-error set.
+    // 502/503/504 = gateway/server transient (model loading/evicted/gateway temporarily
+    // unreachable/timeout).
+    // 429 = rate limited (Too Many Requests), 529 = upstream overloaded (Anthropic-style passthrough).
+    // Other 4xx = permanent, no retry.
     matches!(code, 502 | 503 | 504 | 429 | 529)
 }
 
 fn backoff_delay(attempt: u32) -> std::time::Duration {
-    // 指数退避：500ms, 1s, 2s, 4s, 8s(上限)。attempt 从 0 起算（首次重试前的等待）。
+    // Exponential backoff: 500ms, 1s, 2s, 4s, 8s (cap). attempt starts at 0 (the wait before the
+    // first retry).
     let exp = if attempt >= 16 {
         1u64 << 16
     } else {
@@ -521,11 +550,13 @@ fn backoff_delay(attempt: u32) -> std::time::Duration {
 }
 
 impl FusionMlxClient {
-    /// 阻塞式 POST（用专用 tokio runtime，避免嵌套 runtime panic）。
-    /// 附加 RouteGuard + Bearer 鉴权头后发往 fusion-mlx。
-    /// M-5：502/503 瞬时错误指数退避重试，4xx 永久错误直接失败。
-    /// A-1：`path` 为相对 endpoint 的后缀（如 `/v1/chat/completions`），每 attempt
-    /// 经 `endpoint_for_attempt` 轮询选节点拼 url——单节点 502/503 即切下一节点。
+    /// Blocking POST (uses a dedicated tokio runtime to avoid nested-runtime panics).
+    /// Attaches RouteGuard + Bearer auth headers before sending to fusion-mlx.
+    /// M-5: transient 502/503 errors retry with exponential backoff; 4xx permanent errors fail
+    /// directly.
+    /// A-1: `path` is the suffix relative to an endpoint (e.g. `/v1/chat/completions`); each
+    /// attempt picks a node via `endpoint_for_attempt` round-robin to build the url — a single
+    /// node's 502/503 switches to the next node.
     fn blocking_post<T: Serialize + ?Sized>(
         &self,
         path: &str,
@@ -538,8 +569,10 @@ impl FusionMlxClient {
         let rr = self.rr.clone();
         BLOCKING_RT.block_on(async move {
             let max = retry_max_attempts();
-            // P-1：总 deadline 封顶重试时长，防 4×长退避 + 挂起响应无限阻塞。
-            // 默认 300s（FUSION_MLX_RETRY_DEADLINE_SECS 可调），每轮超 deadline 即 bail。
+            // P-1: total deadline caps retry duration, preventing 4x long backoff + hung responses
+            // from blocking forever.
+            // Default 300s (FUSION_MLX_RETRY_DEADLINE_SECS tunable); bail as soon as a round
+            // exceeds the deadline.
             let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
                 .ok()
                 .and_then(|s| s.trim().parse::<u64>().ok())
@@ -553,23 +586,24 @@ impl FusionMlxClient {
                         attempt,
                         elapsed = ?started.elapsed(),
                         deadline = ?deadline,
-                        "blocking_post: 超过总 deadline，放弃重试"
+                        "blocking_post: total deadline exceeded, giving up retries"
                     );
                     anyhow::bail!(
-                        "fusion-mlx 重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                        "fusion-mlx retries exceeded total deadline {:?} (attempt {}/{})",
                         deadline,
                         attempt,
                         max
                     );
                 }
-                // A-1：每 attempt 轮询选 endpoint 拼完整 url（failover）。
+                // A-1: pick an endpoint per attempt via round-robin to build the full url (failover).
                 let idx = if endpoints.len() == 1 {
                     0
                 } else {
                     rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % endpoints.len()
                 };
                 let url = format!("{}{}", endpoints[idx], path);
-                // RequestBuilder 消耗性，每次重试重建。A-6：鉴权头经 attach_route_bearer 统一。
+                // RequestBuilder is consuming, rebuilt per retry. A-6: auth headers unified via
+                // attach_route_bearer.
                 let req = attach_route_bearer(http.post(&url).json(payload), bearer.as_deref());
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
@@ -584,20 +618,21 @@ impl FusionMlxClient {
                                 code,
                                 endpoint = %endpoints[idx],
                                 ?delay,
-                                "blocking_post: 瞬时错误，退避后切换节点重试"
+                                "blocking_post: transient error, backing off then switching node to retry"
                             );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
                         if attempt + 1 < max {
-                            tracing::warn!(attempt, code, "blocking_post: 永久错误，不重试");
+                            tracing::warn!(attempt, code, "blocking_post: permanent error, not retrying");
                         } else {
-                            tracing::error!(attempt, code, "blocking_post: 重试耗尽");
+                            tracing::error!(attempt, code, "blocking_post: retries exhausted");
                         }
-                        anyhow::bail!("fusion-mlx HTTP {code}（尝试 {}/{max} 次）", attempt + 1);
+                        anyhow::bail!("fusion-mlx HTTP {code} (attempt {}/{max})", attempt + 1);
                     }
                     Err(e) => {
-                        // 连接错误（fusion-mlx 未起/网关不可达）按瞬时重试。
+                        // Connection errors (fusion-mlx not started/gateway unreachable) retry as
+                        // transient.
                         if attempt + 1 < max {
                             let delay = backoff_delay(attempt);
                             tracing::warn!(
@@ -605,31 +640,32 @@ impl FusionMlxClient {
                                 error = %e,
                                 endpoint = %endpoints[idx],
                                 ?delay,
-                                "blocking_post: 连接失败，退避后切换节点重试"
+                                "blocking_post: connection failed, backing off then switching node to retry"
                             );
                             last_err = Some(anyhow::Error::from(e));
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        tracing::error!(attempt, error = %e, "blocking_post: 连接失败，重试耗尽");
+                        tracing::error!(attempt, error = %e, "blocking_post: connection failed, retries exhausted");
                         anyhow::bail!(
-                            "fusion-mlx 连接失败（尝试 {}/{} 次）: {e}",
+                            "fusion-mlx connection failed (attempt {}/{}): {e}",
                             attempt + 1,
                             max
                         );
                     }
                 }
             }
-            // max >= 1 由 retry_max_attempts 保证，循环内必 return/bail。
-            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("blocking_post: 重试循环异常退出")))
+            // max >= 1 guaranteed by retry_max_attempts; the loop always returns/bails inside.
+            Err(last_err.unwrap_or_else(|| anyhow::anyhow!("blocking_post: retry loop exited abnormally")))
         })
     }
 }
 
-/// R-3：异步 POST 重试。复用 blocking_post 同款退避/瞬时判定/deadline 语义，
-/// 供 chat_async 等 async 路径统一重试。4xx 永久错误直接失败，瞬时错误退避重试。
-/// A-1：`endpoints`+`rr` 实现 failover——每 attempt 轮询选 endpoint 拼 url，
-/// 单节点 502/503 即切下一节点。
+/// R-3: async POST retry. Reuses blocking_post's backoff/transient-classification/deadline
+/// semantics so chat_async and other async paths retry uniformly. 4xx permanent errors fail
+/// directly; transient errors back off and retry.
+/// A-1: `endpoints`+`rr` implement failover — each attempt picks an endpoint round-robin to build
+/// the url; a single node's 502/503 switches to the next node.
 async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
     http: &reqwest::Client,
     endpoints: &[String],
@@ -652,10 +688,10 @@ async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>
                 attempt,
                 elapsed = ?started.elapsed(),
                 deadline = ?deadline,
-                "retry_async_post: 超过总 deadline，放弃重试"
+                "retry_async_post: total deadline exceeded, giving up retries"
             );
             anyhow::bail!(
-                "fusion-mlx 重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                "fusion-mlx retries exceeded total deadline {:?} (attempt {}/{})",
                 deadline,
                 attempt,
                 max
@@ -667,7 +703,7 @@ async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>
             rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % endpoints.len()
         };
         let url = format!("{}{}", endpoints[idx], path);
-        // A-6：鉴权头经 attach_route_bearer 统一（bearer 已为 Option<&str>）。
+        // A-6: auth headers unified via attach_route_bearer (bearer is already Option<&str>).
         let req = attach_route_bearer(http.post(&url).json(payload), bearer);
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -682,53 +718,54 @@ async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>
                         code,
                         endpoint = %endpoints[idx],
                         ?delay,
-                        "retry_async_post: 瞬时错误，退避后切换节点重试"
+                        "retry_async_post: transient error, backing off then switching node to retry"
                     );
                     tokio::time::sleep(delay).await;
                     continue;
                 }
                 if attempt + 1 < max {
-                    tracing::warn!(attempt, code, "retry_async_post: 永久错误，不重试");
+                    tracing::warn!(attempt, code, "retry_async_post: permanent error, not retrying");
                 } else {
-                    tracing::error!(attempt, code, "retry_async_post: 重试耗尽");
+                    tracing::error!(attempt, code, "retry_async_post: retries exhausted");
                 }
-                anyhow::bail!("fusion-mlx HTTP {code}（尝试 {}/{max} 次）", attempt + 1);
+                anyhow::bail!("fusion-mlx HTTP {code} (attempt {}/{max})", attempt + 1);
             }
             Err(e) => {
                 if attempt + 1 < max {
                     let delay = backoff_delay(attempt);
                     tracing::warn!(
                         attempt, error = %e, endpoint = %endpoints[idx], ?delay,
-                        "retry_async_post: 连接失败，退避后切换节点重试"
+                        "retry_async_post: connection failed, backing off then switching node to retry"
                     );
                     last_err = Some(anyhow::Error::from(e));
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                tracing::error!(attempt, error = %e, "retry_async_post: 连接失败，重试耗尽");
+                tracing::error!(attempt, error = %e, "retry_async_post: connection failed, retries exhausted");
                 anyhow::bail!(
-                    "fusion-mlx 连接失败（尝试 {}/{} 次）: {e}",
+                    "fusion-mlx connection failed (attempt {}/{}): {e}",
                     attempt + 1,
                     max
                 );
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("retry_async_post: 重试循环异常退出")))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("retry_async_post: retry loop exited abnormally")))
 }
 
-// ── SSE 流式推理 ──
+// ── SSE streaming inference ──
 
-/// SSE 流式增量 token。
+/// SSE streaming incremental token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MlxStreamDelta {
     pub token: String,
     pub finished: bool,
 }
 
-/// 流式 chat：返回 SSE token 流。
+/// Streaming chat: returns an SSE token stream.
 ///
-/// 单轮便捷封装：system + 单条 user，多轮历史请用 chat_stream_messages。
+/// Single-turn convenience wrapper: system + one user message; for multi-turn history use
+/// chat_stream_messages.
 pub async fn chat_stream(
     client: FusionMlxClient,
     model: String,
@@ -749,22 +786,23 @@ pub async fn chat_stream(
     chat_stream_messages(client, model, messages, max_tokens).await
 }
 
-/// 多轮流式 chat：messages 由调用方构造（system + 多轮 user/assistant 历史）。
-/// 鉴权 / X-Fusion-Route header / endpoint 解析与 chat_stream 一致，
-/// 让 CLI / 上游（如 fusion-studio subprocess）复用同一 MLX 入口，不重实现。
+/// Multi-turn streaming chat: messages are built by the caller (system + multi-turn
+/// user/assistant history).
+/// Auth / X-Fusion-Route header / endpoint resolution match chat_stream, letting CLI / upstream
+/// (e.g. fusion-studio subprocess) reuse the same MLX entry without re-implementing.
 pub async fn chat_stream_messages(
     client: FusionMlxClient,
     model: String,
     messages: Vec<MlxChatMessage>,
     max_tokens: u32,
 ) -> impl futures::Stream<Item = anyhow::Result<MlxStreamDelta>> {
-    // A6 可观测性：关键推理入口记关联日志（model/消息数/max_tokens），
-    // 便于商用排障关联同一请求的完整生命周期。
+    // A6 observability: log correlated fields (model/message count/max_tokens) at the key
+    // inference entry, easing commercial troubleshooting across a request's full lifecycle.
     tracing::info!(
         model = %model,
         msg_count = messages.len(),
         max_tokens,
-        "chat_stream_messages: 启动流式推理请求"
+        "chat_stream_messages: starting streaming inference request"
     );
     let payload = serde_json::json!({
         "model": model,
@@ -776,13 +814,15 @@ pub async fn chat_stream_messages(
     let rr = client.rr.clone();
     let bearer = client.bearer_token();
     let http = client.http;
-    // M-5：建连阶段（send + status）指数退避重试 502/503。拿到 2xx 即进流消费。
-    // 流已建立后的中途断流不重试（语义复杂——已消费部分 delta，盲目重发致重复输出，
-    // 须上游提供 Last-Event-ID/断点续传原语，见 fusion-gateway#139）。
-    // RequestBuilder 消耗性，每次重试重建；bearer 保留 owned，闭包按引用取用。
-    // A-1：每 attempt 轮询选 endpoint 拼 url（failover）。
+    // M-5: connection phase (send + status) retries 502/503 with exponential backoff. Once a 2xx
+    // arrives, stream consumption begins.
+    // Mid-stream disconnects after the stream is established are not retried (semantics are
+    // complex — some deltas already consumed; blind resend duplicates output; requires upstream
+    // Last-Event-ID/resume primitives, see fusion-gateway#139).
+    // RequestBuilder is consuming, rebuilt per retry; bearer kept owned, closure borrows it.
+    // A-1: pick an endpoint per attempt via round-robin to build the url (failover).
     let max = retry_max_attempts();
-    // R-4：建连阶段总 deadline 封顶，防 4×长退避无限挂起。
+    // R-4: total deadline caps the connection phase, preventing 4x long backoff from hanging forever.
     let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -798,11 +838,11 @@ pub async fn chat_stream_messages(
                     attempt,
                     elapsed = ?started.elapsed(),
                     deadline = ?deadline,
-                    "chat_stream_messages: 建连超过总 deadline，放弃重试"
+                    "chat_stream_messages: connection exceeded total deadline, giving up retries"
                 );
                 return futures::stream::once(async move {
                     Err(anyhow::anyhow!(
-                        "fusion-mlx 建连重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                        "fusion-mlx connection retries exceeded total deadline {:?} (attempt {}/{})",
                         deadline,
                         attempt,
                         max
@@ -816,7 +856,7 @@ pub async fn chat_stream_messages(
                 rr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % endpoints.len()
             };
             let url = format!("{}/v1/chat/completions", endpoints[idx]);
-            // A-6：鉴权头经 attach_route_bearer 统一。bearer 预算一次，闭包按引用取用。
+            // A-6: auth headers unified via attach_route_bearer. Bearer resolved once, closure borrows it.
             let build_req =
                 || attach_route_bearer(http.post(&url).json(&payload), bearer.as_deref());
             let attempt_req = build_req();
@@ -834,7 +874,7 @@ pub async fn chat_stream_messages(
                             code,
                             endpoint = %endpoints[idx],
                             ?delay,
-                            "chat_stream_messages: 建连瞬时错误，退避后切换节点重试"
+                            "chat_stream_messages: connection transient error, backing off then switching node to retry"
                         );
                         tokio::time::sleep(delay).await;
                         continue;
@@ -842,11 +882,11 @@ pub async fn chat_stream_messages(
                     tracing::error!(
                         attempt,
                         code,
-                        "chat_stream_messages: 建连失败，重试耗尽或永久错误"
+                        "chat_stream_messages: connection failed, retries exhausted or permanent error"
                     );
                     return futures::stream::once(async move {
                         Err(anyhow::anyhow!(
-                            "fusion-mlx HTTP {code}（尝试 {}/{} 次）",
+                            "fusion-mlx HTTP {code} (attempt {}/{})",
                             attempt + 1,
                             max
                         ))
@@ -858,16 +898,16 @@ pub async fn chat_stream_messages(
                         let delay = backoff_delay(attempt);
                         tracing::warn!(
                             attempt, error = %e, endpoint = %endpoints[idx], ?delay,
-                            "chat_stream_messages: 建连失败，退避后切换节点重试"
+                            "chat_stream_messages: connection failed, backing off then switching node to retry"
                         );
                         last_err = Some(anyhow::Error::from(e));
                         tokio::time::sleep(delay).await;
                         continue;
                     }
-                    tracing::error!(attempt, error = %e, "chat_stream_messages: 建连失败，重试耗尽");
+                    tracing::error!(attempt, error = %e, "chat_stream_messages: connection failed, retries exhausted");
                     return futures::stream::once(async move {
                         Err(anyhow::anyhow!(
-                            "SSE 请求失败（尝试 {}/{} 次）: {e}",
+                            "SSE request failed (attempt {}/{}): {e}",
                             attempt + 1,
                             max
                         ))
@@ -880,71 +920,83 @@ pub async fn chat_stream_messages(
             Some(r) => r,
             None => {
                 let e = last_err
-                    .unwrap_or_else(|| anyhow::anyhow!("chat_stream_messages: 重试循环异常退出"));
+                    .unwrap_or_else(|| anyhow::anyhow!("chat_stream_messages: retry loop exited abnormally"));
                 return futures::stream::once(async move { Err(e) }).boxed();
             }
         }
     };
 
     let stream = resp.bytes_stream();
-    // FAULT-1：单 chunk 间空闲上限。`reqwest` client `.timeout(180s)` 是**总**时限，
-    //   非 chunk 间间隔——上游建立连接后首帧快、中途 stall（模型算力耗尽/网络抖动）
-    //   会挂起 stream.next().await 无限，无任何重试/超时兜底。
-    //   用 tokio::time::timeout 包单次 next：超过 IDLE 未见下一 chunk 即 Elapsed →
-    //   emit error delta + 终止流（fail visibly Rule 12）。区别于总 deadline：
-    //   总 deadline 封顶整轮重试，IDLE 封顶单 chunk 空闲（长生成内容有间隔也安全，
-    //   仅「卡死无任何字节」超 IDLE）。FUSION_MLX_STREAM_IDLE_SECS 可调，缺省 60。
+    // FAULT-1: per-chunk idle cap. The `reqwest` client `.timeout(180s)` is a **total** deadline,
+    //   not a between-chunk interval — once upstream establishes the connection and the first
+    //   frame arrives quickly, a mid-stream stall (model compute exhausted/network jitter) hangs
+    //   stream.next().await forever with no retry/timeout backstop.
+    //   Wrapping each next in tokio::time::timeout: if no next chunk arrives within IDLE, Elapsed →
+    //   emit error delta + terminate the stream (fail visibly, Rule 12). Distinct from the total
+    //   deadline: the total deadline caps the whole retry round, IDLE caps a single chunk's idle
+    //   time (long generations with gaps are safe; only "stuck with zero bytes" trips IDLE).
+    //   FUSION_MLX_STREAM_IDLE_SECS tunable, default 60.
     let idle_secs = std::env::var("FUSION_MLX_STREAM_IDLE_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(60);
     let idle = std::time::Duration::from_secs(idle_secs);
-    // L6：buffer 用 Vec<u8> 而非 String。旧实现用 String::from_utf8_lossy(&bytes)
-    //   把每个 chunk 立即解码，但 chunk 可能在多字节 CJK 字符中间切断（UTF-8 一字 3 字节），
-    //   残缺尾字节被替换成 U+FFFD → 中文 UI JSON 乱码。改字节缓冲：完整行（以 \n 分隔）
-    //   才整体 from_utf8 解码，跨 chunk 的残缺多字节字符留在 buffer 等下一 chunk 补全。
+    // L6: buffer is Vec<u8>, not String. The old implementation decoded each chunk immediately
+    //   via String::from_utf8_lossy(&bytes), but a chunk may cut a multi-byte CJK character in
+    //   half (UTF-8 is 3 bytes per CJK char), and the broken trailing bytes became U+FFFD →
+    //   garbled Chinese in UI JSON. Byte-buffer approach: only complete lines (separated by \n)
+    //   are decoded from_utf8 as a whole; partial multi-byte characters spanning chunks stay in
+    //   the buffer awaiting the next chunk.
     futures::stream::unfold(
         (stream, Vec::<u8>::new(), idle, idle_secs),
         |(mut stream, mut buffer, idle, idle_secs)| async move {
             use futures::StreamExt;
             loop {
-                // FAULT-1：timeout 包单次 next，stall 超 IDLE 即 Elapsed 失败可见。
+                // FAULT-1: timeout wraps a single next; a stall over IDLE becomes Elapsed, failing visibly.
                 match tokio::time::timeout(idle, stream.next()).await {
                     Ok(Some(Ok(bytes))) => {
                         buffer.extend_from_slice(&bytes);
-                        // R-12：先排空所有完整行（含本轮及之前残留），再判定残留上限。
-                        // 旧实现 `&& !buffer.contains(&b'\n')` 在「超限但含换行」时
-                        // 静默跳过 cap，且 contains 是 O(n) 全扫。改为：完整行必先 drain，
-                        // 仅对 drain 后的**跨 chunk 残留**（无换行的半截）做上限判定。
+                        // R-12: drain all complete lines (this round plus earlier leftovers) first,
+                        // then check the leftover cap.
+                        // The old `&& !buffer.contains(&b'\n')` condition silently skipped the cap
+                        // when "over the limit but containing a newline", and contains was an O(n)
+                        // full scan. Now: complete lines are drained first, and the cap applies only
+                        // to the **cross-chunk leftover** after draining (a half line with no newline).
                         while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
-                            // L6：完整行整体 from_utf8_lossy 解码（行内已是完整 UTF-8，
-                            //   SSE data: 前缀+JSON 结构为 ASCII，CJK 在 JSON 值内且完整）。
-                            // 先解码再 drain，避免 line_bytes 借用与 buffer.drain 冲突。
+                            // L6: decode the complete line as a whole via from_utf8_lossy (within a
+                            //   line the UTF-8 is already complete; the SSE data: prefix + JSON
+                            //   structure is ASCII, CJK sits inside JSON values and is complete).
+                            // Decode before draining to avoid conflicting line_bytes borrow with
+                            // buffer.drain.
                             let line = String::from_utf8_lossy(&buffer[..line_end])
                                 .trim()
                                 .to_string();
                             buffer.drain(..=line_end);
-                            // ARCH-10 round-2：strip-data/[DONE]/JSON/抽 content 逻辑
-                            // 外移至 stream::parse_sse_line（单一真相源），此处仅消费 delta。
+                            // ARCH-10 round-2: strip-data/[DONE]/JSON/content-extraction logic
+                            // moved out to stream::parse_sse_line (single source of truth); this
+                            // side only consumes deltas.
                             if let Some(delta) = parse_sse_line(&line) {
                                 return Some((Ok(delta), (stream, buffer, idle, idle_secs)));
                             }
                         }
-                        // R-12：while-drain 后残留 = 跨 chunk 半截行（无换行）。
-                        // 残留超上限即异常流（上游慢/单行超 8MB），报错终止，杜绝内存膨胀。
-                        // 旧条件含 `!buffer.contains(&b'\n')` 在超限但含换行时静默放行，
-                        // 已由「先 drain 再判残留」根除该盲区。
+                        // R-12: after the while-drain, the leftover is a cross-chunk half line (no
+                        // newline). Leftover over the cap means an abnormal stream (slow upstream /
+                        // single line over 8MB); error out and terminate the stream to prevent
+                        // unbounded memory growth.
+                        // The old condition with `!buffer.contains(&b'\n')` silently let through
+                        // "over the cap but containing a newline"; "drain first, then judge the
+                        // leftover" eradicates that blind spot.
                         if buffer.len() > MAX_SSE_BUFFER {
                             let cap = sse_buffer_cap();
                             if buffer.len() > cap {
                                 tracing::error!(
                                     len = buffer.len(),
                                     cap,
-                                    "SSE 残留超限（跨 chunk 半截行无换行），终止流"
+                                    "SSE leftover over cap (cross-chunk half line with no newline), terminating stream"
                                 );
                                 return Some((
                                     Err(anyhow::anyhow!(
-                                        "SSE buffer 残留超限 ({cap} 字节) 无完整行"
+                                        "SSE buffer leftover over cap ({cap} bytes) with no complete line"
                                     )),
                                     (stream, Vec::new(), idle, idle_secs),
                                 ));
@@ -952,47 +1004,52 @@ pub async fn chat_stream_messages(
                         }
                     }
                     Ok(Some(Err(e))) => {
-                        return Some((Err(anyhow::anyhow!("SSE 读取出错: {e}")), (stream, buffer, idle, idle_secs)));
+                        return Some((Err(anyhow::anyhow!("SSE read error: {e}")), (stream, buffer, idle, idle_secs)));
                     }
-                    // FAULT-1：EOF，先排空 buffer 残留成行数据再终止流。
+                    // FAULT-1: EOF — drain leftover complete-line data from the buffer before
+                    // terminating the stream.
                     Ok(None) => {
-                        // EOF：先排空 buffer 里残留的成行数据，再终止流。
-                        // 上游可能没在最后一帧后补换行，或最后一个 chunk
-                        // 还停在 buffer 里没被 while 循环处理 — 直接 return None
-                        // 会丢尾部 delta（#18）。
+                        // EOF: drain the leftover line data from the buffer first, then terminate.
+                        // Upstream may not append a newline after the final frame, or the last
+                        // chunk may still sit in the buffer unprocessed by the while loop —
+                        // return None directly would drop the tail deltas (#18).
                         while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
                             let line = String::from_utf8_lossy(&buffer[..line_end])
                                 .trim()
                                 .to_string();
                             buffer.drain(..=line_end);
-                            // ARCH-10 round-2：复用 stream::parse_sse_line 单一真相源。
+                            // ARCH-10 round-2: reuse stream::parse_sse_line (single source of truth).
                             if let Some(delta) = parse_sse_line(&line) {
                                 return Some((Ok(delta), (stream, buffer, idle, idle_secs)));
                             }
                         }
-                        // 无换行的尾部残行（上游没补换行就关连接）：按整行解析。
-                        // L6：残行也可能是跨 chunk 的 CJK，整体 from_utf8_lossy 解码。
+                        // Trailing half line with no newline (upstream closed without appending a
+                        // newline): parse as a whole line.
+                        // L6: the tail may also be cross-chunk CJK; decode as a whole via
+                        // from_utf8_lossy.
                         let tail = String::from_utf8_lossy(&buffer).trim().to_string();
                         if !tail.is_empty() {
                             buffer.clear();
-                            // ARCH-10 round-2：尾残行同样复用 parse_sse_line（单一真相源）。
+                            // ARCH-10 round-2: the tail half line also reuses parse_sse_line
+                            // (single source of truth).
                             if let Some(delta) = parse_sse_line(&tail) {
                                 return Some((Ok(delta), (stream, buffer, idle, idle_secs)));
                             }
                         }
                         return None;
                     }
-                    // FAULT-1：单 chunk 空闲超 IDLE — stall 卡死，fail visibly 终止流。
-                    // 区别于 client 总 timeout（180s）：IDLE 是相邻 chunk 间隔上限。
+                    // FAULT-1: single-chunk idle over IDLE — stalled; fail visibly, terminate stream.
+                    // Distinct from the client total timeout (180s): IDLE is the cap on the gap
+                    // between adjacent chunks.
                     Err(_elapsed) => {
                         tracing::error!(
                             idle_secs,
-                            "SSE 流 stall：超过 {}s 未见下一 chunk，终止流（FAULT-1）",
+                            "SSE stream stall: no next chunk within {}s, terminating stream (FAULT-1)",
                             idle_secs
                         );
                         return Some((
                             Err(anyhow::anyhow!(
-                                "SSE 流 stall：超过 {idle_secs}s 未见下一 chunk（FUSION_MLX_STREAM_IDLE_SECS 可调）"
+                                "SSE stream stall: no next chunk within {idle_secs}s (tunable via FUSION_MLX_STREAM_IDLE_SECS)"
                             )),
                             (stream, buffer, idle, idle_secs),
                         ));
@@ -1004,32 +1061,33 @@ pub async fn chat_stream_messages(
     .boxed()
 }
 
-// ── MLX 健康检查 ──
+// ── MLX health check ──
 
-/// MLX 服务健康状态。
+/// MLX service health status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
     pub available: bool,
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<String>,
-    /// 鉴权是否通过。None=未鉴权或无法判定；Some(true)=已通过；
-    /// Some(false)=401/403 被拒（FUSION_CLIENT_KEY 缺失或错误）。
+    /// Whether auth passed. None = not authenticated or undecidable; Some(true) = passed;
+    /// Some(false) = rejected with 401/403 (FUSION_CLIENT_KEY missing or wrong).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_ok: Option<bool>,
-    /// /v1/models 返回的模型 id 列表。空列表 = gateway 挂了模型名但 MLX 未加载，
-    /// generate 仍会 502——这是「假绿」的根因。
+    /// Model id list returned by /v1/models. Empty list = gateway advertises a model name but MLX
+    /// has not loaded it; generate still 502s — this is the root cause of "false green".
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub models: Vec<String>,
-    /// 人读状态摘要：可达/鉴权失败/无模型可用/可用。
+    /// Human-readable status summary: reachable / auth failed / no models available / available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
 }
 
 impl FusionMlxClient {
-    /// 探测 fusion-mlx 健康状态（超时 3s）。
-    /// 区分三种失败：不可达 / 鉴权拒绝(401/403) / 可达但无模型——
-    /// 后两者过去都塌缩成 available:false，掩盖了「设了 key 却无效」「gateway 假绿」。
+    /// Probes fusion-mlx health (timeout 3s).
+    /// Distinguishes three failure modes: unreachable / auth rejected (401/403) / reachable but no
+    /// models — the last two previously collapsed into available:false, masking "key set but
+    /// invalid" and "gateway false green".
     pub async fn health_check(&self) -> anyhow::Result<HealthStatus> {
         let url = format!("{}/v1/models", self.endpoint);
         let resp = self
@@ -1058,18 +1116,18 @@ impl FusionMlxClient {
                     let available = !models.is_empty();
                     let status = if available {
                         format!(
-                            "可用（{} 个模型，首个 {}）",
+                            "available ({} models, first {})",
                             models.len(),
                             model.as_deref().unwrap_or("?")
                         )
                     } else {
-                        String::from("可达但无模型——gateway 列表为空或 MLX 未加载，generate 将 502")
+                        String::from("reachable but no models — gateway list is empty or MLX not loaded, generate will 502")
                     };
                     if available {
-                        tracing::info!(available = true, model = ?model, n = models.len(), "health_check: MLX 可用");
+                        tracing::info!(available = true, model = ?model, n = models.len(), "health_check: MLX available");
                     } else {
                         tracing::warn!(
-                            "health_check: /v1/models 返回 200 但 data 为空，疑似 gateway 假绿"
+                            "health_check: /v1/models returned 200 but data is empty, suspected gateway false green"
                         );
                     }
                     Ok(HealthStatus {
@@ -1081,7 +1139,7 @@ impl FusionMlxClient {
                         status: Some(status),
                     })
                 } else if status_code.as_u16() == 401 || status_code.as_u16() == 403 {
-                    tracing::warn!(status = %status_code, "health_check: 鉴权被拒，检查 FUSION_CLIENT_KEY");
+                    tracing::warn!(status = %status_code, "health_check: auth rejected, check FUSION_CLIENT_KEY");
                     Ok(HealthStatus {
                         available: false,
                         model: None,
@@ -1089,44 +1147,46 @@ impl FusionMlxClient {
                         auth_ok: Some(false),
                         models: vec![],
                         status: Some(format!(
-                            "鉴权失败（{status_code}）：FUSION_CLIENT_KEY 缺失或无效"
+                            "auth failed ({status_code}): FUSION_CLIENT_KEY missing or invalid"
                         )),
                     })
                 } else {
-                    tracing::warn!(status = %status_code, "health_check: MLX 返回非 2xx");
+                    tracing::warn!(status = %status_code, "health_check: MLX returned non-2xx");
                     Ok(HealthStatus {
                         available: false,
                         model: None,
                         gpu: None,
                         auth_ok: None,
                         models: vec![],
-                        status: Some(format!("MLX 返回 {status_code}")),
+                        status: Some(format!("MLX returned {status_code}")),
                     })
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "health_check: MLX 不可达");
+                tracing::warn!(error = %e, "health_check: MLX unreachable");
                 Ok(HealthStatus {
                     available: false,
                     model: None,
                     gpu: None,
                     auth_ok: None,
                     models: vec![],
-                    status: Some(format!("不可达：{e}")),
+                    status: Some(format!("unreachable: {e}")),
                 })
             }
         }
     }
 
-    /// 健康检查同步版（阻塞当前线程）。
+    /// Synchronous health check (blocks the current thread).
     pub fn health_check_sync(&self) -> anyhow::Result<HealthStatus> {
         let this = self.clone();
         BLOCKING_RT.block_on(async move { this.health_check().await })
     }
 
-    /// 真推理探针：发 1-token chat 请求，判定 generate 路径是否真能出活。
-    /// gateway /v1/models 与 /health、/readyz 均会「假绿」（列了模型名但 MLX 未加载），
-    /// 唯一权威可用性信号是真实 chat 调用——502/503 = 模型未加载，200 = 真可用。
+    /// Real inference probe: sends a 1-token chat request to decide whether the generate path can
+    /// actually produce output.
+    /// gateway /v1/models and /health, /readyz can all "false green" (model name listed but MLX
+    /// not loaded); the only authoritative availability signal is a real chat call — 502/503 =
+    /// model not loaded, 200 = truly available.
     pub async fn check_generate(&self, model: &str) -> anyhow::Result<GenerateProbeStatus> {
         let payload = MlxChatPayload {
             model,
@@ -1137,11 +1197,13 @@ impl FusionMlxClient {
             max_tokens: 1,
             temperature: None,
         };
-        // M-5：502/503 = 模型加载中/被驱逐，退避等待后重试。4xx/非瞬时 5xx/连接失败耗尽
-        // 仍按原诊断语义返回（不改变 GenerateProbeStatus 结构）。
-        // A-1：每 attempt 轮询选 endpoint（failover），url 在循环内按节点拼。
+        // M-5: 502/503 = model loading/evicted; back off, wait, then retry. Once 4xx / non-transient
+        // 5xx / connection failures are exhausted, still return with the original diagnostic
+        // semantics (GenerateProbeStatus structure unchanged).
+        // A-1: pick an endpoint per attempt via round-robin (failover); the url is built per node
+        // inside the loop.
         let max = retry_max_attempts();
-        // R-4：探针重试总 deadline 封顶，防 4×长退避无限挂起。
+        // R-4: total deadline caps probe retries, preventing 4x long backoff from hanging forever.
         let deadline_secs = std::env::var("FUSION_MLX_RETRY_DEADLINE_SECS")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -1156,13 +1218,13 @@ impl FusionMlxClient {
                     attempt,
                     elapsed = ?started.elapsed(),
                     deadline = ?deadline,
-                    "check_generate: 超过总 deadline，放弃重试"
+                    "check_generate: total deadline exceeded, giving up retries"
                 );
                 return Ok(GenerateProbeStatus {
                     model_loaded: false,
                     available: false,
                     status: Some(format!(
-                        "推理探针重试超过总 deadline {:?}（尝试 {}/{} 次）",
+                        "inference probe retries exceeded total deadline {:?} (attempt {}/{})",
                         deadline, attempt, max
                     )),
                     http_code: None,
@@ -1177,12 +1239,12 @@ impl FusionMlxClient {
                 Ok(r) => {
                     let code = r.status().as_u16();
                     if r.status().is_success() {
-                        tracing::info!(model, attempt, "check_generate: 推理探针通过");
+                        tracing::info!(model, attempt, "check_generate: inference probe passed");
                         return Ok(GenerateProbeStatus {
                             model_loaded: true,
                             available: true,
                             status: Some(format!(
-                                "推理探针通过（模型 {model} 已加载，尝试 {}/{} 次）",
+                                "inference probe passed (model {model} loaded, attempt {}/{})",
                                 attempt + 1,
                                 max
                             )),
@@ -1192,7 +1254,7 @@ impl FusionMlxClient {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
                         let msg = body["error"]["message"]
                             .as_str()
-                            .unwrap_or("无错误体")
+                            .unwrap_or("no error body")
                             .to_string();
                         last_code = Some(code);
                         if attempt + 1 < max {
@@ -1202,17 +1264,17 @@ impl FusionMlxClient {
                                 code,
                                 msg,
                                 ?delay,
-                                "check_generate: 模型未加载（502/503），退避后重试"
+                                "check_generate: model not loaded (502/503), backing off then retrying"
                             );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        tracing::warn!(code, msg, "check_generate: 模型未加载，重试耗尽");
+                        tracing::warn!(code, msg, "check_generate: model not loaded, retries exhausted");
                         return Ok(GenerateProbeStatus {
                             model_loaded: false,
                             available: false,
                             status: Some(format!(
-                                "模型未加载（{code} {msg}）：重试 {max} 次仍 502/503，generate 失败"
+                                "model not loaded ({code} {msg}): still 502/503 after {max} retries, generate failed"
                             )),
                             http_code: Some(code),
                         });
@@ -1220,14 +1282,14 @@ impl FusionMlxClient {
                         return Ok(GenerateProbeStatus {
                             model_loaded: false,
                             available: false,
-                            status: Some(format!("鉴权失败（{code}）：FUSION_CLIENT_KEY 无效")),
+                            status: Some(format!("auth failed ({code}): FUSION_CLIENT_KEY invalid")),
                             http_code: Some(code),
                         });
                     } else {
                         return Ok(GenerateProbeStatus {
                             model_loaded: false,
                             available: false,
-                            status: Some(format!("generate 返回 {code}")),
+                            status: Some(format!("generate returned {code}")),
                             http_code: Some(code),
                         });
                     }
@@ -1238,32 +1300,32 @@ impl FusionMlxClient {
                         let delay = backoff_delay(attempt);
                         tracing::warn!(
                             attempt, error = %e, ?delay,
-                            "check_generate: 请求失败，退避后重试"
+                            "check_generate: request failed, backing off then retrying"
                         );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
-                    tracing::warn!(error = %e, "check_generate: 请求失败，重试耗尽");
+                    tracing::warn!(error = %e, "check_generate: request failed, retries exhausted");
                     return Ok(GenerateProbeStatus {
                         model_loaded: false,
                         available: false,
-                        status: Some(format!("generate 请求失败（重试 {max} 次）：{e}")),
+                        status: Some(format!("generate request failed (after {max} retries): {e}")),
                         http_code: None,
                     });
                 }
             }
         }
-        // 循环正常退出（max=0 不会发生，retry_max_attempts 已保证 >=1）：兜底。
+        // Loop exits normally (max=0 cannot happen; retry_max_attempts guarantees >=1): fallback.
         Ok(GenerateProbeStatus {
             model_loaded: false,
             available: false,
             status: Some(format!(
-                "generate 重试 {max} 次未成功{}{}",
+                "generate did not succeed after {max} retries{}{}",
                 last_code
-                    .map(|c| format!("，末次 HTTP {c}"))
+                    .map(|c| format!(", last HTTP {c}"))
                     .unwrap_or_default(),
                 last_err
-                    .map(|e| format!("，末次错误 {e}"))
+                    .map(|e| format!(", last error {e}"))
                     .unwrap_or_default()
             )),
             http_code: last_code,
@@ -1271,7 +1333,7 @@ impl FusionMlxClient {
     }
 }
 
-/// 真推理探针结果。available = generate 路径真能出活。
+/// Real inference probe result. available = the generate path can actually produce output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateProbeStatus {
     pub model_loaded: bool,
@@ -1282,9 +1344,9 @@ pub struct GenerateProbeStatus {
     pub http_code: Option<u16>,
 }
 
-// ── 多模态请求（截图/草图 → UI）──
+// ── Multimodal requests (screenshot/sketch → UI) ──
 
-/// Vision 消息内容项。
+/// Vision message content item.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum VisionContent<'a> {
@@ -1299,11 +1361,13 @@ struct ImageUrlPayload<'a> {
     url: &'a str,
 }
 
-/// 多模态 chat 请求：发送图片 + 文字到 fusion-mlx。
-/// 从 base64 数据头嗅探真实图片 MIME（E-7/P3）。
-/// 旧实现硬编码 `image/png`，非 PNG（JPEG/WebP/GIF）被误标，多模态模型可能拒识。
-/// 解码首 12 字节读 magic：PNG 89504E47、JPEG FFD8FF、WebP "RIFF....WEBP"、GIF "GIF8"，
-/// 未知则回退 png（OpenAI vision 兼容最广，模型侧通常容忍 mime 不精确）。
+/// Multimodal chat request: sends image + text to fusion-mlx.
+/// Sniffs the real image MIME from the base64 data head (E-7/P3).
+/// The old implementation hardcoded `image/png`; non-PNG (JPEG/WebP/GIF) was mislabeled and the
+/// multimodal model might refuse to recognize it.
+/// Decodes the first 12 bytes and reads the magic: PNG 89504E47, JPEG FFD8FF, WebP
+/// "RIFF....WEBP", GIF "GIF8"; unknown falls back to png (OpenAI vision's broadest compatibility;
+/// models generally tolerate imprecise mime).
 fn detect_image_mime(image_base64: &str) -> &'static str {
     use base64::Engine;
     let head_b64 = image_base64.get(..16).unwrap_or(image_base64);
@@ -1343,8 +1407,9 @@ pub async fn chat_with_image(
             },
         },
     ];
-    // temperature 0.6：MLX 缺省 temperature=0 时 4-bit VL 模型确定性退化
-    //（重复 token / 结构崩坏成片），采样温度显著降结构性损坏率（实测）。
+    // temperature 0.6: with MLX default temperature=0, 4-bit VL models degrade deterministically
+    // (repeated tokens / structure collapsing into slabs); a sampling temperature markedly reduces
+    // the structural corruption rate (measured).
     let payload = serde_json::json!({
         "model": model,
         "messages": [
@@ -1367,15 +1432,16 @@ pub async fn chat_with_image(
         .choices
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("fusion-mlx 返回空 choices"))?
+        .ok_or_else(|| anyhow::anyhow!("fusion-mlx returned empty choices"))?
         .message
         .content)
 }
 
-// encode_image_base64 / encode_image_base64_async 迁出 fd-skills（ARCH-11），
-// 本文件经 re-export 引用。
+// encode_image_base64 / encode_image_base64_async moved out to fd-skills (ARCH-11);
+// this file references them via re-export.
 
-/// 多模态 chat 同步版（阻塞当前线程，专用 BLOCKING_RT 避免嵌套 runtime panic）。
+/// Synchronous multimodal chat (blocks the current thread; dedicated BLOCKING_RT avoids
+/// nested-runtime panic).
 pub fn chat_with_image_sync(
     client: &FusionMlxClient,
     model: &str,
@@ -1402,13 +1468,13 @@ pub fn chat_with_image_sync(
     })
 }
 
-// ── OpenPencil ChatProvider 适配 ──
+// ── OpenPencil ChatProvider adaptation ──
 
 use op_ai::chat_provider::{
     ChatDelta, ChatProvider, ChatRequest, EffortLevel, StopReason, ThinkingMode,
 };
 
-/// Fusion-MLX ChatProvider 适配器（实现 OpenPencil ChatProvider trait）。
+/// Fusion-MLX ChatProvider adapter (implements the OpenPencil ChatProvider trait).
 pub struct FusionMlxChatProvider {
     client: FusionMlxClient,
     default_model: String,
@@ -1429,8 +1495,9 @@ impl ChatProvider for FusionMlxChatProvider {
     }
     fn send(&self, request: ChatRequest) -> Box<dyn Iterator<Item = ChatDelta> + Send> {
         let model = request.model.as_deref().unwrap_or(&self.default_model);
-        // H-A9：旧实现丢弃 history/thinking/effort/attachments，多轮上下文丢失且无诊断。
-        // history 折叠进 messages[]（system + 历史 + 当前 user），透传到 MLX。
+        // H-A9: the old implementation dropped history/thinking/effort/attachments — multi-turn
+        // context lost with no diagnostics.
+        // history is folded into messages[] (system + history + current user) and passed to MLX.
         let mut messages: Vec<MlxChatMessage> = Vec::with_capacity(2 + request.history.len());
         if !request.system_prompt.trim().is_empty() {
             messages.push(MlxChatMessage {
@@ -1448,31 +1515,36 @@ impl ChatProvider for FusionMlxChatProvider {
             role: "user".into(),
             content: request.user_message,
         });
-        // thinking/effort/attachments 暂无 wire 支持（fusion-mlx OpenAI 兼容形状未暴露这些字段）。
-        // 静默丢弃即功能缺失无诊断；显式 warn 让上游可观测到能力降级，便于后续补 wire。
+        // thinking/effort/attachments have no wire support yet (the fusion-mlx OpenAI-compatible
+        // shape does not expose these fields).
+        // Silent drop = missing feature with no diagnostics; an explicit warn makes the capability
+        // degradation observable upstream, easing later wire support.
         if !matches!(request.thinking, ThinkingMode::Adaptive) {
             tracing::warn!(
                 thinking = request.thinking.as_str(),
-                "ChatRequest.thinking 无 wire 支持，已降级忽略（fusion-mlx 未暴露 thinking 开关）"
+                "ChatRequest.thinking has no wire support, degraded and ignored (fusion-mlx does not expose a thinking switch)"
             );
         }
         if !matches!(request.effort, EffortLevel::Low) {
             tracing::warn!(
                 effort = request.effort.as_str(),
-                "ChatRequest.effort 无 wire 支持，已降级忽略（fusion-mlx 未暴露 effort 旋钮）"
+                "ChatRequest.effort has no wire support, degraded and ignored (fusion-mlx does not expose an effort knob)"
             );
         }
         if !request.attachments.is_empty() {
             tracing::warn!(
                 count = request.attachments.len(),
                 names = ?request.attachments.iter().map(|a| &a.name).collect::<Vec<_>>(),
-                "ChatRequest.attachments 无 wire 支持，已降级忽略（多模态附件尚未接入）"
+                "ChatRequest.attachments has no wire support, degraded and ignored (multimodal attachments not yet wired)"
             );
         }
-        // H-A7：旧实现把全文包成单个 TextDelta，消费方等全文生成完才见首个 delta
-        // （同步 trait 语义下无真流式，但仍应产增量序列而非一次性蹦全文）。
-        // 按行分块：每行（含换行）一个 TextDelta，消费方逐行收增量；末帧 Done。
-        // 空文本不产 TextDelta，仅 Done。
+        // H-A7: the old implementation wrapped the full text in a single TextDelta, so consumers
+        // saw the first delta only after the whole text finished generating
+        // (no true streaming under the sync trait semantics, but an incremental sequence should
+        // still be produced rather than the full text in one jump).
+        // Per-line chunking: each line (including its newline) is one TextDelta; the consumer
+        // receives increments line by line; a final Done frame.
+        // Empty text produces no TextDelta, only Done.
         match self
             .client
             .chat_sync_messages(model, messages, request.max_output_tokens)
@@ -1495,7 +1567,7 @@ impl ChatProvider for FusionMlxChatProvider {
                 }
                 tracing::info!(
                     chunks = deltas.len(),
-                    "ChatProvider::send: 分块产出增量 delta 序列"
+                    "ChatProvider::send: chunked incremental delta sequence emitted"
                 );
                 deltas.push(ChatDelta::Done {
                     stop_reason: StopReason::EndTurn,
@@ -1507,7 +1579,7 @@ impl ChatProvider for FusionMlxChatProvider {
     }
 }
 
-/// 供测试与 `fd-ecosystem` 复用的便捷构造。
+/// Convenience constructor reused by tests and `fd-ecosystem`.
 pub fn shared_client(endpoint: Option<&str>) -> anyhow::Result<Arc<FusionMlxClient>> {
     let client = match endpoint {
         Some(e) => FusionMlxClient::with_endpoint(e)?,
@@ -1516,18 +1588,18 @@ pub fn shared_client(endpoint: Option<&str>) -> anyhow::Result<Arc<FusionMlxClie
     Ok(Arc::new(client))
 }
 
-// ── AI Skill 系统：已迁出 fd-skills crate（ARCH-11）──
+// ── AI Skill system: moved out to the fd-skills crate (ARCH-11) ──
 //
-// SkillContext trait + 7 skill impl + SkillRegistry + SkillOutput/SpecDocument 类型
-// + 纯 helper（parse_ui_json/repair_model_json/strip_code_fence/encode_image_base64/
-// ui_generator_system_prompt/DEFAULT_MAX_TOKENS）迁至 fd-skills。adapter 反向
-// impl SkillContext for FusionMlxClient，DesignSkills facade 通过 &dyn SkillContext
-// 调度 skill。re-export 保持 adapter 内部调用方路径不变。
+// SkillContext trait + 7 skill impls + SkillRegistry + SkillOutput/SpecDocument types
+// + pure helpers (parse_ui_json/repair_model_json/strip_code_fence/encode_image_base64/
+// ui_generator_system_prompt/DEFAULT_MAX_TOKENS) moved to fd-skills. The adapter reverse-
+// impls SkillContext for FusionMlxClient; the DesignSkills facade dispatches skills through
+// &dyn SkillContext. Re-exports keep the adapter's internal caller paths unchanged.
 
 use fd_design_system::DesignSystem;
 
-// ARCH-11 re-export：fd-skills 的 skill 类型 + 纯 helper，保持 adapter 内部
-//（DesignSkills facade / mlx_integration tests / skills_tests）路径不变。
+// ARCH-11 re-export: fd-skills skill types + pure helpers, keeping the adapter-internal
+// (DesignSkills facade / mlx_integration tests / skills_tests) paths unchanged.
 pub use fd_skills::{
     encode_image_base64, encode_image_base64_async, parse_flow_pages, parse_local_edit_input,
     parse_node_with_depth, parse_nodes_with_depth, parse_page_flow_input, parse_spec_doc_input,
@@ -1537,15 +1609,16 @@ pub use fd_skills::{
     SkillContext, SkillOutput, SkillRegistry, SpecDocSkill, SpecDocument, TextToUiSkill,
     DEFAULT_MAX_TOKENS,
 };
-// 7 skill struct 在 fd-skills 是 pub 但持 pub(crate) model 字段——adapter 仅作
-// &dyn SkillContext 调度 + re-export 类型名，不直接构造 skill struct（构造走
-// SkillRegistry::register_builtin(model)）。故只 re-export 类型名供类型引用。
+// The 7 skill structs are pub in fd-skills but hold pub(crate) model fields — the adapter only
+// dispatches via &dyn SkillContext + re-exports type names, never constructing skill structs
+// directly (construction goes through SkillRegistry::register_builtin(model)). So only type names
+// are re-exported for type references.
 
-// ── impl SkillContext for FusionMlxClient（ARCH-11 反向实现 trait）──
+// ── impl SkillContext for FusionMlxClient (ARCH-11 reverse trait impl) ──
 //
-// SkillContext trait 对象安全（无泛型/Self），FusionMlxClient 是 Send+Sync
-//（String + Vec + Arc<AtomicU32> + reqwest::Client），impl 合法。trait 方法
-// 委托到 adapter 已有的 chat_sync/chat_async/chat_with_image/chat_with_image_sync。
+// The SkillContext trait is object-safe (no generics/Self) and FusionMlxClient is Send+Sync
+// (String + Vec + Arc<AtomicU32> + reqwest::Client), so the impl is legal. Trait methods
+// delegate to the adapter's existing chat_sync/chat_async/chat_with_image/chat_with_image_sync.
 impl SkillContext for FusionMlxClient {
     fn chat(&self, model: &str, sys: &str, user: &str, max_tokens: u32) -> anyhow::Result<String> {
         self.chat_sync(model, sys, user, max_tokens)
@@ -1590,22 +1663,22 @@ impl SkillContext for FusionMlxClient {
     fn token_prompt_fragment(&self, design_system: Option<&DesignSystem>) -> Option<String> {
         design_system.map(|ds| {
             let css = ds.to_css_custom_properties();
-            format!("当前设计系统 Token（CSS Custom Properties）：\n{css}\n\n生成的 UI 必须使用这些 CSS 变量。")
+            format!("Current design system tokens (CSS Custom Properties):\n{css}\n\nThe generated UI must use these CSS variables.")
         })
     }
 }
 
 use fd_canvas_core::PenDocument;
 
-// A-2：html_to_pen_document 拆到 fd-html-parser 叶子 crate，re-export 保持
-// 调用方 `fd_ai_adapter::html_to_pen_document`（fd-cli）不变。
+// A-2: html_to_pen_document split out to the fd-html-parser leaf crate; the re-export keeps the
+// caller path `fd_ai_adapter::html_to_pen_document` (fd-cli) unchanged.
 pub use fd_html_parser::html_to_pen_document;
 
-/// AI 设计 skill 入口（对接 fusion-mlx 多模态推理）。
+/// AI design skill entry (wired to fusion-mlx multimodal inference).
 ///
-/// 设计原则：本层只负责把自然语言 / 参考图转化为 fusion-mlx prompt，
-/// 并把返回的结构化 JSON 解析为 `PenDocument` 节点。
-/// 真实推理由 `FusionMlxClient` 完成（离线硬约束）。
+/// Design principle: this layer only converts natural language / reference images into
+/// fusion-mlx prompts, and parses the returned structured JSON into `PenDocument` nodes.
+/// Real inference is done by `FusionMlxClient` (offline hard constraint).
 pub struct DesignSkills {
     client: FusionMlxClient,
     default_model: String,
@@ -1619,30 +1692,30 @@ impl DesignSkills {
         }
     }
 
-    /// 文生 UI：自然语言描述 → PenDocument 页面。
+    /// Text-to-UI: natural language description → PenDocument page.
     ///
-    /// 对应 PRD 模块 2「文本生成界面」。
+    /// Corresponds to PRD module 2 "text-generated interface".
     pub fn text_to_ui(&self, prompt: &str, page_name: &str) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
-        let user = format!("生成页面「{page_name}」。需求：{prompt}");
+        let sys = "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}.\
+Output JSON only; extra prose is forbidden. page contains width/height (default 1440x900); \
+each entry of the nodes list is {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}.";
+        let user = format!("Generate page \"{page_name}\". Requirements: {prompt}");
         let resp = self
             .client
             .chat_sync(&self.default_model, sys, &user, 2048)?;
         parse_ui_json(&resp, page_name)
     }
 
-    /// 文生 UI（async 变体，供 tokio 运行时内调用）。
+    /// Text-to-UI (async variant, for use inside a tokio runtime).
     pub async fn text_to_ui_async(
         &self,
         prompt: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
-        let sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。";
-        let user = format!("生成页面「{page_name}」。需求：{prompt}");
+        let sys = "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}.\
+Output JSON only; extra prose is forbidden. page contains width/height (default 1440x900); \
+each entry of the nodes list is {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}.";
+        let user = format!("Generate page \"{page_name}\". Requirements: {prompt}");
         let resp = self
             .client
             .chat_async(&self.default_model, sys, &user, 2048)
@@ -1650,10 +1723,12 @@ impl DesignSkills {
         parse_ui_json(&resp, page_name)
     }
 
-    /// 图生 UI：参考图/手绘草图 → PenDocument 页面。
+    /// Image-to-UI: reference image / hand-drawn sketch → PenDocument page.
     ///
-    /// 对应 PRD 模块 2「上传参考图 / 手绘草图逆向生成界面」。
-    /// 读取草图文件 base64 编码后发送真实多模态视觉请求；读取失败回退文字描述。
+    /// Corresponds to PRD module 2 "upload reference image / hand-drawn sketch reverse-generates
+    /// the interface".
+    /// Reads the sketch file, base64-encodes it, and sends a real multimodal vision request; on
+    /// read failure falls back to a text description.
     pub fn image_to_ui(
         &self,
         sketch_path: &str,
@@ -1661,14 +1736,15 @@ impl DesignSkills {
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
         let sys = ui_generator_system_prompt();
-        let user =
-            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let user = format!(
+            "Additional notes: {hint}\nBased on the sketch image above, generate the UI layout for page \"{page_name}\"."
+        );
         let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
             Ok(b64) => {
                 tracing::info!(
                     sketch_path,
                     bytes = b64.len(),
-                    "image_to_ui: 已加载草图，发送真实多模态请求"
+                    "image_to_ui: sketch loaded, sending real multimodal request"
                 );
                 chat_with_image_sync(
                     &self.client,
@@ -1680,9 +1756,9 @@ impl DesignSkills {
                 )?
             }
             Err(e) => {
-                tracing::warn!(sketch_path, error = %e, "image_to_ui: 草图加载失败，回退文字描述");
+                tracing::warn!(sketch_path, error = %e, "image_to_ui: sketch load failed, falling back to text description");
                 let user_text = format!(
-                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                    "Sketch path: {sketch_path} (unreadable: {e})\nAdditional notes: {hint}\nGenerate the UI layout for page \"{page_name}\"."
                 );
                 self.client
                     .chat_sync(&self.default_model, &sys, &user_text, DEFAULT_MAX_TOKENS)?
@@ -1691,29 +1767,31 @@ impl DesignSkills {
         parse_ui_json(&resp, page_name)
     }
 
-    /// 图生 UI（async 变体）。
+    /// Image-to-UI (async variant).
     pub async fn image_to_ui_async(
         &self,
         sketch_path: &str,
         hint: &str,
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
-        // A6 可观测性：图生 UI 是核心产品入口，记关联字段便于排障追踪。
+        // A6 observability: image-to-UI is a core product entry; log correlated fields for
+        // troubleshooting.
         tracing::info!(
             sketch_path,
             page_name,
             model = %self.default_model,
-            "image_to_ui_async: 启动图生 UI 请求"
+            "image_to_ui_async: starting image-to-UI request"
         );
         let sys = ui_generator_system_prompt();
-        let user =
-            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let user = format!(
+            "Additional notes: {hint}\nBased on the sketch image above, generate the UI layout for page \"{page_name}\"."
+        );
         let resp = match encode_image_base64_async(std::path::Path::new(sketch_path)).await {
             Ok(b64) => {
                 tracing::info!(
                     sketch_path,
                     bytes = b64.len(),
-                    "image_to_ui_async: 已加载草图，发送真实多模态请求"
+                    "image_to_ui_async: sketch loaded, sending real multimodal request"
                 );
                 chat_with_image(
                     &self.client,
@@ -1725,17 +1803,18 @@ impl DesignSkills {
                 )
                 .await?
             }
-            // L-5：草图不可读即 image-to-ui 无意义，不静默降级文字回退（fail visibly, Rule 12）。
+            // L-5: an unreadable sketch makes image-to-ui meaningless; no silent text fallback
+            // (fail visibly, Rule 12).
             Err(e) => {
                 return Err(anyhow::anyhow!(
-                    "image_to_ui_async: 草图加载失败: {e}（路径: {sketch_path}）"
+                    "image_to_ui_async: sketch load failed: {e} (path: {sketch_path})"
                 ));
             }
         };
         parse_ui_json(&resp, page_name)
     }
 
-    /// 截图/草图 → UI：读取图片文件，base64 编码后发送多模态请求。
+    /// Screenshot/sketch → UI: reads the image file, base64-encodes it, sends a multimodal request.
     pub async fn screenshot_to_ui(
         &self,
         image_path: &std::path::Path,
@@ -1743,9 +1822,9 @@ impl DesignSkills {
         page_name: &str,
     ) -> anyhow::Result<PenDocument> {
         let b64 = encode_image_base64(image_path)?;
-        tracing::info!(path = %image_path.display(), size_b64 = b64.len(), "screenshot_to_ui: 图片已编码");
+        tracing::info!(path = %image_path.display(), size_b64 = b64.len(), "screenshot_to_ui: image encoded");
         let sys = ui_generator_system_prompt();
-        let user = format!("补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。");
+        let user = format!("Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\".");
         let resp = chat_with_image(
             &self.client,
             &self.default_model,
@@ -1758,69 +1837,71 @@ impl DesignSkills {
         parse_ui_json(&resp, page_name)
     }
 
-    /// 局部编辑：框选节点 + 自然语言指令 → 修改后的节点。
+    /// Partial edit: selected node + natural language instruction → modified node.
     ///
-    /// 对应 PRD 模块 2「局部指令修改」。
-    /// 返回更新后的节点样式（调用方负责写回 PenDocument）。
+    /// Corresponds to PRD module 2 "partial instruction editing".
+    /// Returns the updated node style (the caller is responsible for writing it back to
+    /// PenDocument).
     pub fn partial_edit(&self, node_json: &str, instruction: &str) -> anyhow::Result<String> {
-        let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
-输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
-        let user = format!("节点：{node_json}\n指令：{instruction}");
+        let sys = "You are the fusion-design partial editor. Input is one node JSON and an edit instruction; \
+output the modified node JSON (keep original fields, change only fields the instruction involves). Output JSON only.";
+        let user = format!("Node: {node_json}\nInstruction: {instruction}");
         self.client.chat_sync(&self.default_model, sys, &user, 1024)
     }
 
-    /// 局部编辑（async 变体）。
+    /// Partial edit (async variant).
     pub async fn partial_edit_async(
         &self,
         node_json: &str,
         instruction: &str,
     ) -> anyhow::Result<String> {
-        let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
-输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
-        let user = format!("节点：{node_json}\n指令：{instruction}");
+        let sys = "You are the fusion-design partial editor. Input is one node JSON and an edit instruction; \
+output the modified node JSON (keep original fields, change only fields the instruction involves). Output JSON only.";
+        let user = format!("Node: {node_json}\nInstruction: {instruction}");
         self.client
             .chat_async(&self.default_model, sys, &user, 1024)
             .await
     }
 
-    /// 本地编辑：框选多节点 + 自然语言指令 → 批量修改 JSON。
+    /// Local edit: multiple selected nodes + natural language instruction → batch-modified JSON.
     pub fn local_edit(&self, nodes_json: &str, instruction: &str) -> anyhow::Result<String> {
-        let sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。";
-        let user = format!("选中节点：\n{nodes_json}\n\n编辑指令：{instruction}");
+        let sys = "You are the fusion-design local editor. Input is a JSON array of nodes and an edit instruction; \
+output the modified node JSON array (keep original fields, change only fields the instruction involves). Output a JSON array only.";
+        let user = format!("Selected nodes:\n{nodes_json}\n\nEdit instruction: {instruction}");
         self.client.chat_sync(&self.default_model, sys, &user, 2048)
     }
 
-    /// 本地编辑（async 变体）。
+    /// Local edit (async variant).
     pub async fn local_edit_async(
         &self,
         nodes_json: &str,
         instruction: &str,
     ) -> anyhow::Result<String> {
-        let sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。";
-        let user = format!("选中节点：\n{nodes_json}\n\n编辑指令：{instruction}");
+        let sys = "You are the fusion-design local editor. Input is a JSON array of nodes and an edit instruction; \
+output the modified node JSON array (keep original fields, change only fields the instruction involves). Output a JSON array only.";
+        let user = format!("Selected nodes:\n{nodes_json}\n\nEdit instruction: {instruction}");
         self.client
             .chat_async(&self.default_model, sys, &user, 2048)
             .await
     }
 
-    /// 多方案对比：生成 3 套不同风格设计稿。
+    /// Multi-variant comparison: generates 3 design drafts in different styles.
     ///
-    /// 对应 PRD 模块 2「一键生成 3 套不同风格设计稿并存画布」。
+    /// Corresponds to PRD module 2 "one-click generation of 3 differently styled drafts stored
+    /// side by side on the canvas".
     pub fn multi_variants(
         &self,
         prompt: &str,
         page_name: &str,
         styles: [&str; 3],
     ) -> anyhow::Result<[PenDocument; 3]> {
-        let v1 = self.text_to_ui(&format!("{prompt}（风格：{}）", styles[0]), page_name)?;
-        let v2 = self.text_to_ui(&format!("{prompt}（风格：{}）", styles[1]), page_name)?;
-        let v3 = self.text_to_ui(&format!("{prompt}（风格：{}）", styles[2]), page_name)?;
+        let v1 = self.text_to_ui(&format!("{prompt} (style: {})", styles[0]), page_name)?;
+        let v2 = self.text_to_ui(&format!("{prompt} (style: {})", styles[1]), page_name)?;
+        let v3 = self.text_to_ui(&format!("{prompt} (style: {})", styles[2]), page_name)?;
         Ok([v1, v2, v3])
     }
 
-    /// 多方案对比（async 变体）。
+    /// Multi-variant comparison (async variant).
     pub async fn multi_variants_async(
         &self,
         prompt: &str,
@@ -1828,13 +1909,13 @@ impl DesignSkills {
         styles: [&str; 3],
     ) -> anyhow::Result<[PenDocument; 3]> {
         let v1 = self
-            .text_to_ui_async(&format!("{prompt}（风格：{}）", styles[0]), page_name)
+            .text_to_ui_async(&format!("{prompt} (style: {})", styles[0]), page_name)
             .await?;
         let v2 = self
-            .text_to_ui_async(&format!("{prompt}（风格：{}）", styles[1]), page_name)
+            .text_to_ui_async(&format!("{prompt} (style: {})", styles[1]), page_name)
             .await?;
         let v3 = self
-            .text_to_ui_async(&format!("{prompt}（风格：{}）", styles[2]), page_name)
+            .text_to_ui_async(&format!("{prompt} (style: {})", styles[2]), page_name)
             .await?;
         Ok([v1, v2, v3])
     }
@@ -1845,7 +1926,7 @@ impl DesignSkills {
         match skill.execute(&self.client, None, &input)? {
             SkillOutput::SpecDoc(spec) => Ok(spec),
             other => anyhow::bail!(
-                "spec-doc 返回非 SpecDoc: {:?}",
+                "spec-doc returned non-SpecDoc: {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -1861,7 +1942,7 @@ impl DesignSkills {
         match skill.execute_async(&self.client, None, input).await? {
             SkillOutput::SpecDoc(spec) => Ok(spec),
             other => anyhow::bail!(
-                "spec-doc 返回非 SpecDoc: {:?}",
+                "spec-doc returned non-SpecDoc: {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -1873,7 +1954,7 @@ impl DesignSkills {
         match skill.execute(&self.client, None, &input)? {
             SkillOutput::PageFlow(docs) => Ok(docs),
             other => anyhow::bail!(
-                "page-flow 返回非 PageFlow: {:?}",
+                "page-flow returned non-PageFlow: {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -1889,7 +1970,7 @@ impl DesignSkills {
         match skill.execute_async(&self.client, None, input).await? {
             SkillOutput::PageFlow(docs) => Ok(docs),
             other => anyhow::bail!(
-                "page-flow 返回非 PageFlow: {:?}",
+                "page-flow returned non-PageFlow: {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -1900,13 +1981,13 @@ impl DesignSkills {
 mod skills_tests {
     use super::*;
 
-    // ARCH-11：skill 系统 tests 迁至 fd-skills/tests/skills_mock.rs。
-    // 本 mod 保留 B-class：endpoint 解析 + DesignSkills facade 可构造性 +
-    // strip_code_fence 直通（helper re-export 路径回归）。
+    // ARCH-11: skill system tests moved to fd-skills/tests/skills_mock.rs.
+    // This mod keeps the B-class: endpoint resolution + DesignSkills facade constructibility +
+    // strip_code_fence passthrough (helper re-export path regression).
 
     #[test]
     fn resolve_endpoint_empty_falls_back_to_default() {
-        // 清掉环境变量，空串应回退方案B gateway 11432
+        // Clear the env var; an empty string should fall back to Plan B gateway 11432
         std::env::remove_var("FUSION_MLX_BASE_URL");
         let ep = FusionMlxClient::resolve_endpoint("").unwrap();
         assert_eq!(ep, vec!["http://127.0.0.1:11432"]);
@@ -1914,7 +1995,7 @@ mod skills_tests {
 
     #[test]
     fn resolve_endpoint_explicit_overrides_env() {
-        // 用户显式传 --endpoint 优先级最高，忽略 env
+        // An explicit --endpoint has top priority, env ignored
         std::env::set_var("FUSION_MLX_BASE_URL", "http://127.0.0.1:11434");
         let ep = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432").unwrap();
         assert_eq!(ep, vec!["http://127.0.0.1:11432"]);
@@ -1923,7 +2004,8 @@ mod skills_tests {
 
     #[test]
     fn resolve_endpoint_multi_value_split_by_comma() {
-        // A-1：逗号分隔多值应拆成多条 endpoint，各经 validate_localhost。
+        // A-1: comma-separated multi-value should split into multiple endpoints, each validated
+        // by validate_localhost.
         std::env::remove_var("FUSION_MLX_BASE_URL");
         let ep = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432,http://10.0.0.5:11432")
             .unwrap();
@@ -1932,10 +2014,10 @@ mod skills_tests {
 
     #[test]
     fn resolve_endpoint_multi_value_rejects_public() {
-        // A-1：多值中任一公网 endpoint 整体拒绝。
+        // A-1: any public endpoint among the values rejects the whole list.
         std::env::remove_var("FUSION_MLX_BASE_URL");
         let r = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432,http://8.8.8.8:11432");
-        assert!(r.is_err(), "多值含公网 IP 应整体拒绝");
+        assert!(r.is_err(), "a list containing a public IP must be rejected as a whole");
     }
 
     #[test]
@@ -1960,7 +2042,7 @@ mod skills_tests {
     }
 }
 
-// ── 端到端集成测试（自建 mock HTTP server，零外部依赖）──
+// ── End-to-end integration tests (self-built mock HTTP server, zero external deps) ──
 
 #[cfg(test)]
 mod mlx_integration {
@@ -1970,8 +2052,8 @@ mod mlx_integration {
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
-    /// 自建 mock HTTP server：监听 127.0.0.1 随机端口，返回预设响应体。
-    /// body 用 String 避免 raw string 与 JSON '#' 边界冲突。
+    /// Self-built mock HTTP server: listens on a random 127.0.0.1 port, returns a preset body.
+    /// body is a String to avoid a raw-string/JSON '#' boundary conflict.
     async fn spawn_mock_server(status: u16, body: String) -> (String, Arc<Mutex<u32>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2001,8 +2083,8 @@ mod mlx_integration {
         FusionMlxClient::with_endpoint(endpoint).unwrap()
     }
 
-    /// A-1：多节点 mock client（endpoints 列表，跳过 validate_localhost 的公网校验——
-    /// 测试 server 绑 127.0.0.1，本身就是 loopback，校验必过）。
+    /// A-1: multi-node mock client (endpoints list; validate_localhost's public check is moot —
+    /// the test server binds 127.0.0.1, which is loopback, so validation always passes).
     fn mock_client_endpoints(endpoints: Vec<String>) -> FusionMlxClient {
         FusionMlxClient::with_endpoints(endpoints).unwrap()
     }
@@ -2042,8 +2124,10 @@ mod mlx_integration {
         format!("http://{}", addr)
     }
 
-    /// 写一个真实可读的占位 PNG 到唯一临时路径，保证测试不依赖外部 /tmp/fd_sketch.png。
-    /// encode_image_base64 仅 base64 编码文件字节，不校验图像格式，故最小 PNG 字节即可。
+    /// Writes a real, readable placeholder PNG to a unique temp path so tests do not depend on an
+    /// external /tmp/fd_sketch.png.
+    /// encode_image_base64 only base64-encodes the file bytes without validating image format, so
+    /// minimal PNG bytes suffice.
     /// SSE mock server (early EOF): emit frames then close the connection
     /// WITHOUT sending "data: [DONE]". Simulates upstream dropping mid-stream
     /// so the EOF branch must drain buffered deltas and terminate, not spin.
@@ -2078,9 +2162,10 @@ mod mlx_integration {
         format!("http://{}", addr)
     }
 
-    /// FAULT-1 stall mock server：建连 200 + 发 SSE headers 后不接任何 data 帧，
-    /// 长时间 sleep 不再写，模拟建连后无 chunk 卡死。chat_stream_messages 的
-    /// tokio::time::timeout(idle, stream.next()) 应在 IDLE 内以 Err 终结。
+    /// FAULT-1 stall mock server: connects 200 + sends SSE headers, then never sends any data
+    /// frames, sleeping for a long time — simulates a post-connect hang with no chunks.
+    /// chat_stream_messages' tokio::time::timeout(idle, stream.next()) should terminate with Err
+    /// within IDLE.
     async fn spawn_sse_stall_server() -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2098,14 +2183,14 @@ mod mlx_integration {
             resp.push_str("Connection: close\r\n\r\n");
             let _ = sock.write_all(resp.as_bytes()).await;
             let _ = sock.flush().await;
-            // 建连后不发任何 data 帧，长时间 sleep 模拟 stall 卡死。
+            // After connect, send no data frames; a long sleep simulates a stall hang.
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         });
         format!("http://{}", addr)
     }
 
     fn write_fixture_png() -> String {
-        // 67 字节最小合法 PNG（1x1 灰度）。
+        // 67-byte minimal valid PNG (1x1 grayscale).
         const MIN_PNG: &[u8] = &[
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
             0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00,
@@ -2115,7 +2200,7 @@ mod mlx_integration {
         ];
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("fd_test_sketch_{pid}.png"));
-        std::fs::write(&path, MIN_PNG).expect("写入测试 PNG 失败");
+        std::fs::write(&path, MIN_PNG).expect("failed to write test PNG");
         path.to_string_lossy().into_owned()
     }
 
@@ -2129,7 +2214,7 @@ mod mlx_integration {
             .await
             .unwrap();
         assert_eq!(out, "hello world");
-        // 请求被发到 mock server
+        // The request reached the mock server
         assert_eq!(*count.lock().unwrap(), 1);
     }
 
@@ -2142,9 +2227,10 @@ mod mlx_integration {
             .chat_async("qwen3.5", "sys", "usr", 128)
             .await
             .unwrap_err();
-        // 我们的 mock server 无视 status 总返回 200 头但 body 是错误 JSON，
-        // 这里验证 chat_async 在非成功 status 时 bail（实际 mock 始终 200）
-        // 改为验证错误路径：解析失败的 JSON
+        // Our mock server ignores status and always returns a 200 header even when the body is an
+        // error JSON; this test verified chat_async bails on a non-success status (the mock always
+        // returns 200).
+        // Instead verify the error path: the JSON fails to parse.
         assert!(!err.to_string().is_empty());
     }
 
@@ -2157,19 +2243,21 @@ mod mlx_integration {
             .chat_async("qwen3.5", "sys", "usr", 128)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("空 choices") || err.to_string().contains("fusion-mlx"));
+        assert!(
+            err.to_string().contains("empty choices") || err.to_string().contains("fusion-mlx")
+        );
     }
 
     #[tokio::test]
     async fn design_skills_text_to_ui_full_pipeline() {
-        // mock body 是 OpenAI 兼容形状：choices[0].message.content 是 UI JSON
+        // mock body is the OpenAI-compatible shape: choices[0].message.content holds the UI JSON
         let ui_json = "{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[{\"id\":\"hero\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":200,\"fill\":\"#007AFF\"},{\"id\":\"title\",\"kind\":\"text\",\"x\":48,\"y\":80,\"text\":\"Welcome\",\"fill\":\"#FFFFFF\"}]}}";
         let body = format!("{{\"choices\":[{{\"message\":{{\"content\":{ui_json:?}}}}}]}}");
         let (url, _count) = spawn_mock_server(200, body).await;
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let doc = skills
-            .text_to_ui_async("做一个英雄区", "Home")
+            .text_to_ui_async("build a hero section", "Home")
             .await
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
@@ -2192,7 +2280,7 @@ mod mlx_integration {
         let out = skills
             .partial_edit_async(
                 "{\"id\":\"btn1\",\"kind\":\"rect\",\"fill\":\"#0000FF\"}",
-                "改成红色",
+                "make it red",
             )
             .await
             .unwrap();
@@ -2207,7 +2295,7 @@ mod mlx_integration {
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let docs = skills
-            .multi_variants_async("登录页", "Login", ["简约", "玻璃拟态", "深色"])
+            .multi_variants_async("login page", "Login", ["minimal", "glassmorphism", "dark"])
             .await
             .unwrap();
         assert_eq!(docs.len(), 3);
@@ -2217,19 +2305,19 @@ mod mlx_integration {
         }
     }
 
-    /// 注意：本测试不走 `#[tokio::test]`，因为 `ChatProvider::send` 是
-    /// 同步 trait 方法，内部调 `chat_sync`，而 `chat_sync` 在已有 tokio
-    /// runtime 内嵌套 `block_on` 会 panic。改为在独立 runtime 内驱动
-    /// mock server + 调用 `send`，避免嵌套。
+    /// Note: this test does not use `#[tokio::test]` because `ChatProvider::send` is a
+    /// synchronous trait method that calls `chat_sync` internally, and `chat_sync`'s nested
+    /// `block_on` inside an existing tokio runtime panics. Instead, a standalone runtime drives
+    /// the mock server + the `send` call, avoiding nesting.
     #[test]
     fn chat_provider_trait_wires_to_mlx() {
         let body = "{\"choices\":[{\"message\":{\"content\":\"trait ok\"}}]}".to_string();
-        // 独立 runtime：启动 mock server 并阻塞取 url
+        // Standalone runtime: start the mock server and block to get the url
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (url, _count) = rt.block_on(spawn_mock_server(200, body));
         let client = mock_client(&url);
         let provider = FusionMlxChatProvider::new(client, "qwen3.5");
-        // send 内部 chat_sync 会检测无 current runtime，新建独立 runtime
+        // send's internal chat_sync detects no current runtime and builds a standalone one
         let req = ChatRequest {
             model: Some("qwen3.5".into()),
             system_prompt: "sys".into(),
@@ -2264,7 +2352,7 @@ mod mlx_integration {
         assert!(validate_localhost(&url).is_ok());
     }
 
-    /// 捕获原始 HTTP 请求文本的 mock server（用于断言鉴权头）。
+    /// Mock server capturing the raw HTTP request text (for asserting auth headers).
     async fn spawn_header_capture_server(body: String) -> (String, Arc<Mutex<Option<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2294,36 +2382,38 @@ mod mlx_integration {
         (format!("http://{addr}"), captured)
     }
 
-    /// issue #6：验证 chat 出站请求附加 X-Fusion-Route 头（修复 403 missing_route）。
+    /// issue #6: verifies chat outbound requests attach the X-Fusion-Route header (fixes 403
+    /// missing_route).
     #[tokio::test]
     async fn chat_async_sends_fusion_route_header() {
         let body = String::from(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
         let (url, captured) = spawn_header_capture_server(body).await;
         let client = mock_client(&url);
         let _ = client.chat_async("m", "s", "u", 64).await.unwrap();
-        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        let raw = captured.lock().unwrap().clone().expect("request not captured");
         assert!(
             raw.to_lowercase().contains("x-fusion-route: fusion-design"),
-            "缺少 X-Fusion-Route 头：{raw}"
+            "missing X-Fusion-Route header: {raw}"
         );
     }
 
-    /// issue #6：health_check 同样需带 RouteGuard 头（/v1/models 非豁免路径）。
+    /// issue #6: health_check must also carry the RouteGuard header (/v1/models is not an
+    /// exempt path).
     #[tokio::test]
     async fn health_check_sends_fusion_route_header() {
         let body = String::from(r#"{"data":[]}"#);
         let (url, captured) = spawn_header_capture_server(body).await;
         let client = mock_client(&url);
         let _ = client.health_check().await.unwrap();
-        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        let raw = captured.lock().unwrap().clone().expect("request not captured");
         assert!(
             raw.to_lowercase().contains("x-fusion-route: fusion-design"),
-            "缺少 X-Fusion-Route 头：{raw}"
+            "missing X-Fusion-Route header: {raw}"
         );
     }
 
-    /// 精确 status 的 mock server（spawn_mock_server 把非 200 硬编码成 500，
-    /// 这里按真实 status 行返回，用于 401/403 鉴权路径测试）。
+    /// Mock server with an exact status (spawn_mock_server hardcodes non-200 as 500;
+    /// this one returns the real status line, for the 401/403 auth-path tests).
     async fn spawn_status_server(status: u16, body: String) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2353,9 +2443,11 @@ mod mlx_integration {
         format!("http://{addr}")
     }
 
-    /// 序列 mock server：前 N 次按 statuses[] 返回，之后恒返回 200 + body_for_last。
-    /// 用于 M-5 重试回归：先 502/503 几次，再 200 成功。
-    /// 计数器用 AtomicU32，返回 url + 命中计数句柄供断言调用次数。
+    /// Sequence mock server: returns statuses[] for the first N hits, then always 200 +
+    /// body_for_last.
+    /// Used for M-5 retry regression: a few 502/503s first, then a 200 success.
+    /// The counter is an AtomicU32; returns the url + a hit-count handle for asserting call
+    /// counts.
     async fn spawn_sequence_server(
         statuses: Vec<u16>,
         body_for_last: String,
@@ -2399,8 +2491,10 @@ mod mlx_integration {
         (format!("http://{addr}"), count)
     }
 
-    /// 序列 SSE mock server：前 N 次返回 statuses[]（瞬时错误），之后返回 200 SSE。
-    /// 用于 chat_stream_messages 建连重试回归：502 几次后 200 流出 delta。
+    /// Sequence SSE mock server: returns statuses[] (transient errors) for the first N hits, then
+    /// a 200 SSE stream.
+    /// Used for chat_stream_messages connect-retry regression: a few 502s, then 200 streaming
+    /// deltas.
     async fn spawn_sequence_sse_server(statuses: Vec<u16>, frames: Vec<String>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2447,57 +2541,58 @@ mod mlx_integration {
         format!("http://{}", addr)
     }
 
-    /// 401 时 available=false 且 auth_ok=Some(false)——修复「假绿」核心场景。
+    /// On 401, available=false and auth_ok=Some(false) — the core "false green" fix scenario.
     #[tokio::test]
     async fn health_check_401_marks_auth_failure() {
         let url = spawn_status_server(401, r#"{"error":"unauthorized"}"#.to_string()).await;
         let client = mock_client(&url);
         let s = client.health_check().await.unwrap();
-        assert!(!s.available, "401 不应 available");
-        assert_eq!(s.auth_ok, Some(false), "401 必须标 auth_ok=false");
-        assert!(s.models.is_empty(), "401 不应列模型");
+        assert!(!s.available, "401 must not be available");
+        assert_eq!(s.auth_ok, Some(false), "401 must mark auth_ok=false");
+        assert!(s.models.is_empty(), "401 must not list models");
         assert!(
-            s.status.as_deref().unwrap().contains("鉴权"),
-            "status 文案须点出鉴权失败：{:?}",
+            s.status.as_deref().unwrap().contains("auth"),
+            "status text must point out the auth failure: {:?}",
             s.status
         );
     }
 
-    /// 200 但 data 为空——gateway 假绿：available=false，auth_ok=Some(true)。
+    /// 200 but empty data — gateway false green: available=false, auth_ok=Some(true).
     #[tokio::test]
     async fn health_check_empty_models_not_available() {
         let url = spawn_status_server(200, r#"{"data":[]}"#.to_string()).await;
         let client = mock_client(&url);
         let s = client.health_check().await.unwrap();
-        assert!(!s.available, "空 data 不应 available");
-        assert_eq!(s.auth_ok, Some(true), "200 即鉴权通过");
-        assert!(s.model.is_none(), "无首个模型");
+        assert!(!s.available, "empty data must not be available");
+        assert_eq!(s.auth_ok, Some(true), "200 means auth passed");
+        assert!(s.model.is_none(), "no first model");
         assert!(
-            s.status.as_deref().unwrap().contains("无模型"),
-            "status 须点出无模型：{:?}",
+            s.status.as_deref().unwrap().contains("no models"),
+            "status must point out no models: {:?}",
             s.status
         );
     }
 
-    /// 200 且有模型——正常路径：available=true，auth_ok=Some(true)，model 有值。
+    /// 200 with models — normal path: available=true, auth_ok=Some(true), model set.
     #[tokio::test]
     async fn health_check_with_models_available() {
         let body = r#"{"data":[{"id":"qwen3-coder"},{"id":"qwen2.5-vl"}]}"#.to_string();
         let url = spawn_status_server(200, body).await;
         let client = mock_client(&url);
         let s = client.health_check().await.unwrap();
-        assert!(s.available, "有模型应 available");
+        assert!(s.available, "with models it should be available");
         assert_eq!(s.auth_ok, Some(true));
         assert_eq!(s.model.as_deref(), Some("qwen3-coder"));
-        assert_eq!(s.models.len(), 2, "应列全部模型 id");
+        assert_eq!(s.models.len(), 2, "all model ids should be listed");
         assert!(
-            s.status.as_deref().unwrap().contains("可用"),
-            "status 须标可用：{:?}",
+            s.status.as_deref().unwrap().contains("available"),
+            "status must mark available: {:?}",
             s.status
         );
     }
 
-    /// check_generate 502——gateway 假绿终局：列了模型但 MLX 未加载，available=false。
+    /// check_generate 502 — gateway false-green endgame: models listed but MLX not loaded,
+    /// available=false.
     #[tokio::test]
     async fn check_generate_502_marks_model_not_loaded() {
         let url = spawn_status_server(
@@ -2507,17 +2602,17 @@ mod mlx_integration {
         .await;
         let client = mock_client(&url);
         let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
-        assert!(!p.available, "502 不应 available");
-        assert!(!p.model_loaded, "502 不应 model_loaded");
+        assert!(!p.available, "502 must not be available");
+        assert!(!p.model_loaded, "502 must not be model_loaded");
         assert_eq!(p.http_code, Some(502));
         assert!(
-            p.status.as_deref().unwrap().contains("未加载"),
-            "须点出未加载：{:?}",
+            p.status.as_deref().unwrap().contains("not loaded"),
+            "must point out not loaded: {:?}",
             p.status
         );
     }
 
-    /// check_generate 503——MLX 显式「model loading」，available=false。
+    /// check_generate 503 — MLX explicitly says "model loading", available=false.
     #[tokio::test]
     async fn check_generate_503_marks_model_loading() {
         let url = spawn_status_server(
@@ -2532,24 +2627,24 @@ mod mlx_integration {
         assert_eq!(p.http_code, Some(503));
     }
 
-    /// check_generate 200——真推理通过：available=true，model_loaded=true。
+    /// check_generate 200 — real inference passed: available=true, model_loaded=true.
     #[tokio::test]
     async fn check_generate_200_marks_available() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
         let url = spawn_status_server(200, body).await;
         let client = mock_client(&url);
         let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
-        assert!(p.available, "200 应 available");
-        assert!(p.model_loaded, "200 应 model_loaded");
+        assert!(p.available, "200 should be available");
+        assert!(p.model_loaded, "200 should be model_loaded");
         assert_eq!(p.http_code, Some(200));
         assert!(
-            p.status.as_deref().unwrap().contains("通过"),
-            "须标通过：{:?}",
+            p.status.as_deref().unwrap().contains("passed"),
+            "must mark passed: {:?}",
             p.status
         );
     }
 
-    /// check_generate 401——鉴权失败路径。
+    /// check_generate 401 — auth-failure path.
     #[tokio::test]
     async fn check_generate_401_marks_auth_failure() {
         let url =
@@ -2559,16 +2654,18 @@ mod mlx_integration {
         assert!(!p.available);
         assert_eq!(p.http_code, Some(401));
         assert!(
-            p.status.as_deref().unwrap().contains("鉴权"),
-            "须点鉴权：{:?}",
+            p.status.as_deref().unwrap().contains("auth"),
+            "must point out auth failure: {:?}",
             p.status
         );
     }
 
-    // ── TC-4：gateway 假绿回归（真推理探针识破 /v1/models 谎报）──
+    // ── TC-4: gateway false-green regression (real inference probe sees through the
+    // /v1/models lie) ──
 
-    /// 路径感知 mock：/v1/models → 200 + 模型列表（假绿），/v1/chat/completions → 502。
-    /// 模拟 gateway 列了云端/本地模型名但 MLX 未加载的「假绿」终局。
+    /// Path-aware mock: /v1/models → 200 + model list (false green), /v1/chat/completions → 502.
+    /// Simulates the "false green" endgame where the gateway lists cloud/local model names but MLX
+    /// has not loaded them.
     async fn spawn_false_green_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2583,14 +2680,14 @@ mod mlx_integration {
                     .await
                     .unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
-                // 解析请求行首行：METHOD PATH HTTP/1.1
+                // Parse the request line's first line: METHOD PATH HTTP/1.1
                 let path = req
                     .lines()
                     .next()
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("");
                 let (status, reason, body) = if path.contains("/v1/models") {
-                    // 假绿：200 + 模型列表，看似一切正常
+                    // False green: 200 + model list, everything looks fine
                     (
                         200u16,
                         "OK",
@@ -2598,7 +2695,7 @@ mod mlx_integration {
                             .to_string(),
                     )
                 } else {
-                    // /v1/chat/completions：MLX 未加载 → 502
+                    // /v1/chat/completions: MLX not loaded → 502
                     (
                         502,
                         "Bad Gateway",
@@ -2615,30 +2712,36 @@ mod mlx_integration {
         format!("http://{addr}")
     }
 
-    /// TC-4：gateway /v1/models 假绿——列了模型名但 generate 实返 502。
-    /// check_generate 须以真推理探针识破，不据 /v1/models 判可用。
+    /// TC-4: gateway /v1/models false green — model names listed but generate actually 502s.
+    /// check_generate must see through it with the real inference probe, not judge availability by
+    /// /v1/models.
     #[tokio::test]
     async fn check_generate_sees_through_gateway_false_green() {
         let url = spawn_false_green_server().await;
         let client = mock_client(&url);
-        // /v1/models 假绿 200，但 check_generate 走真 chat 探针 → 502 → model_loaded=false
+        // /v1/models false-green 200, but check_generate goes through the real chat probe →
+        // 502 → model_loaded=false
         let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
         assert!(
             !p.available,
-            "gateway 假绿：/v1/models 200 但 generate 502，不应 available"
+            "gateway false green: /v1/models 200 but generate 502, must not be available"
         );
-        assert!(!p.model_loaded, "真推理探针须识破假绿，model_loaded=false");
+        assert!(
+            !p.model_loaded,
+            "the real inference probe must see through the false green, model_loaded=false"
+        );
         assert_eq!(p.http_code, Some(502));
         assert!(
-            p.status.as_deref().unwrap().contains("未加载"),
-            "须点出模型未加载（破假绿）：{:?}",
+            p.status.as_deref().unwrap().contains("not loaded"),
+            "must point out model not loaded (breaking the false green): {:?}",
             p.status
         );
     }
 
-    // ── M-5：502/503 指数退避重试回归 ──
+    // ── M-5: 502/503 exponential backoff retry regression ──
 
-    /// is_transient_status 仅 502/503 判瞬时，其余（含 200/401/403/404/500）判永久。
+    /// is_transient_status classifies only 502/503 as transient; the rest (including
+    /// 200/401/403/404/500) are permanent.
     #[test]
     fn is_transient_status_classifies_502_503_only() {
         assert!(is_transient_status(502));
@@ -2650,7 +2753,8 @@ mod mlx_integration {
         assert!(!is_transient_status(500));
     }
 
-    /// backoff_delay 指数增长且封顶 8s：attempt 0/1/2/3 → 500ms/1s/2s/4s，10 → 8s。
+    /// backoff_delay grows exponentially and caps at 8s: attempt 0/1/2/3 → 500ms/1s/2s/4s,
+    /// 10 → 8s.
     #[test]
     fn backoff_delay_exponential_capped() {
         assert_eq!(backoff_delay(0), std::time::Duration::from_millis(500));
@@ -2660,14 +2764,15 @@ mod mlx_integration {
         assert_eq!(
             backoff_delay(10),
             std::time::Duration::from_millis(8000),
-            "封顶 8s"
+            "capped at 8s"
         );
     }
 
-    /// FUSION_MLX_RETRY_MAX 覆盖。env 测试有进程全局竞态，故标 #[ignore]，
-    /// 手动验证：`cargo test -p fd-ai-adapter retry_max_attempts_env_override -- --ignored --test-threads=1`。
+    /// FUSION_MLX_RETRY_MAX override. env tests have a process-global race, hence #[ignore];
+    /// manual verification:
+    /// `cargo test -p fd-ai-adapter retry_max_attempts_env_override -- --ignored --test-threads=1`.
     #[test]
-    #[ignore = "env 全局竞态，手动 --test-threads=1 运行"]
+    #[ignore = "env is process-global; run manually with --test-threads=1"]
     fn retry_max_attempts_env_override() {
         std::env::set_var("FUSION_MLX_RETRY_MAX", "2");
         assert_eq!(retry_max_attempts(), 2);
@@ -2677,52 +2782,54 @@ mod mlx_integration {
         assert_eq!(
             retry_max_attempts(),
             RETRY_DEFAULT_MAX_ATTEMPTS,
-            "0 视为缺省"
+            "0 counts as default"
         );
         std::env::set_var("FUSION_MLX_RETRY_MAX", "notanumber");
         assert_eq!(
             retry_max_attempts(),
             RETRY_DEFAULT_MAX_ATTEMPTS,
-            "坏值视为缺省"
+            "a bad value counts as default"
         );
         std::env::remove_var("FUSION_MLX_RETRY_MAX");
     }
 
-    /// issue #30：bearer_token 别名链（FUSION_CLIENT_KEY 规范名优先 →
-    /// FUSION_MLX_API_KEY legacy 兜底 → 皆未设 None）。env 全局竞态，标 #[ignore]，
-    /// 手动验证：`cargo test -p fd-ai-adapter bearer_token_alias_chain -- --ignored --test-threads=1`。
+    /// issue #30: bearer_token alias chain (FUSION_CLIENT_KEY canonical first →
+    /// FUSION_MLX_API_KEY legacy fallback → both unset = None). env is process-global, hence
+    /// #[ignore]; manual verification:
+    /// `cargo test -p fd-ai-adapter bearer_token_alias_chain -- --ignored --test-threads=1`.
     #[test]
-    #[ignore = "env 全局竞态，手动 --test-threads=1 运行"]
+    #[ignore = "env is process-global; run manually with --test-threads=1"]
     fn bearer_token_alias_chain() {
         let c = FusionMlxClient::default();
         std::env::remove_var("FUSION_CLIENT_KEY");
         std::env::remove_var("FUSION_MLX_API_KEY");
-        assert_eq!(c.bearer_token(), None, "两者皆未设 → None");
+        assert_eq!(c.bearer_token(), None, "both unset → None");
         std::env::set_var("FUSION_MLX_API_KEY", "legacy-key");
         assert_eq!(
             c.bearer_token().as_deref(),
             Some("Bearer legacy-key"),
-            "legacy 兜底生效"
+            "legacy fallback takes effect"
         );
         std::env::set_var("FUSION_CLIENT_KEY", "canon-key");
         assert_eq!(
             c.bearer_token().as_deref(),
             Some("Bearer canon-key"),
-            "规范名优先于 legacy"
+            "canonical name wins over legacy"
         );
         std::env::set_var("FUSION_CLIENT_KEY", "   ");
         assert_eq!(
             c.bearer_token().as_deref(),
             Some("Bearer legacy-key"),
-            "规范名空白串视为未设，回退 legacy"
+            "a blank canonical name counts as unset, falling back to legacy"
         );
         std::env::remove_var("FUSION_CLIENT_KEY");
         std::env::remove_var("FUSION_MLX_API_KEY");
     }
 
-    /// blocking_post：先 503 两次再 200 → 重试成功，调用 3 次。
-    /// 非 #[tokio::test]：chat_sync 内部 BLOCKING_RT.block_on 嵌套 tokio runtime 会 panic，
-    /// 故用独立 runtime 起序列 mock server，再同步调 chat_sync。
+    /// blocking_post: two 503s then 200 → retry succeeds, 3 calls.
+    /// Not #[tokio::test]: chat_sync's internal BLOCKING_RT.block_on inside a tokio runtime would
+    /// panic, so a standalone runtime starts the sequence mock server, then chat_sync is called
+    /// synchronously.
     #[test]
     fn blocking_post_retries_on_503_then_succeeds() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
@@ -2730,15 +2837,15 @@ mod mlx_integration {
         let (url, count) = rt.block_on(spawn_sequence_server(vec![503, 503], body));
         let client = mock_client(&url);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_ok(), "503×2 后应重试成功：{:?}", out);
+        assert!(out.is_ok(), "after 503x2 retry should succeed: {:?}", out);
         assert_eq!(
             count.load(std::sync::atomic::Ordering::SeqCst),
             3,
-            "应调用 3 次（2 次 503 + 1 次 200）"
+            "should be called 3 times (2x 503 + 1x 200)"
         );
     }
 
-    /// blocking_post：401 永久错误不重试，仅调用 1 次。
+    /// blocking_post: 401 permanent error, no retry, exactly 1 call.
     #[test]
     fn blocking_post_no_retry_on_401() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2748,19 +2855,20 @@ mod mlx_integration {
         ));
         let client = mock_client(&url);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_err(), "401 应直接失败不重试");
+        assert!(out.is_err(), "401 should fail directly with no retry");
         assert_eq!(
             count.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "401 永久错误应仅调用 1 次"
+            "a 401 permanent error should be called exactly once"
         );
     }
 
-    /// blocking_post：恒 503 重试耗尽 → bail，调用 = max 次。
-    /// 用序列 server 恒 503（statuses 覆盖所有调用），断言耗尽失败。
+    /// blocking_post: constant 503 exhausts retries → bail, calls = max.
+    /// Uses a sequence server always returning 503 (statuses cover all calls), asserting the
+    /// exhausted failure.
     #[test]
     fn blocking_post_retries_exhaust_then_bail() {
-        // statuses 给 8 个 503，足够覆盖默认 max=4 次重试。
+        // statuses provides 8x 503, enough to cover the default max=4 retries.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (url, count) = rt.block_on(spawn_sequence_server(
             vec![503, 503, 503, 503, 503, 503, 503, 503],
@@ -2768,40 +2876,42 @@ mod mlx_integration {
         ));
         let client = mock_client(&url);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_err(), "恒 503 应重试耗尽后失败");
+        assert!(out.is_err(), "constant 503 should fail after retries are exhausted");
         let calls = count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             calls, RETRY_DEFAULT_MAX_ATTEMPTS,
-            "应调用满 max={RETRY_DEFAULT_MAX_ATTEMPTS} 次"
+            "should be called the full max={RETRY_DEFAULT_MAX_ATTEMPTS} times"
         );
         let err = out.unwrap_err().to_string();
-        assert!(err.contains("503"), "错误须含 503：{err}");
+        assert!(err.contains("503"), "error must contain 503: {err}");
     }
 
-    /// A-1：多节点 failover。节点 A 恒 503，节点 B 恒 200。
-    /// 首请求落 A（rr idx 0）→ 503 → 重试切 B（rr idx 1）→ 200 成功。
-    /// 断言：最终成功，A 被调用 1 次，B 被调用 1 次。
+    /// A-1: multi-node failover. Node A always 503, node B always 200.
+    /// The first request lands on A (rr idx 0) → 503 → retry switches to B (rr idx 1) → 200
+    /// success.
+    /// Assertions: ultimately successful, A called once, B called once.
     #[test]
     fn blocking_post_failover_to_next_endpoint() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        // A：恒 503（给足 8 次覆盖，但 failover 后只调 1 次即切走）。
+        // A: always 503 (8 entries give ample coverage, but after failover only 1 call is made
+        // before switching away).
         let (url_a, count_a) = rt.block_on(spawn_sequence_server(
             vec![503, 503, 503, 503, 503, 503, 503, 503],
             body.clone(),
         ));
-        // B：恒 200。
+        // B: always 200.
         let (url_b, count_b) = rt.block_on(spawn_sequence_server(vec![], body.clone()));
         let client = mock_client_endpoints(vec![url_a, url_b]);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_ok(), "A 503 应 failover 到 B 成功：{:?}", out);
+        assert!(out.is_ok(), "A 503 should fail over to B and succeed: {:?}", out);
         let calls_a = count_a.load(std::sync::atomic::Ordering::SeqCst);
         let calls_b = count_b.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(calls_a, 1, "A 应仅被调用 1 次（首请求落 A 后即切走）");
-        assert_eq!(calls_b, 1, "B 应被调用 1 次（failover 落 B 成功）");
+        assert_eq!(calls_a, 1, "A should be called exactly once (first request lands on A, then switches away)");
+        assert_eq!(calls_b, 1, "B should be called once (failover lands on B successfully)");
     }
 
-    /// A-1：全节点 503 → 重试耗尽失败，两节点都被轮询到。
+    /// A-1: all nodes 503 → retries exhausted, both nodes polled.
     #[test]
     fn blocking_post_failover_all_endpoints_down() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2815,33 +2925,33 @@ mod mlx_integration {
         ));
         let client = mock_client_endpoints(vec![url_a, url_b]);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_err(), "全节点 503 应重试耗尽失败");
+        assert!(out.is_err(), "all nodes 503 should exhaust retries and fail");
         let total = count_a.load(std::sync::atomic::Ordering::SeqCst)
             + count_b.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             total, RETRY_DEFAULT_MAX_ATTEMPTS,
-            "两节点合计应调用满 max={RETRY_DEFAULT_MAX_ATTEMPTS} 次"
+            "the two nodes combined should be called the full max={RETRY_DEFAULT_MAX_ATTEMPTS} times"
         );
     }
 
-    /// check_generate：先 503 两次再 200 → 探针重试后 model_loaded=true。
+    /// check_generate: two 503s then 200 → after probe retries, model_loaded=true.
     #[tokio::test]
     async fn check_generate_retries_on_503_then_loaded() {
         let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string();
         let (url, count) = spawn_sequence_server(vec![503, 503], body).await;
         let client = mock_client(&url);
         let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
-        assert!(p.model_loaded, "503×2 后应重试成功标 model_loaded");
+        assert!(p.model_loaded, "after 503x2 the retry should succeed and mark model_loaded");
         assert!(p.available);
         assert_eq!(p.http_code, Some(200));
         assert_eq!(
             count.load(std::sync::atomic::Ordering::SeqCst),
             3,
-            "探针应调用 3 次"
+            "the probe should be called 3 times"
         );
     }
 
-    /// chat_stream_messages：建连 502 后 200 SSE → 流重试后产出 delta。
+    /// chat_stream_messages: connect 502 then 200 SSE → after stream retry, deltas are produced.
     #[tokio::test]
     async fn chat_stream_messages_retries_on_502_then_streams() {
         let d1 = String::from(r#"{"choices":[{"delta":{"content":"Hi"}}]}"#);
@@ -2872,17 +2982,19 @@ mod mlx_integration {
         };
         let (tokens, saw_done) = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
             .await
-            .expect("502 重试后应在 5 秒内建连并完成流");
-        assert_eq!(tokens, "Hi", "重试后应正常产出 delta");
-        assert!(saw_done, "流应正常以 [DONE] 结束");
+            .expect("after the 502 retry, connect and finish the stream within 5 seconds");
+        assert_eq!(tokens, "Hi", "deltas should be produced normally after retry");
+        assert!(saw_done, "the stream should end normally with [DONE]");
     }
 
-    /// FAULT-1：建连 200 后无任何 data 帧卡死（stall）→ chat_stream_messages 的
-    /// tokio::time::timeout(idle, stream.next()) 应在 IDLE 内以 Err 终结，非无限挂起。
-    /// env 全局竞态（FUSION_MLX_STREAM_IDLE_SECS 进程级 set_var），标 #[ignore] +
-    /// 手动 --test-threads=1 运行，对齐同 crate retry_max_attempts_env_override 约定。
+    /// FAULT-1: after a 200 connect, no data frames ever arrive (stall) → chat_stream_messages'
+    /// tokio::time::timeout(idle, stream.next()) should terminate with Err within IDLE, not hang
+    /// forever.
+    /// env is process-global (FUSION_MLX_STREAM_IDLE_SECS set_var), hence #[ignore] +
+    /// manual --test-threads=1 run, matching the retry_max_attempts_env_override convention in
+    /// this crate.
     #[tokio::test]
-    #[ignore = "env 全局竞态，手动 --test-threads=1 运行：cargo test -p fd-ai-adapter chat_stream_messages_stall_timeout -- --ignored --test-threads=1"]
+    #[ignore = "env is process-global; run manually: cargo test -p fd-ai-adapter chat_stream_messages_stall_timeout -- --ignored --test-threads=1"]
     async fn chat_stream_messages_stall_timeout() {
         std::env::set_var("FUSION_MLX_STREAM_IDLE_SECS", "1");
         let url = spawn_sse_stall_server().await;
@@ -2896,7 +3008,7 @@ mod mlx_integration {
                 chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
             use futures::StreamExt;
             let mut errored = false;
-            // stall server 不发任何 delta，首个 stream.next() 即应超时返 Err。
+            // The stall server sends no deltas; the first stream.next() should time out to Err.
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(_) => {}
@@ -2908,15 +3020,16 @@ mod mlx_integration {
             }
             errored
         };
-        // 外层 timeout 兜底：FAULT-1 应在 IDLE(1s) 内终结，非依赖此 10s 兜底。
+        // Outer timeout backstop: FAULT-1 should terminate within IDLE(1s), not rely on this 10s
+        // backstop.
         let errored = tokio::time::timeout(std::time::Duration::from_secs(10), drain)
             .await
-            .expect("stall 流应在 10 秒内以 Err 终结，非无限挂起");
-        assert!(errored, "stall 流应以 Err 终结（FAULT-1 fail visibly）");
+            .expect("the stall stream should end with Err within 10 seconds, not hang forever");
+        assert!(errored, "the stall stream should end with Err (FAULT-1 fail visibly)");
         std::env::remove_var("FUSION_MLX_STREAM_IDLE_SECS");
     }
 
-    /// 捕获完整请求体（大缓冲，用于多模态 base64 负载）。
+    /// Captures the full request body (large buffer, for multimodal base64 payloads).
     async fn spawn_body_capture_server(body: String) -> (String, Arc<Mutex<Option<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2946,7 +3059,7 @@ mod mlx_integration {
         (format!("http://{addr}"), captured)
     }
 
-    /// P1-1：验证 chat_with_image 真实发送 data:image/png;base64 多模态负载。
+    /// P1-1: verifies chat_with_image really sends a data:image/png;base64 multimodal payload.
     #[tokio::test]
     async fn chat_with_image_sends_data_url() {
         let ui_json = "{\"page\":{\"width\":800,\"height\":600,\"nodes\":[{\"id\":\"b\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50}]}}";
@@ -2958,16 +3071,17 @@ mod mlx_integration {
         let _ = chat_with_image(&client, "m", "sys", "usr", &b64, 128)
             .await
             .unwrap();
-        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        let raw = captured.lock().unwrap().clone().expect("request not captured");
         assert!(
             raw.contains("data:image/png;base64,"),
-            "多模态负载缺少 data:image/png;base64 前缀：{}",
+            "multimodal payload missing the data:image/png;base64 prefix: {}",
             &raw[..raw.len().min(200)]
         );
-        assert!(raw.contains("image_url"), "缺少 image_url 字段");
+        assert!(raw.contains("image_url"), "missing image_url field");
     }
 
-    /// P1-1：验证 image_to_ui_async 真实路径加载草图并发多模态请求（非仅文字描述）。
+    /// P1-1: verifies the real image_to_ui_async path loads the sketch and sends a multimodal
+    /// request (not just a text description).
     #[tokio::test]
     async fn image_to_ui_async_sends_real_image() {
         let ui_json = "{\"page\":{\"width\":800,\"height\":600,\"nodes\":[{\"id\":\"c\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50}]}}";
@@ -2977,20 +3091,21 @@ mod mlx_integration {
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
         let doc = skills
-            .image_to_ui_async(&sketch, "测试", "Home")
+            .image_to_ui_async(&sketch, "test", "Home")
             .await
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
         assert_eq!(doc.pages[0].nodes[0].id, "c");
-        let raw = captured.lock().unwrap().clone().expect("未捕获到请求");
+        let raw = captured.lock().unwrap().clone().expect("request not captured");
         assert!(
             raw.contains("data:image/png;base64,"),
-            "image_to_ui_async 未发送真实图片负载（仍是文字描述）：{}",
+            "image_to_ui_async did not send a real image payload (still a text description): {}",
             &raw[..raw.len().min(200)]
         );
     }
 
-    /// 生产 E2E：模型返回尾部多余闭括号 → balance 修复后产出真实文档（不兜底）。
+    /// Production E2E: the model returns a trailing extra closing brace → after the balance fix a
+    /// real document is produced (no placeholder fallback).
     #[tokio::test]
     async fn image_to_ui_e2e_trailing_brace_repaired() {
         let ui_json = "{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[{\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":100,\"h\":50}]}}}";
@@ -3000,19 +3115,23 @@ mod mlx_integration {
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
         let doc = skills
-            .image_to_ui_async(&sketch, "测试", "Home")
+            .image_to_ui_async(&sketch, "test", "Home")
             .await
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
         assert_eq!(doc.pages[0].nodes[0].id, "n0");
-        // 未触发占位兜底
+        // Placeholder fallback not triggered. The compared string stays in Chinese — it is the
+        // user-facing placeholder text produced by fd-skills' repair_model_json fallback
+        // (defined outside this file), so the assertion must match it byte-for-byte.
+        // i18n: user-facing
         assert!(!doc.pages[0]
             .nodes
             .iter()
             .any(|n| n.text.as_deref() == Some("AI 输出不可用，已生成占位布局")));
     }
 
-    /// 生产 E2E：模型返回彻底损坏 JSON → R-2 拒绝伪成功，向上传播错误（不再合成占位兜底）。
+    /// Production E2E: the model returns thoroughly corrupted JSON → R-2 rejects the pseudo-success
+    /// and propagates the error (no longer synthesizes a placeholder fallback).
     #[tokio::test]
     async fn image_to_ui_e2e_garbled_propagates_error() {
         let body = String::from(r#"{"choices":[{"message":{"content":"totally not json {{{"}}]}"#);
@@ -3020,19 +3139,19 @@ mod mlx_integration {
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
-        let result = skills.image_to_ui_async(&sketch, "测试", "Home").await;
+        let result = skills.image_to_ui_async(&sketch, "test", "Home").await;
         assert!(
             result.is_err(),
-            "彻底损坏 JSON 应向上传播错误，不合成伪成功占位"
+            "thoroughly corrupted JSON should propagate the error, not synthesize a pseudo-success placeholder"
         );
         let msg = format!("{}", result.err().unwrap());
         assert!(
             msg.contains("JSON") || msg.contains("json") || msg.contains("nodes"),
-            "错误信息应指明 JSON/nodes 解析失败: {msg}"
+            "the error message should indicate the JSON/nodes parse failure: {msg}"
         );
     }
 
-    /// 生产 E2E：HTTP 5xx → 向上传播错误（不静默吞）。
+    /// Production E2E: HTTP 5xx → the error propagates (no silent swallowing).
     #[tokio::test]
     async fn image_to_ui_e2e_http_error_propagates() {
         let body = String::from(r#"{"error":"internal"}"#);
@@ -3040,8 +3159,8 @@ mod mlx_integration {
         let client = mock_client(&url);
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
-        let result = skills.image_to_ui_async(&sketch, "测试", "Home").await;
-        assert!(result.is_err(), "HTTP 5xx 应向上传播而非静默成功");
+        let result = skills.image_to_ui_async(&sketch, "test", "Home").await;
+        assert!(result.is_err(), "HTTP 5xx should propagate, not silently succeed");
     }
     #[tokio::test]
     async fn chat_stream_messages_emits_deltas_and_finishes() {
@@ -3072,15 +3191,16 @@ mod mlx_integration {
         assert!(saw_done, "stream should emit finished marker");
     }
 
-    /// 回归 #18：上游提前 EOF（连接关在 [DONE] 之前）。
-    /// 旧 None 分支返回不推进状态的 Some(finished) → 死循环；
-    /// 半成品 return None 直接丢 buffer → 丢尾部 delta。
-    /// 修复后：已发出的 delta 不丢，流正常终止，不死循环。
+    /// Regression #18: upstream early EOF (connection closed before [DONE]).
+    /// The old None branch returned Some(finished) without advancing state → infinite loop;
+    /// a half-finished return None dropped the buffer outright → tail deltas lost.
+    /// After the fix: already-emitted deltas are kept, the stream terminates normally, no
+    /// infinite loop.
     #[tokio::test]
     async fn chat_stream_messages_early_eof_drains_and_terminates() {
         let d1 = String::from(r#"{"choices":[{"delta":{"content":"Hel"}}]}"#);
         let d2 = String::from(r#"{"choices":[{"delta":{"content":"lo"}}]}"#);
-        // 只发 d1+d2，不补 [DONE]，直接关连接 = 提前 EOF
+        // Send only d1+d2 without [DONE], then close the connection = early EOF
         let url = spawn_sse_server_early_eof(vec![d1, d2]).await;
         let client = mock_client(&url);
         let messages = vec![MlxChatMessage {
@@ -3090,7 +3210,8 @@ mod mlx_integration {
         let mut stream = chat_stream_messages(client, String::from("qwen3.5"), messages, 128).await;
         use futures::StreamExt;
         let mut tokens = String::new();
-        // 带超时兜底：若死循环，3 秒后超时失败（而非挂死 CI）
+        // Timeout backstop: on an infinite loop this fails after 3 seconds (rather than hanging
+        // CI)
         let drain = async {
             while let Some(item) = stream.next().await {
                 match item {
@@ -3101,18 +3222,21 @@ mod mlx_integration {
         };
         tokio::time::timeout(std::time::Duration::from_secs(3), drain)
             .await
-            .expect("流应在 3 秒内终止，不死循环（#18 回归）");
-        // 两帧都已入 buffer 并被 EOF 分支排空 → "Hello" 不丢
-        assert_eq!(tokens, "Hello", "提前 EOF 不应丢失已发出的尾部 delta");
+            .expect("the stream should terminate within 3 seconds, no infinite loop (#18 regression)");
+        // Both frames were buffered and drained by the EOF branch → "Hello" is not lost
+        assert_eq!(tokens, "Hello", "early EOF must not lose already-emitted tail deltas");
     }
 
-    // L6 回归：CJK 多字节字符被网络分块切断在字符中间。
-    // 旧 String::from_utf8_lossy 每 chunk 解码 → 残缺尾字节换 U+FFFD → 中文乱码。
-    // 修复后字节缓冲等完整行再解码 → 跨 chunk 残缺字符补全 → 完整无 U+FFFD。
+    // L6 regression: a CJK multi-byte character cut mid-character by network chunking.
+    // The old String::from_utf8_lossy decoded per chunk → broken trailing bytes became U+FFFD →
+    // garbled Chinese.
+    // After the fix the byte buffer waits for a complete line before decoding → cross-chunk
+    // partial characters are completed → intact with no U+FFFD.
     #[tokio::test]
     async fn chat_stream_messages_cjk_split_across_chunks_no_replacement() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // 登录 = e7 99 bb e5 bd 95；构造 SSE 帧切在 0xE7 后 2 字节（半个汉字）。
+        // 登录 = e7 99 bb e5 bd 95; build an SSE frame cut 2 bytes after 0xE7 (half a CJK char).
+        // i18n: user-facing (the fixture content is deliberately CJK — the test's purpose)
         let cjk = "登录";
         let payload = serde_json::json!({"choices":[{"delta":{"content":cjk}}]}).to_string();
         let frame = format!("data: {}\r\n\r\n", payload);
@@ -3120,7 +3244,7 @@ mod mlx_integration {
         let split_at = frame_bytes
             .iter()
             .position(|&b| b == 0xE7)
-            .expect("帧内应有 CJK 首字节 0xE7")
+            .expect("the frame should contain the CJK first byte 0xE7")
             + 2;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3134,10 +3258,10 @@ mod mlx_integration {
             resp.push_str("Content-Type: text/event-stream\r\n");
             resp.push_str("Connection: close\r\n\r\n");
             let _ = sock.write_all(resp.as_bytes()).await;
-            // 第一块：帧的前半（切在汉字中间）
+            // First chunk: the frame's first half (cut mid-CJK-character)
             let _ = sock.write_all(&frame_bytes[..split_at]).await;
             let _ = sock.flush().await;
-            // 第二块：帧后半 + [DONE]
+            // Second chunk: the frame's second half + [DONE]
             let _ = sock.write_all(&frame_bytes[split_at..]).await;
             let _ = sock.write_all(done.as_bytes()).await;
             let _ = sock.flush().await;
@@ -3160,18 +3284,21 @@ mod mlx_integration {
         };
         tokio::time::timeout(std::time::Duration::from_secs(3), drain)
             .await
-            .expect("流应在 3 秒内终止");
+            .expect("the stream should terminate within 3 seconds");
         assert_eq!(
             tokens, "登录",
-            "跨 chunk 切断的 CJK 字符应完整还原，无 U+FFFD 替换"
+            "the CJK character cut across chunks should be restored intact, no U+FFFD replacement"
         );
-        assert!(!tokens.contains('\u{fffd}'), "不得出现 U+FFFD 替换字符");
+        assert!(!tokens.contains('\u{fffd}'), "no U+FFFD replacement character may appear");
     }
 
-    /// 捕获请求体到 Mutex 的 mock server：返回固定响应，同时把收到的 raw 请求行+body 存下来。
-    /// H-A9 回归：验证 send 把 history 折叠进 messages[]，而非静默丢弃。
-    /// 在 BLOCKING_RT（专用持久 multi-thread runtime）上 spawn，避免 #[test] 同步线程
-    /// 与 tokio::test runtime 嵌套 block_on panic（参见 lib.rs:310 注释）。
+    /// Mock server capturing the request body into a Mutex: returns a fixed response while
+    /// storing the received raw request line + body.
+    /// H-A9 regression: verifies send folds history into messages[] rather than silently dropping
+    /// it.
+    /// Spawned on BLOCKING_RT (the dedicated persistent multi-thread runtime) to avoid nested
+    /// block_on panics between #[test] sync threads and the tokio::test runtime (see the comment
+    /// at lib.rs:310).
     async fn spawn_capturing_mock_server(body: String) -> (String, Arc<Mutex<Vec<u8>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3200,15 +3327,17 @@ mod mlx_integration {
         (format!("http://{addr}"), captured)
     }
 
-    /// 在 BLOCKING_RT 上启动 capturing mock 并返回 (url, captured)。
-    /// 普通同步测试线程调此 helper：BLOCKING_RT.block_on spawn server（首帧结束），
-    /// 随后 send → chat_sync_messages → BLOCKING_RT.block_on（顺序，不嵌套）。
+    /// Starts the capturing mock on BLOCKING_RT and returns (url, captured).
+    /// Ordinary sync test threads call this helper: BLOCKING_RT.block_on spawns the server (until
+    /// the first frame completes), then send → chat_sync_messages → BLOCKING_RT.block_on
+    /// (sequential, not nested).
     fn capturing_server(body: &str) -> (String, Arc<Mutex<Vec<u8>>>) {
         BLOCKING_RT.block_on(spawn_capturing_mock_server(body.to_string()))
     }
 
-    /// H-A9：send 必须把 history 折叠进 messages[]（system + 历史轮 + 当前 user），
-    /// 而非旧实现的 system + user 两条。用 capturing mock 验证 wire payload。
+    /// H-A9: send must fold history into messages[] (system + history turns + current user),
+    /// not the old implementation's system + user pair. The capturing mock verifies the wire
+    /// payload.
     #[test]
     fn send_folds_history_into_messages_wire() {
         let body = String::from(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
@@ -3216,13 +3345,13 @@ mod mlx_integration {
         let client = mock_client(&url);
         let provider = FusionMlxChatProvider::new(client, "default-model");
         let request = ChatRequest {
-            system_prompt: "你是 UI 生成器".into(),
-            user_message: "生成登录页".into(),
+            system_prompt: "You are a UI generator".into(),
+            user_message: "generate a login page".into(),
             history: vec![
-                (ChatHistoryRole::User, "什么是登录页".into()),
+                (ChatHistoryRole::User, "what is a login page".into()),
                 (
                     ChatHistoryRole::Assistant,
-                    "登录页是用户身份认证入口".into(),
+                    "a login page is the entry point for user identity authentication".into(),
                 ),
             ],
             max_output_tokens: 256,
@@ -3232,28 +3361,32 @@ mod mlx_integration {
             model: Some("qwen3.5".into()),
         };
         let deltas: Vec<ChatDelta> = provider.send(request).collect();
-        // 应收到 TextDelta + Done。
+        // Should receive TextDelta + Done.
         let has_text = deltas.iter().any(|d| matches!(d, ChatDelta::TextDelta(_)));
-        assert!(has_text, "send 应返回 TextDelta");
-        // 验证 wire payload 含 4 条 messages（system + 2 历史 + 1 当前 user）。
+        assert!(has_text, "send should return a TextDelta");
+        // Verify the wire payload contains 4 messages (system + 2 history + 1 current user).
         let raw = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
         let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
         let payload: serde_json::Value =
             serde_json::from_slice(&raw.as_bytes()[body_start..]).unwrap();
         let msgs = payload["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 4, "history 应折叠为 4 条 messages");
+        assert_eq!(msgs.len(), 4, "history should fold into 4 messages");
         assert_eq!(msgs[0]["role"], "system");
-        assert_eq!(msgs[0]["content"], "你是 UI 生成器");
+        assert_eq!(msgs[0]["content"], "You are a UI generator");
         assert_eq!(msgs[1]["role"], "user");
-        assert_eq!(msgs[1]["content"], "什么是登录页");
+        assert_eq!(msgs[1]["content"], "what is a login page");
         assert_eq!(msgs[2]["role"], "assistant");
-        assert_eq!(msgs[2]["content"], "登录页是用户身份认证入口");
+        assert_eq!(
+            msgs[2]["content"],
+            "a login page is the entry point for user identity authentication"
+        );
         assert_eq!(msgs[3]["role"], "user");
-        assert_eq!(msgs[3]["content"], "生成登录页");
+        assert_eq!(msgs[3]["content"], "generate a login page");
         assert_eq!(payload["model"], "qwen3.5");
     }
 
-    /// H-A9：空 system_prompt 应被跳过（不产生空 system message），避免 MLX 报错。
+    /// H-A9: an empty system_prompt should be skipped (no empty system message), avoiding MLX
+    /// errors.
     #[test]
     fn send_empty_system_prompt_omits_system_message() {
         let body = String::from(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
@@ -3276,14 +3409,16 @@ mod mlx_integration {
         let payload: serde_json::Value =
             serde_json::from_slice(&raw.as_bytes()[body_start..]).unwrap();
         let msgs = payload["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 1, "空 system_prompt 不应产生 system message");
+        assert_eq!(msgs.len(), 1, "an empty system_prompt must not produce a system message");
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"], "hi");
-        assert_eq!(payload["model"], "default-model", "model=None 回退 default");
+        assert_eq!(payload["model"], "default-model", "model=None falls back to default");
     }
 
-    /// H-A7：多行文本应按行分块产多个 TextDelta，而非塌缩成单段全文。
-    /// 同步 trait 语义下无真流式，但消费方应收到增量序列（逐行 delta + Done）。
+    /// H-A7: multi-line text should chunk per line into multiple TextDeltas, not collapse into a
+    /// single full-text blob.
+    /// Under sync trait semantics there is no true streaming, but the consumer should receive an
+    /// incremental sequence (per-line deltas + Done).
     #[test]
     fn send_chunks_multiline_into_multiple_deltas() {
         let body = String::from(r#"{"choices":[{"message":{"content":"line1\nline2\nline3"}}]}"#);
@@ -3311,18 +3446,18 @@ mod mlx_integration {
         assert_eq!(
             text_deltas.len(),
             3,
-            "三行文本应产 3 个 TextDelta，非单段全文"
+            "three lines of text should produce 3 TextDeltas, not a single full-text blob"
         );
         assert_eq!(text_deltas[0], "line1\n");
         assert_eq!(text_deltas[1], "line2\n");
         assert_eq!(text_deltas[2], "line3");
         assert!(
             deltas.iter().any(|d| matches!(d, ChatDelta::Done { .. })),
-            "末帧应为 Done"
+            "the last frame should be Done"
         );
     }
 
-    /// H-A7：无换行单段文本产 1 TextDelta + Done。
+    /// H-A7: single-line text without newlines produces 1 TextDelta + Done.
     #[test]
     fn send_single_line_one_delta() {
         let body = String::from(r#"{"choices":[{"message":{"content":"oneliner"}}]}"#);
@@ -3351,7 +3486,7 @@ mod mlx_integration {
         assert_eq!(text_deltas[0], "oneliner");
     }
 
-    /// H-A7：空文本不产 TextDelta，仅 Done（无空增量噪声）。
+    /// H-A7: empty text produces no TextDelta, only Done (no empty-increment noise).
     #[test]
     fn send_empty_text_no_text_delta() {
         let body = String::from(r#"{"choices":[{"message":{"content":""}}]}"#);
@@ -3371,11 +3506,11 @@ mod mlx_integration {
         let deltas: Vec<ChatDelta> = provider.send(request).collect();
         assert!(
             !deltas.iter().any(|d| matches!(d, ChatDelta::TextDelta(_))),
-            "空文本不应产 TextDelta"
+            "empty text should not produce a TextDelta"
         );
         assert!(
             deltas.iter().any(|d| matches!(d, ChatDelta::Done { .. })),
-            "空文本仍应有 Done 帧"
+            "empty text should still have a Done frame"
         );
     }
 }
