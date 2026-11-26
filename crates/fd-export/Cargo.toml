@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Fusion-Design 导出 — PNG/SVG/PDF/HTML 批量导出"
+description = "Fusion-Design export — batch PNG/SVG/PDF/HTML export"
 
 [lib]
 name = "fd_export"
@@ -14,7 +14,7 @@ path = "src/lib.rs"
 # Callers: fd-cli (export/export-batch), DesignBridge (Swift Process)
 # Affected API: Exporter (new from_pen_document), CanvasPage conversion
 # Data schemas: PenDocument→CanvasPage bridge, enhanced SVG/HTML with NodeStyle
-# User instruction: "现在开始实施" — Task #16 P3-5 fd-export PNG/SVG/HTML 批量导出
+# User instruction: "start implementation now" — Task #16 P3-5 fd-export PNG/SVG/HTML batch export
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,9 +24,9 @@ tokio = { workspace = true }
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }
 resvg = { version = "0.50", default-features = false, features = ["text"] }
-# printpdf 0.12: lopdf 0.44 修复 RUSTSEC-2026-0187（深层嵌套 PDF 栈溢出）。
-# 关闭默认 html feature（避免拉入 azul-layout/svg2pdf 等重依赖），
-# 我们仅用 ops::Op 内置字体 API，无需 HTML/CSS 排版。
+# printpdf 0.12: lopdf 0.44 fixes RUSTSEC-2026-0187 (deeply nested PDF stack overflow).
+# Default html feature disabled (avoids pulling heavy deps like azul-layout/svg2pdf);
+# we only use the ops::Op builtin font API, no HTML/CSS layout.
 printpdf = { version = "0.12", default-features = false }
 
 [dev-dependencies]

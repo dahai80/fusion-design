@@ -1,37 +1,37 @@
 [workspace]
 resolver = "2"
 members = [
-    # A-5：CSS 安全工具叶子 crate（无 fd-* 依赖），fd-canvas-core re-export。
+    # A-5: CSS safety utilities leaf crate (no fd-* deps), re-exported via fd-canvas-core.
     "crates/fd-css-utils",
     "crates/fd-canvas-core",
     "crates/fd-codegen",
-    # A-2：html_to_pen_document 拆出叶子 crate（仅 fd-canvas-core + scraper 依赖）。
+    # A-2: html_to_pen_document split into a leaf crate (deps: fd-canvas-core + scraper only).
     "crates/fd-html-parser",
-    # ARCH-11：skill 系统（SkillContext trait + 7 skill + SkillRegistry + 纯 helper）
-    # 从 fd-ai-adapter 迁出，trait 化解耦 inference client。adapter 反向 impl SkillContext
-    # for FusionMlxClient。fd-skills 零 HTTP，纯 trait + helper + 解析逻辑。
+    # ARCH-11: skill system (SkillContext trait + 7 skills + SkillRegistry + pure helpers)
+    # migrated out of fd-ai-adapter; the trait decouples it from the inference client. The
+    # adapter back-impls SkillContext for FusionMlxClient. fd-skills has zero HTTP: pure trait + helpers + parsing.
     "crates/fd-skills",
     "crates/fd-ai-adapter",
     "crates/fd-design-system",
     "crates/fd-ecosystem",
     "crates/fd-host-web",
     "crates/fd-host-desk",
-    # Callers: workspace root, cargo build/test. Affected API: new member fd-design-lint. Data schemas: none. User instruction: "现在开始实施" — Task #17
+    # Callers: workspace root, cargo build/test. Affected API: new member fd-design-lint. Data schemas: none. User instruction: "start implementation now" — Task #17
     "crates/fd-export",
     "crates/fd-design-lint",
-    # H-A12/P1-6：fd-asset 已移除（整 crate 死代码，零生产调用，占"九端"宣传位无功能）。
+    # H-A12/P1-6: fd-asset removed (entire crate was dead code, zero production callers, held a "nine endpoints" marketing slot with no function).
     "crates/fd-cli",
-    # issue#31/DS-0：Design web 服务面（生成/迭代/还原/导出 API + WASM 画布托管 + D1 工作台）。
-    # hyper 仅作入站监听（127.0.0.1:11493），出站推理全部经 fd-ai-adapter，离线约束不破。
+    # issue#31/DS-0: Design web service surface (generate/iterate/restore/export API + WASM canvas hosting + D1 workbench).
+    # hyper is inbound-listen only (127.0.0.1:11493); all outbound inference goes through fd-ai-adapter, keeping the offline constraint intact.
     "crates/fd-server",
-    # issue#44：design-intelligence 数据层（内置 CSV 数据集 + 确定性关键词检索），
-    # 零 HTTP 零模型，供 fd-server 生成上下文注入与 fd-cli search 子命令消费。
+    # issue#44: design-intelligence data layer (builtin CSV dataset + deterministic keyword search),
+    # zero HTTP and zero model; consumed by fd-server generation context injection and the fd-cli search subcommand.
     "crates/fd-search",
     # Vendored OpenPencil subsets (standalone manifests, no upstream workspace dep)
     "vendor/openpencil/crates/op-ai",
 ]
-# OpenPencil 子集：仅引入与 fusion-design 直接对接的 crate，
-# 避免拖入 op-host-desktop（独立桌面壳）/ op-orchestrator（协作）等冗余。
+# OpenPencil subset: only crates directly consumed by fusion-design are pulled in,
+# avoiding redundant ones such as op-host-desktop (standalone desktop shell) / op-orchestrator (collaboration).
 exclude = ["vendor/openpencil"]
 
 [workspace.package]
@@ -49,34 +49,34 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-# OPS-13：fd-cli 文件日志。appender 0.2 日轮转 NonBlocking + WorkerGuard；
-# dirs 5 解析平台日志目录（macOS ~/Library/Logs/）。纯本地，不触发 deny-external-http。
+# OPS-13: fd-cli file logging. appender 0.2 daily rotation, NonBlocking + WorkerGuard;
+# dirs 5 resolves the platform log directory (macOS ~/Library/Logs/). Purely local, does not trip deny-external-http.
 tracing-appender = "0.2"
 dirs = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "io-util"] }
-# E-5：default-features=false 砍掉 native-tls/openssl-sys 系统依赖，纯 Rust TLS
-# 后端 rustls-tls。离线约束下避免链接系统 OpenSSL（macOS/Linux 差异 + CI 镜像缺 libssl）。
+# E-5: default-features=false drops the native-tls/openssl-sys system deps in favor of the pure Rust TLS
+# backend rustls-tls. Under the offline constraint, avoid linking system OpenSSL (macOS/Linux divergence + CI images missing libssl).
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 url = "2"
 futures = "0.3"
 base64 = "0.22"
-# issue#31/DS-0：fd-server 入站 HTTP 监听栈。版本与既有 lock 一致（reqwest 传递依赖已解析
-# hyper 1.x），声明为直接依赖不引入新版本行。仅 server/http1 特性，零客户端能力——
-# 出站仍只走 fd-ai-adapter（deny-external-http 对 fd-server 白名单入站栈，禁 reqwest）。
+# issue#31/DS-0: fd-server inbound HTTP listen stack. Version matches the existing lock (reqwest transitive deps already
+# resolve hyper 1.x); declared as a direct dep without introducing a new version line. server/http1 features only, zero client capability —
+# outbound still goes only through fd-ai-adapter (deny-external-http allowlists fd-server's inbound stack and forbids reqwest).
 http = "1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
 http-body-util = "0.1"
-# image 已从 workspace.dependencies 移除（E-35：零 crate 引用 workspace=true，死声明；
-# 且 caret 0.25.x 子版本行为漂移风险因无引用而不存在）。
+# image has been removed from workspace.dependencies (E-35: zero crates reference it with workspace=true, dead declaration;
+# and with no references the caret 0.25.x minor-version drift risk cannot materialize).
 
-# OpenPencil crate（path dep，vendored 子集）
+# OpenPencil crate (path dep, vendored subset)
 op-ai = { path = "vendor/openpencil/crates/op-ai" }
-# 以下 op-* 因依赖私有 jian-ops-schema 无法引入，已自建替身：
-#   op-editor-core → fd-canvas-core（PenDocument/PenNode 数据模型）
-#   op-codegen     → fd-codegen（HTML/React+Tailwind 生成）
-#   op-design-lint → fd-design-lint（自建 13 检测器替身）
-# op-mcp 未自建替代（H-A3/P2-2 已移除不合规的自建 MCP 层，无法被标准 MCP client 接入）。
+# The op-* crates below depend on the private jian-ops-schema and cannot be pulled in; self-built replacements:
+#   op-editor-core → fd-canvas-core (PenDocument/PenNode data model)
+#   op-codegen     → fd-codegen (HTML/React+Tailwind generation)
+#   op-design-lint → fd-design-lint (self-built replacement, 13 detectors)
+# op-mcp has no self-built replacement (H-A3/P2-2 removed the non-compliant self-built MCP layer; it cannot be reached by standard MCP clients).
 
 [profile.release]
 strip = true
