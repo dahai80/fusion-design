@@ -1,8 +1,11 @@
-//! 会话与版本栈（内存态）。
+//! Sessions and version stack (in-memory).
 //!
-//! issue#31 D1 右栏：版本列表（v1/v2…）+ 回退。每次生成/迭代/还原压入一版，
-//! 回退 = 把 current 指针拨回旧版（后续迭代从该版继续，产生 v(n+1)）。
-//! 内存护栏：单会话版本数 ≤ MAX_VERSIONS，总会话数 ≤ MAX_SESSIONS（LRU 淘汰最旧）。
+//! issue#31 D1 right pane: version list (v1/v2…) + rollback. Each
+//! generate/iterate/restore pushes a version; rollback = moving the current
+//! pointer back to an old version (subsequent iterations continue from that
+//! version, producing v(n+1)).
+//! Memory guardrails: versions per session ≤ MAX_VERSIONS, total sessions ≤
+//! MAX_SESSIONS (LRU evicts oldest).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,27 +14,28 @@ use std::sync::Mutex;
 const MAX_VERSIONS: usize = 20;
 const MAX_SESSIONS: usize = 50;
 
-/// 单个版本条目。
+/// A single version entry.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VersionEntry {
     pub version: u32,
-    /// 版本来源标签：initial / 迭代指令 / restore hint。
+    /// Version origin label: initial / iteration instruction / restore hint.
     pub label: String,
     pub created_at: String,
     pub node_count: usize,
-    /// 完整 PenDocument JSON（真相源，前端渲染/导出直接消费）。
+    /// Full PenDocument JSON (source of truth, consumed directly by frontend
+    /// rendering/export).
     pub document: String,
 }
 
-/// 设计会话。
+/// A design session.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
     pub created_at: String,
     pub versions: Vec<VersionEntry>,
-    /// current 指针（1-based 版本号）。
+    /// current pointer (1-based version number).
     pub current: u32,
-    /// 最近访问时间戳（秒），LRU 淘汰依据。
+    /// Last-access timestamp (nanoseconds), basis for LRU eviction.
     pub last_used: u64,
 }
 
@@ -41,7 +45,7 @@ impl Session {
     }
 }
 
-/// 全局会话存储。
+/// Global session store.
 pub struct SessionStore {
     inner: Mutex<HashMap<String, Session>>,
     seq: AtomicU64,
@@ -55,7 +59,8 @@ impl SessionStore {
         }
     }
 
-    /// 生成短会话 id：`s-<unix16hex>-<seq>`。无 uuid 依赖，单调可读。
+    /// Generates a short session id: `s-<unix16hex>-<seq>`. No uuid dependency,
+    /// monotonic and readable.
     fn next_id(&self) -> String {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let ts = std::time::SystemTime::now()
@@ -66,7 +71,8 @@ impl SessionStore {
     }
 
     fn now_iso() -> String {
-        // 简易 RFC3339（本地时区偏移未知场景用 UTC Z 后缀足够展示用）。
+        // Simple RFC3339 (UTC Z suffix is enough for display when the local
+        // timezone offset is unknown).
         let d = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
@@ -82,7 +88,7 @@ impl SessionStore {
         )
     }
 
-    /// 新建会话并压入首版。
+    /// Creates a session and pushes the first version.
     pub fn create(&self, document: String, label: &str) -> String {
         let id = self.next_id();
         let node_count = count_nodes(&document);
@@ -108,12 +114,13 @@ impl SessionStore {
         id
     }
 
-    /// 追加新版本。超 MAX_VERSIONS 淘汰最旧非当前版（保 current 语义稳定）。
+    /// Appends a new version. Beyond MAX_VERSIONS, evicts the oldest
+    /// non-current version (keeps current semantics stable).
     pub fn push_version(&self, id: &str, document: String, label: &str) -> anyhow::Result<u32> {
         let mut guard = self.inner.lock().unwrap();
         let sess = guard
             .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("session {id} 不存在（或已被回收）"))?;
+            .ok_or_else(|| anyhow::anyhow!("session {id} does not exist (or was evicted)"))?;
         sess.last_used = unix_now();
         let next = sess.versions.last().map(|v| v.version).unwrap_or(0) + 1;
         let entry = VersionEntry {
@@ -125,7 +132,7 @@ impl SessionStore {
         };
         sess.versions.push(entry);
         while sess.versions.len() > MAX_VERSIONS {
-            // 保留 current 指向的版本，淘汰最旧的其他版本。
+            // Keep the version current points to; evict the oldest other versions.
             let cur = sess.current;
             if let Some(pos) = sess.versions.iter().position(|v| v.version != cur) {
                 sess.versions.remove(pos);
@@ -144,21 +151,21 @@ impl SessionStore {
         Some(sess.clone())
     }
 
-    /// 回退：current 拨到 version（必须存在）。
+    /// Rollback: move current to version (must exist).
     pub fn rollback(&self, id: &str, version: u32) -> anyhow::Result<()> {
         let mut guard = self.inner.lock().unwrap();
         let sess = guard
             .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("session {id} 不存在"))?;
+            .ok_or_else(|| anyhow::anyhow!("session {id} does not exist"))?;
         if !sess.versions.iter().any(|v| v.version == version) {
-            anyhow::bail!("session {id} 无版本 v{version}");
+            anyhow::bail!("session {id} has no version v{version}");
         }
         sess.current = version;
         sess.last_used = unix_now();
         Ok(())
     }
 
-    /// 列出会话 id（按 last_used 降序）。
+    /// Lists session ids (descending by last_used).
     pub fn list_ids(&self) -> Vec<String> {
         let guard = self.inner.lock().unwrap();
         let mut v: Vec<&Session> = guard.values().collect();
@@ -170,7 +177,7 @@ impl SessionStore {
         if map.len() < MAX_SESSIONS {
             return;
         }
-        // LRU：淘汰 last_used 最旧者直至回到上限内。
+        // LRU: evict the oldest last_used until back within the cap.
         while map.len() >= MAX_SESSIONS {
             let oldest = map
                 .values()
@@ -179,7 +186,7 @@ impl SessionStore {
             match oldest {
                 Some(id) => {
                     let _ = map.remove(&id);
-                    tracing::warn!(session = %id, "会话数达上限，LRU 淘汰最旧会话");
+                    tracing::warn!(session = %id, "session count at cap, LRU-evicting oldest session");
                 }
                 None => break,
             }
@@ -193,8 +200,9 @@ impl Default for SessionStore {
     }
 }
 
-/// LRU 时戳：纳秒级。秒级粒度下同秒创建的会话 last_used 全同，
-/// min_by_key 退化为任意淘汰，LRU 语义破坏——故用 as_nanos。
+/// LRU timestamp: nanosecond precision. With second-level granularity, sessions
+/// created in the same second share identical last_used and min_by_key degrades
+/// to arbitrary eviction, breaking LRU semantics — hence as_nanos.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -202,7 +210,8 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// 统计 PenDocument JSON 节点数（解析失败回退 0，前端展示容错）。
+/// Counts nodes in a PenDocument JSON (falls back to 0 on parse failure,
+/// tolerated for frontend display).
 fn count_nodes(document_json: &str) -> usize {
     serde_json::from_str::<serde_json::Value>(document_json)
         .ok()
@@ -218,7 +227,7 @@ fn count_nodes(document_json: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Unix 天 → 公历（Howard Hinnant civil_from_days，无 chrono 依赖）。
+/// Unix days -> Gregorian date (Howard Hinnant civil_from_days, no chrono dependency).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -253,8 +262,8 @@ mod tests {
     fn create_push_rollback_flow() {
         let store = SessionStore::new();
         let id = store.create(doc(3), "initial");
-        assert!(id.starts_with("s-"), "会话 id 前缀 s-，实际 {id}");
-        let v2 = store.push_version(&id, doc(5), "加暗黑模式").unwrap();
+        assert!(id.starts_with("s-"), "session id prefix s-, got {id}");
+        let v2 = store.push_version(&id, doc(5), "add dark mode").unwrap();
         assert_eq!(v2, 2);
         let s = store.get(&id).unwrap();
         assert_eq!(s.current, 2);
@@ -262,11 +271,11 @@ mod tests {
         assert_eq!(s.versions[0].node_count, 3);
         assert_eq!(s.versions[1].node_count, 5);
 
-        // 回退到 v1 后再迭代 → v3（当前链从 v1 分叉为新版本号）。
+        // Rollback to v1 then iterate -> v3 (current chain forks from v1 into a new version number).
         store.rollback(&id, 1).unwrap();
         let s = store.get(&id).unwrap();
         assert_eq!(s.current, 1);
-        let v3 = store.push_version(&id, doc(4), "换个方向").unwrap();
+        let v3 = store.push_version(&id, doc(4), "try another direction").unwrap();
         assert_eq!(v3, 3);
         let s = store.get(&id).unwrap();
         assert_eq!(s.current, 3);
@@ -293,27 +302,31 @@ mod tests {
         let s = store.get(&id).unwrap();
         assert!(
             s.versions.len() <= MAX_VERSIONS,
-            "版本数超上限：{}",
+            "version count over cap: {}",
             s.versions.len()
         );
         assert!(
             s.versions.iter().any(|v| v.version == s.current),
-            "current 版本必须保留"
+            "current version must be retained"
         );
-        assert_eq!(s.current, MAX_VERSIONS as u32 + 5, "版本号单调递增不回收");
+        assert_eq!(
+            s.current,
+            MAX_VERSIONS as u32 + 5,
+            "version numbers grow monotonically, never recycled"
+        );
     }
 
     #[test]
     fn session_lru_eviction() {
         let store = SessionStore::new();
         let first = store.create(doc(1), "a");
-        // 造满 + 多一个，first 应被 LRU 淘汰（first last_used 最旧）。
+        // Fill to cap + one more; first should be LRU-evicted (oldest last_used).
         for _ in 0..MAX_SESSIONS {
             store.create(doc(1), "x");
         }
         assert!(
             store.get(&first).is_none(),
-            "最旧会话应被 LRU 淘汰（上限 {MAX_SESSIONS}）"
+            "oldest session should be LRU-evicted (cap {MAX_SESSIONS})"
         );
         assert!(store.list_ids().len() <= MAX_SESSIONS);
     }
@@ -327,7 +340,7 @@ mod tests {
     #[test]
     fn civil_from_days_epoch() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // 2026-11-01 = 20758 天（自 1970-01-01）。
+        // 2026-11-01 = 20758 days (since 1970-01-01).
         assert_eq!(civil_from_days(20758), (2026, 11, 1));
     }
 }

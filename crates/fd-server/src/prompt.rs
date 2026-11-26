@@ -1,22 +1,29 @@
-//! 迭代提示词装配（issue#34：stable-prefix + 区域外置 + 变更日志）。
+//! Iterate prompt assembly (issue#34: stable-prefix + region externalization +
+//! changelog).
 //!
-//! 排序契约（配 fusion-mlx `enable_prefix_cache`）：
-//! 1. sys 恒定不变——prefix cache 可命中的稳定头部（mlx admin `prefix_cache`
-//!    聚合指标验证命中率）；
-//! 2. user 内：固定模板头 → 文档 TOC（结构摘要）→ 变更日志 → 区域节点 JSON →
-//!    本次指令。挥发内容一律殿后，稳定内容不被逐请求内容污染。
+//! Ordering contract (paired with fusion-mlx `enable_prefix_cache`):
+//! 1. sys stays constant — the stable head the prefix cache can hit (verify hit
+//!    rate via mlx admin `prefix_cache` aggregate metrics);
+//! 2. within user: fixed template head -> document TOC (structure summary) ->
+//!    changelog -> region node JSON -> this instruction. Volatile content always
+//!    goes last so stable content is not polluted by per-request content.
 //!
-//! 大文档迭代走区域选择：只送 region 节点 JSON + 全量 TOC（O(region) 而非
-//! O(doc)），模型契约仍是输出完整页面 JSON，未列出节点由服务端保证不变。
+//! Large-document iteration uses region selection: send only region node JSON +
+//! full TOC (O(region) instead of O(doc)); the model contract is still to output
+//! the full page JSON, with unlisted nodes kept unchanged by the server.
 
 use crate::state::Session;
 
-/// 迭代系统提示词（恒定，勿拼接逐请求内容——prefix cache 稳定头部）。
-pub const ITERATE_SYS: &str = "你是 fusion-design UI 迭代器。输入当前页面 JSON 与修改指令，\
-输出修改后的完整页面 JSON（{\"page\":{...}} 同 schema）。保持 width/height 与\
-未提及节点不变，仅落实指令要求。只输出 JSON，禁止额外文字。";
+/// Iterate system prompt (constant; do not append per-request content — stable
+/// head for the prefix cache).
+pub const ITERATE_SYS: &str = "You are the fusion-design UI iterator. Input is the current \
+page JSON plus a modification instruction; output the modified full page JSON \
+({\"page\":{...}}, same schema). Keep width/height and all unmentioned nodes \
+unchanged; only apply what the instruction requires. Output JSON only, no \
+extra text.";
 
-/// 文档 TOC：每节点一行 `id kind name`，跨页汇总。解析失败返回空串（容错）。
+/// Document TOC: one line per node `id kind name`, aggregated across pages.
+/// Returns an empty string on parse failure (tolerated).
 pub fn toc_of(doc_json: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(doc_json) {
@@ -37,8 +44,9 @@ pub fn toc_of(doc_json: &str) -> String {
     lines.join("\n")
 }
 
-/// 区域选择：按节点 id 过滤各页 nodes，保留页壳（width/height/name）。
-/// 返回过滤后的页面 JSON；无任何命中返回 None（调用方 400，fail visibly）。
+/// Region selection: filters each page's nodes by node id, keeping the page
+/// shell (width/height/name). Returns the filtered page JSON; None when nothing
+/// matches (caller returns 400, fail visibly).
 pub fn select_region(doc_json: &str, node_ids: &[String]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(doc_json).ok()?;
     let mut out = Vec::new();
@@ -69,14 +77,16 @@ pub fn select_region(doc_json: &str, node_ids: &[String]) -> Option<String> {
     }
 }
 
-/// 变更日志：取版本 label（生成/迭代指令截断），最近 8 条一行一条；
-/// 更早的折叠为一行汇总。首个版本（initial/还原）计一行背景。
+/// Changelog: takes version labels (generation/iteration instructions,
+/// truncated), the most recent 8 one per line; earlier ones folded into a single
+/// summary line. The first version (initial/restore) counts as one background
+/// line.
 pub fn changelog_of(sess: &Session) -> String {
     let mut lines: Vec<String> = Vec::new();
     let total = sess.versions.len();
     let skip = total.saturating_sub(8);
     if skip > 1 {
-        lines.push(format!("- （此前共 {} 个版本）", skip));
+        lines.push(format!("- ({} earlier versions before these)", skip));
     }
     for v in sess.versions.iter().skip(skip) {
         lines.push(format!("- v{}: {}", v.version, v.label));
@@ -84,8 +94,10 @@ pub fn changelog_of(sess: &Session) -> String {
     lines.join("\n")
 }
 
-/// 迭代 user 提示词。排序固定：TOC → 变更日志 → 基准 JSON → 指令（挥发殿后）。
-/// `region` 非空时基准为区域 JSON（O(region)），并在指令前声明未列出节点不变。
+/// Iterate user prompt. Fixed ordering: TOC -> changelog -> base JSON ->
+/// instruction (volatile last).
+/// When `region` is non-empty the base is the region JSON (O(region)), and a
+/// note before the instruction declares that unlisted nodes stay unchanged.
 pub fn build_iterate_user(
     doc_json: &str,
     region: Option<&[String]>,
@@ -96,25 +108,28 @@ pub fn build_iterate_user(
     let (base_note, base) = match region {
         Some(ids) if !ids.is_empty() => match select_region(doc_json, ids) {
             Some(json) => (
-                "以下仅为本次要修改的区域节点。只输出这些节点的修改结果：\
-                 {\"page\":{\"nodes\":[...]}}（保留各自 id，不要输出其他节点；\
-                 服务端会把结果合并回完整页面，未列出节点由服务端保证不变）"
+                "Below are only the region nodes to modify this time. Output \
+                 the modified result for these nodes only: \
+                 {\"page\":{\"nodes\":[...]}} (keep their ids, do not output \
+                 other nodes; the server will merge the result back into the \
+                 full page, and unlisted nodes are guaranteed unchanged by the \
+                 server)"
                     .to_string(),
                 json,
             ),
-            None => ("当前页面：".to_string(), doc_json.to_string()),
+            None => ("Current page:".to_string(), doc_json.to_string()),
         },
-        _ => ("当前页面：".to_string(), doc_json.to_string()),
+        _ => ("Current page:".to_string(), doc_json.to_string()),
     };
     format!(
-        "文档结构（TOC）：\n{toc}\n\n最近变更：\n{cl}\n\n{note}\n{base}\n\n修改指令：{ins}",
+        "Document structure (TOC):\n{toc}\n\nRecent changes:\n{cl}\n\n{note}\n{base}\n\nModification instruction: {ins}",
         toc = if toc.is_empty() {
-            "（空文档）"
+            "(empty document)"
         } else {
             &toc
         },
         cl = if changelog.is_empty() {
-            "（无）"
+            "(none)"
         } else {
             changelog
         },
@@ -124,9 +139,11 @@ pub fn build_iterate_user(
     )
 }
 
-/// 区域结果合并回完整页面：base 中命中 region 的节点按序替换为模型输出节点
-/// （多余输出节点追加到首页尾部），未命中节点原样保留。确定性拼接（Rule 5：
-/// 决策走代码不走模型），模型无法回显未见过的节点。
+/// Merges region results back into the full page: nodes in base hit by region
+/// are replaced in order by model output nodes (extra output nodes appended to
+/// the first page's tail), unhit nodes kept as-is. Deterministic assembly
+/// (Rule 5: decisions in code, not the model), the model cannot echo back nodes
+/// it never saw.
 pub fn merge_region_nodes(
     base_json: &str,
     model_nodes: &[serde_json::Value],
@@ -134,8 +151,9 @@ pub fn merge_region_nodes(
 ) -> Option<String> {
     let mut base: serde_json::Value =
         serde_json::from_str(base_json).unwrap_or_else(|_| serde_json::json!({ "pages": [] }));
-    // 按序匹配：模型被要求只输出区域节点（按 base 出现顺序），位置一一对应；
-    // 额外节点（无对应 base 槽位）追加到首页尾部。
+    // Positional matching: the model is asked to output only region nodes (in
+    // base order), positions correspond one-to-one; extra nodes (no matching
+    // base slot) are appended to the first page's tail.
     let mut positional: Vec<serde_json::Value> = model_nodes.to_vec();
     if model_nodes.is_empty() {
         return None;
@@ -148,7 +166,8 @@ pub fn merge_region_nodes(
                 for n in nodes.drain(..) {
                     let id = n.get("id").and_then(|x| x.as_str()).unwrap_or("");
                     if region_ids.iter().any(|r| r == id) {
-                        // 模型明示删除该节点时无替换候选（repl 为 None，原节点不保留）。
+                        // When the model explicitly deletes the node there is no
+                        // replacement candidate (repl None, original node dropped).
                         if let Some(v) = (!positional.is_empty()).then(|| positional.remove(0)) {
                             replaced += 1;
                             out.push(v);
@@ -171,7 +190,7 @@ pub fn merge_region_nodes(
     tracing::info!(
         requested = region_ids.len(),
         replaced,
-        "merge_region_nodes: 区域合并完成"
+        "merge_region_nodes: region merge complete"
     );
     Some(base.to_string())
 }
@@ -210,7 +229,8 @@ mod tests {
         let nodes = v["pages"][0]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 1, "{r}");
         assert_eq!(nodes[0]["id"], "n2");
-        // 页壳保留（width/height），模型输出整页时尺寸契约不丢。
+        // Page shell kept (width/height), so the size contract survives when the
+        // model outputs a whole page.
         assert_eq!(v["pages"][0]["width"], 1440.0);
         assert_eq!(select_region(&sample_doc(), &["nope".to_string()]), None);
     }
@@ -227,16 +247,16 @@ mod tests {
         for i in 1..=12 {
             sess.versions.push(crate::state::VersionEntry {
                 version: i,
-                label: format!("迭代：指令{i}"),
+                label: format!("iter: instruction{i}"),
                 created_at: "t".into(),
                 node_count: 1,
                 document: "{}".into(),
             });
         }
         let cl = changelog_of(&sess);
-        assert!(cl.contains("此前共 4 个版本"), "{cl}");
-        assert!(cl.contains("v12: 迭代：指令12"), "{cl}");
-        assert!(!cl.contains("指令4"), "{cl}");
+        assert!(cl.contains("4 earlier versions before these"), "{cl}");
+        assert!(cl.contains("v12: iter: instruction12"), "{cl}");
+        assert!(!cl.contains("instruction4"), "{cl}");
     }
 
     #[test]
@@ -249,11 +269,11 @@ mod tests {
         let merged = merge_region_nodes(&base, &model_nodes, &["n2".to_string()]).unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         let nodes = v["pages"][0]["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), 3, "其余节点保留: {merged}");
-        assert_eq!(nodes[1]["text"], "BIG", "n2 被模型结果替换");
-        assert_eq!(nodes[0]["id"], "n1", "未选中节点原样");
-        assert_eq!(nodes[2]["id"], "n3", "未选中节点原样");
-        // 模型新增节点追加到首页尾部。
+        assert_eq!(nodes.len(), 3, "other nodes kept: {merged}");
+        assert_eq!(nodes[1]["text"], "BIG", "n2 replaced by model result");
+        assert_eq!(nodes[0]["id"], "n1", "unselected node kept as-is");
+        assert_eq!(nodes[2]["id"], "n3", "unselected node kept as-is");
+        // Model-added nodes appended to the first page's tail.
         let extra = vec![
             serde_json::json!({"id": "n2", "kind": "text", "name": "t2", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}),
             serde_json::json!({"id": "n9", "kind": "rect", "name": "new", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}),
@@ -261,13 +281,13 @@ mod tests {
         let merged2 = merge_region_nodes(&base, &extra, &["n2".to_string()]).unwrap();
         let v2: serde_json::Value = serde_json::from_str(&merged2).unwrap();
         let nodes2 = v2["pages"][0]["nodes"].as_array().unwrap();
-        assert_eq!(nodes2.len(), 4, "n2 替换 + n9 追加: {merged2}");
+        assert_eq!(nodes2.len(), 4, "n2 replaced + n9 appended: {merged2}");
         assert_eq!(nodes2[3]["id"], "n9");
     }
 
     #[test]
     fn merge_region_without_replacements_fails() {
-        // 模型零节点回包 → None（调用方 502，绝不静默丢节点）。
+        // Model returns zero nodes -> None (caller 502; never silently drop nodes).
         assert!(merge_region_nodes(&sample_doc(), &[], &["n2".to_string()]).is_none());
     }
 
@@ -277,27 +297,28 @@ mod tests {
         let user = build_iterate_user(
             &doc,
             Some(&["n2".to_string()]),
-            "- v2: 加暗黑模式",
-            "把标题放大",
+            "- v2: add dark mode",
+            "make the title bigger",
         );
-        let pos_toc = user.find("文档结构").unwrap();
-        let pos_cl = user.find("最近变更").unwrap();
-        let pos_region = user.find("区域节点").unwrap();
-        let pos_ins = user.find("修改指令").unwrap();
+        let pos_toc = user.find("Document structure").unwrap();
+        let pos_cl = user.find("Recent changes").unwrap();
+        let pos_region = user.find("region nodes").unwrap();
+        let pos_ins = user.find("Modification instruction").unwrap();
         assert!(
             pos_toc < pos_cl && pos_cl < pos_region && pos_region < pos_ins,
             "{user}"
         );
-        // 区域模式：基准 JSON 只有 n2 一个节点对象（TOC 提及不算，O(region)）。
+        // Region mode: base JSON contains only the n2 node object (TOC mentions
+        // don't count, O(region)).
         assert_eq!(
             user.matches("\"kind\"").count(),
             1,
-            "区域 JSON 不得携带未选节点对象: {user}"
+            "region JSON must not carry unselected node objects: {user}"
         );
-        assert!(user.contains("服务端会把结果合并回完整页面"), "{user}");
-        // 无区域：回退全量文档。
-        let full = build_iterate_user(&doc, None, "", "改背景色");
-        assert!(full.contains("当前页面"), "{full}");
+        assert!(user.contains("merge the result back into the"), "{user}");
+        // No region: falls back to the full document.
+        let full = build_iterate_user(&doc, None, "", "change background color");
+        assert!(full.contains("Current page"), "{full}");
         assert!(full.contains("\"avatar\""), "{full}");
     }
 }

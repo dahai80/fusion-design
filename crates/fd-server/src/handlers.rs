@@ -1,7 +1,9 @@
-//! API handlers：生成 / 迭代 / 截图还原 / 版本 / 导出 / 健康检查 / 设计系统。
+//! API handlers: generate / iterate / screenshot restore / version / export /
+//! health check / design systems.
 //!
-//! 模型调用全部经 fd-ai-adapter（gateway 11432 默认，FUSION_MLX_BASE_URL 可覆盖，
-//! 鉴权 FUSION_CLIENT_KEY 别名链）。请求体上限 REQUEST_CAP 防 OOM。
+//! All model calls go through fd-ai-adapter (gateway 11432 by default,
+//! FUSION_MLX_BASE_URL override, FUSION_CLIENT_KEY alias-chain auth). Request
+//! body cap REQUEST_CAP guards against OOM.
 
 use std::sync::Arc;
 
@@ -12,16 +14,19 @@ use fd_codegen::Codegen;
 use crate::state::VersionEntry;
 use crate::AppState;
 
-/// 请求体上限（字节）。截图 base64 可达数 MB，8MB 与 IPC 消息护栏同口径。
+/// Request body cap (bytes). Screenshot base64 can reach several MB; 8MB matches
+/// the IPC message guardrail.
 const REQUEST_CAP: usize = 8 * 1024 * 1024;
 
-/// 模型生成/迭代尝试次数（首试 + 1 次重试）。4B 模型偶发 JSON 截断，重试显著降失败率。
+/// Model generate/iterate attempt count (first try + 1 retry). The 4B model
+/// occasionally truncates JSON; retrying significantly reduces the failure rate.
 const GEN_ATTEMPTS: usize = 2;
 
-/// 视觉还原（restore）默认模型：须为 vision 能力模型。
+/// Vision restore default model: must be a vision-capable model.
 const VISION_MODEL_DEFAULT: &str = "mlx-community--Qwen2.5-VL-7B-Instruct-4bit";
 
-/// 解析请求模型 id：显式 > FUSION_MLX_MODEL > 内置缺省（本地已加载 4B 文本模型）。
+/// Resolves the request model id: explicit > FUSION_MLX_MODEL > built-in default
+/// (locally loaded 4B text model).
 fn resolve_model(explicit: &Option<String>) -> String {
     if let Some(m) = explicit {
         if !m.trim().is_empty() {
@@ -34,23 +39,24 @@ fn resolve_model(explicit: &Option<String>) -> String {
     }
 }
 
-/// 构建模型客户端（endpoint 解析链复用 fd-ai-adapter：env > gateway 缺省）。
+/// Builds the model client (endpoint resolution chain reuses fd-ai-adapter:
+/// env > gateway default).
 fn build_client() -> anyhow::Result<fd_ai_adapter::FusionMlxClient> {
     fd_ai_adapter::FusionMlxClient::with_endpoints(
         fd_ai_adapter::FusionMlxClient::resolve_endpoint("")?,
     )
 }
 
-/// PenDocument 序列化（与 .fusiondesign 文件格式一致）。
+/// PenDocument serialization (same format as the .fusiondesign file).
 fn doc_json(doc: &fd_canvas_core::PenDocument) -> anyhow::Result<String> {
     Ok(serde_json::to_string(doc)?)
 }
 
 fn doc_from_json(json: &str) -> anyhow::Result<fd_canvas_core::PenDocument> {
-    serde_json::from_str(json).map_err(|e| anyhow::anyhow!("PenDocument 反序列化失败: {e}"))
+    serde_json::from_str(json).map_err(|e| anyhow::anyhow!("PenDocument deserialization failed: {e}"))
 }
 
-/// 统一 JSON 响应封装。
+/// Unified JSON response wrapper.
 fn ok_json(value: serde_json::Value) -> hyper::Response<http_body_util::Full<hyper::body::Bytes>> {
     let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
     json_response(hyper::StatusCode::OK, &body)
@@ -64,8 +70,9 @@ fn err_json(
     json_response(status, &body)
 }
 
-/// 字段定位错误（issue#35 契约项）：4xx 校验失败须指出哪个字段缺失/非法，
-/// 消费方不必逐端点逆向猜。响应形状 {"error", "field"}。
+/// Field-targeted error (issue#35 contract item): 4xx validation failures must
+/// name the missing/invalid field so consumers don't have to reverse-engineer it
+/// per endpoint. Response shape {"error", "field"}.
 fn err_field(
     status: hyper::StatusCode,
     field: &str,
@@ -99,9 +106,10 @@ type Resp = hyper::Response<http_body_util::Full<hyper::body::Bytes>>;
 
 pub async fn health(state: &Arc<AppState>, deep: bool) -> Resp {
     let session_count = state.sessions.list_ids().len();
-    // 深探测走 ?deep=1：/v1/models 鉴权 + 列表（async health_check，3s 超时）。
-    // 不得用 health_check_sync：同步阻塞客户端自带内部 runtime，
-    // 在 async handler 内调用会死锁（异步上下文互斥）。
+    // Deep probe via ?deep=1: /v1/models auth + listing (async health_check,
+    // 3s timeout). Must not use health_check_sync: the sync blocking client
+    // carries its own internal runtime, and calling it inside an async handler
+    // deadlocks (async context exclusivity).
     let mlx = if deep {
         match build_client() {
             Ok(c) => Some(c.health_check().await),
@@ -138,12 +146,12 @@ pub fn design_systems(state: &Arc<AppState>) -> Resp {
     }))
 }
 
-/// 设计系统 Token CSS（画布 ApplyTokens 消费；theme=light|dark）。
-// issue#44：design-intelligence 数据集进程内单例（内置 CSV，只读）。
+/// Design-system token CSS (consumed by canvas ApplyTokens; theme=light|dark).
+// issue#44: design-intelligence dataset in-process singleton (embedded CSV, read-only).
 static DESIGN_INTEL: std::sync::OnceLock<fd_search::DesignIntel> = std::sync::OnceLock::new();
 
-/// GET /api/design-intel/search?q=&kind=&limit=（issue #44）。
-/// 数据集检索：确定性关键词打分，零 HTTP 零模型。
+/// GET /api/design-intel/search?q=&kind=&limit= (issue #44).
+/// Dataset search: deterministic keyword scoring, zero HTTP, zero model calls.
 pub fn design_intel_search(q: &str, kind: &str, limit: usize) -> Resp {
     let q = q.trim();
     if q.is_empty() {
@@ -212,7 +220,7 @@ pub fn tokens(state: &Arc<AppState>, ds: &str, theme: &str) -> Resp {
         None => err_field(
             hyper::StatusCode::NOT_FOUND,
             "ds",
-            &format!("设计系统 {ds} 不存在"),
+            &format!("design system {ds} does not exist"),
         ),
     }
 }
@@ -235,7 +243,7 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "body",
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -243,15 +251,17 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::BAD_REQUEST,
             "prompt",
-            "prompt 不能为空（字符串，非空）",
+            "prompt must not be empty (non-empty string)",
         );
     }
     let page = req.page.unwrap_or_else(|| "page-1".to_string());
     let model = resolve_model(&req.model);
-    tracing::info!(page = %page, model = %model, "api/generate: 文生 UI");
+    tracing::info!(page = %page, model = %model, "api/generate: text-to-UI");
 
-    // issue#44：设计智能上下文注入——按用户 prompt 检索内置数据集（风格/配色/
-    // 字体/UX 守则/图表），命中则追加结构化建议块。确定性检索，无模型无网络。
+    // issue#44: design-intel context injection — search the embedded dataset
+    // (style/palette/typography/UX guidelines/diagrams) by the user prompt and
+    // append a structured suggestion block on hit. Deterministic retrieval, no
+    // model, no network.
     let base_prompt = match DESIGN_INTEL
         .get_or_init(fd_search::DesignIntel::embedded)
         .recommend(&req.prompt, 3)
@@ -268,21 +278,23 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         Err(e) => {
             return err_json(
                 hyper::StatusCode::BAD_GATEWAY,
-                &format!("模型客户端构造失败: {e}"),
+                &format!("failed to build model client: {e}"),
             )
         }
     };
     let skills = fd_ai_adapter::DesignSkills::new(client, model);
-    // 4B 模型偶发 JSON 截断（parse_ui_json 修复链兜不住），重试一次再判失败。
+    // The 4B model occasionally truncates JSON (beyond what the parse_ui_json
+    // repair chain can fix); retry once before declaring failure.
     let mut doc = None;
     let mut last_err = String::new();
     for attempt in 1..=GEN_ATTEMPTS {
-        // 重试须变化 prompt：gateway 对同 prompt 有缓存，同串重试只会拿到同一份坏输出。
+        // Retries must vary the prompt: the gateway caches identical prompts, so
+        // retrying the same string would only return the same bad output.
         let prompt = if attempt == 1 {
             base_prompt.clone()
         } else {
             format!(
-                "{}\n（第 {attempt} 次尝试，请严格输出合法完整 JSON）",
+                "{}\n(attempt {attempt}, output valid complete JSON strictly)",
                 base_prompt
             )
         };
@@ -292,16 +304,16 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
                 break;
             }
             Err(e) => {
-                tracing::warn!(attempt, error = %e, "api/generate: 生成失败，准备重试");
+                tracing::warn!(attempt, error = %e, "api/generate: generation failed, retrying");
                 last_err = e.to_string();
             }
         }
     }
     let Some(mut doc) = doc else {
-        tracing::error!(error = %last_err, "api/generate: 生成失败（含重试）");
+        tracing::error!(error = %last_err, "api/generate: generation failed (including retries)");
         return err_json(
             hyper::StatusCode::BAD_GATEWAY,
-            &format!("生成失败: {last_err}"),
+            &format!("generation failed: {last_err}"),
         );
     };
     if let Some(ds) = req.design_system.as_deref() {
@@ -309,10 +321,10 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         if reg.get(ds).is_some() {
             doc.active_design_system = Some(ds.to_string());
         } else {
-            tracing::warn!(design_system = %ds, "api/generate: 未知设计系统，忽略");
+            tracing::warn!(design_system = %ds, "api/generate: unknown design system, ignoring");
         }
     }
-    match finalize_new_session(state, &doc, &format!("生成：{}", truncate(&req.prompt, 40))) {
+    match finalize_new_session(state, &doc, &format!("generate: {}", truncate(&req.prompt, 40))) {
         Ok(v) => v,
         Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -326,16 +338,19 @@ pub struct IterateRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub design_system: Option<String>,
-    /// 区域选择（issue#34）：只迭代这些节点 id；提示词 O(region) 而非 O(doc)。
+    /// Region selection (issue#34): iterate only these node ids; prompt is
+    /// O(region) instead of O(doc).
     #[serde(default)]
     pub region: Option<Vec<String>>,
 }
 
-/// 迭代：当前版本文档 + 指令 → 全页重写为新一版。
+/// Iterate: current version document + instruction -> full page rewritten as a
+/// new version.
 ///
-/// 走与 text_to_ui 相同的 parse_ui_json 路径（已验证 schema），prompt 携带
-/// 当前文档 JSON 要求保持未提及内容不变。4B 模型全页重写上限 4096 tokens
-/// （DEFAULT_MAX_TOKENS 同口径）。
+/// Goes through the same parse_ui_json path as text_to_ui (schema validated);
+/// the prompt carries the current document JSON with instructions to keep
+/// unmentioned content unchanged. 4B model full-page rewrite capped at 4096
+/// tokens (same as DEFAULT_MAX_TOKENS).
 pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: IterateRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
@@ -343,7 +358,7 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "body",
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -351,20 +366,21 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::BAD_REQUEST,
             "instruction",
-            "instruction 不能为空（字符串，非空）",
+            "instruction must not be empty (non-empty string)",
         );
     }
     let Some(sess) = state.sessions.get(&req.session) else {
         return err_field(
             hyper::StatusCode::NOT_FOUND,
             "session",
-            &format!("session {} 不存在", req.session),
+            &format!("session {} does not exist", req.session),
         );
     };
     let Some(cur) = sess.current_doc() else {
-        return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "会话无当前版本");
+        return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "session has no current version");
     };
-    // 区域外置（issue#34）：region 给了但无命中 → 400（fail visibly，不静默回退全量）。
+    // Region externalization (issue#34): region given but no match -> 400 (fail
+    // visibly, no silent fallback to full document).
     let region: Option<Vec<String>> = req.region.as_ref().map(|ids| {
         ids.iter()
             .map(|s| s.trim().to_string())
@@ -376,7 +392,7 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "region",
-                &format!("region 无命中节点: {ids:?}"),
+                &format!("region matched no nodes: {ids:?}"),
             );
         }
     }
@@ -385,7 +401,7 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         session = %req.session,
         model = %model,
         region = region.as_ref().map(|r| r.len()).unwrap_or(0),
-        "api/iterate: 对话迭代"
+        "api/iterate: conversational iteration"
     );
 
     let client = match build_client() {
@@ -393,7 +409,7 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         Err(e) => {
             return err_json(
                 hyper::StatusCode::BAD_GATEWAY,
-                &format!("模型客户端构造失败: {e}"),
+                &format!("failed to build model client: {e}"),
             )
         }
     };
@@ -406,19 +422,20 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         &req.instruction,
     );
     let page_name = page_name_of(&cur.document).unwrap_or_else(|| "page-1".to_string());
-    // 同 generate：模型输出偶发非 schema JSON，调用+解析整体重试一次。
+    // Same as generate: model output is occasionally non-schema JSON; retry the
+    // call+parse as a whole once.
     let mut doc = None;
     let mut last_err = String::new();
     for attempt in 1..=GEN_ATTEMPTS {
         let user = if attempt == 1 {
             user_base.clone()
         } else {
-            format!("{user_base}\n（第 {attempt} 次尝试，请严格输出合法完整 JSON）")
+            format!("{user_base}\n(attempt {attempt}, output valid complete JSON strictly)")
         };
         let resp = match client.chat_async(&model, sys, &user, 4096).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(attempt, error = %e, "api/iterate: 模型调用失败，准备重试");
+                tracing::warn!(attempt, error = %e, "api/iterate: model call failed, retrying");
                 last_err = e.to_string();
                 continue;
             }
@@ -429,19 +446,20 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
                 break;
             }
             Err(e) => {
-                tracing::warn!(attempt, error = %e, "api/iterate: 输出解析失败，准备重试");
-                last_err = "模型输出未按页面 schema 返回".to_string();
+                tracing::warn!(attempt, error = %e, "api/iterate: output parse failed, retrying");
+                last_err = "model output did not follow the page schema".to_string();
             }
         }
     }
     let Some(mut doc) = doc else {
-        tracing::error!(error = %last_err, "api/iterate: 迭代失败（含重试）");
+        tracing::error!(error = %last_err, "api/iterate: iteration failed (including retries)");
         return err_json(
             hyper::StatusCode::BAD_GATEWAY,
-            &format!("迭代失败: {last_err}"),
+            &format!("iteration failed: {last_err}"),
         );
     };
-    // 区域模式（issue#34）：模型只回了区域节点，确定性合并回完整页面。
+    // Region mode (issue#34): the model returned only region nodes; merge them
+    // deterministically back into the full page.
     if let Some(ids) = &region {
         let model_nodes: Vec<serde_json::Value> = doc_json(&doc)
             .ok()
@@ -456,24 +474,25 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             .unwrap_or_default();
         let merged = crate::prompt::merge_region_nodes(&cur.document, &model_nodes, ids);
         let Some(merged) = merged else {
-            tracing::error!(region = ?ids, "api/iterate: 模型未返回区域节点，拒绝静默丢节点");
+            tracing::error!(region = ?ids, "api/iterate: model returned no region nodes, refusing to silently drop nodes");
             return err_json(
                 hyper::StatusCode::BAD_GATEWAY,
-                "模型未返回区域节点结果，请重试或去掉 region 全量迭代",
+                "model returned no region node results; retry or drop region to iterate the full page",
             );
         };
         match doc_from_json(&merged) {
             Ok(d) => doc = d,
             Err(e) => {
-                tracing::error!(error = %e, "api/iterate: 区域合并后文档非法");
+                tracing::error!(error = %e, "api/iterate: document invalid after region merge");
                 return err_json(
                     hyper::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("区域合并失败: {e}"),
+                    &format!("region merge failed: {e}"),
                 );
             }
         }
     }
-    // 迭代保留设计系统声明：请求显式指定 > 当前版沿用。
+    // Iteration preserves the design-system declaration: explicit request > carry
+    // over from the current version.
     if let Some(ds) = req.design_system.as_deref() {
         let reg = state.registry.lock().unwrap();
         if reg.get(ds).is_some() {
@@ -488,7 +507,7 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         state,
         &req.session,
         &doc,
-        &format!("迭代：{}", truncate(&req.instruction, 40)),
+        &format!("iterate: {}", truncate(&req.instruction, 40)),
     ) {
         Ok(v) => v,
         Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -497,7 +516,7 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
 
 #[derive(Deserialize)]
 pub struct RestoreRequest {
-    /// 图片 base64（不带 data: 前缀，前端剥掉）。
+    /// Image base64 (no data: prefix; the frontend strips it).
     pub image_base64: String,
     #[serde(default)]
     pub hint: Option<String>,
@@ -511,7 +530,8 @@ pub struct RestoreRequest {
     pub design_system: Option<String>,
 }
 
-/// 截图/草图还原：fusion-mlx 多模态视觉输入 → PenDocument（issue#31 验收项）。
+/// Screenshot/sketch restore: fusion-mlx multimodal vision input -> PenDocument
+/// (issue#31 acceptance item).
 pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: RestoreRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
@@ -519,7 +539,7 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "body",
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -527,21 +547,24 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::BAD_REQUEST,
             "image_base64",
-            "image_base64 不能为空（纯 base64，不带 data: 前缀）",
+            "image_base64 must not be empty (plain base64, no data: prefix)",
         );
     }
     let page = req.page.unwrap_or_else(|| "restored".to_string());
     let hint = req
         .hint
-        .unwrap_or_else(|| "还原此界面为可编辑原型".to_string());
-    // 视觉还原默认用 VL 模型：4B 文本模型的视觉输出结构性损坏率高（实测，
-    // 缺引号/缺冒号成片），Qwen2.5-VL-7B 输出结构可靠。请求 model 字段可覆盖。
+        .unwrap_or_else(|| "Restore this UI as an editable prototype".to_string());
+    // Vision restore defaults to a VL model: the 4B text model's vision output
+    // has a high structural corruption rate (observed: large runs of missing
+    // quotes/colons); Qwen2.5-VL-7B output structure is reliable. The request
+    // model field can override.
     let model = req
         .model
         .unwrap_or_else(|| VISION_MODEL_DEFAULT.to_string());
-    tracing::info!(page = %page, model = %model, b64_len = req.image_base64.len(), "api/restore: 截图还原");
+    tracing::info!(page = %page, model = %model, b64_len = req.image_base64.len(), "api/restore: screenshot restore");
 
-    // base64 → 临时文件 → screenshot_to_ui（多模态视觉路径），用后即删（过程数据清理）。
+    // base64 -> temp file -> screenshot_to_ui (multimodal vision path), deleted
+    // after use (process-data cleanup).
     let bytes = match base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         req.image_base64.trim(),
@@ -551,7 +574,7 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "image_base64",
-                &format!("image_base64 解码失败: {e}"),
+                &format!("image_base64 decode failed: {e}"),
             )
         }
     };
@@ -559,7 +582,7 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::BAD_REQUEST,
             "image_base64",
-            "图片内容为空",
+            "image content is empty",
         );
     }
     let tmp_dir = std::env::temp_dir();
@@ -571,7 +594,7 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
     if let Err(e) = std::fs::write(&img_path, &bytes) {
         return err_json(
             hyper::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("临时图片写入失败: {e}"),
+            &format!("failed to write temporary image: {e}"),
         );
     }
     async fn run_restore(
@@ -584,27 +607,29 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
         let skills = fd_ai_adapter::DesignSkills::new(client, model.to_string());
         skills.screenshot_to_ui(img_path, hint, page).await
     }
-    // 视觉模型输出偶发结构性损坏，hint 变体重试一次（同串重试拿同一份坏输出无意义）。
-    let mut result = Err(anyhow::anyhow!("未执行"));
+    // Vision model output is occasionally structurally corrupted; retry once
+    // with a varied hint (retrying the same string would return the same bad
+    // output).
+    let mut result = Err(anyhow::anyhow!("not executed"));
     for attempt in 1..=GEN_ATTEMPTS {
         let attempt_hint = if attempt == 1 {
             hint.clone()
         } else {
-            format!("{hint}（第 {attempt} 次尝试，请严格输出合法完整 JSON，勿加多余引号）")
+            format!("{hint} (attempt {attempt}, output valid complete JSON strictly, no extra quotes)")
         };
         result = run_restore(&img_path, &model, &attempt_hint, &page).await;
         if result.is_ok() {
             break;
         }
-        tracing::warn!(attempt, "api/restore: 还原失败，准备重试");
+        tracing::warn!(attempt, "api/restore: restore failed, retrying");
     }
     let _ = std::fs::remove_file(&img_path);
 
     let mut doc = match result {
         Ok(d) => d,
         Err(e) => {
-            tracing::error!(error = %e, "api/restore: 多模态还原失败（含重试）");
-            return err_json(hyper::StatusCode::BAD_GATEWAY, &format!("还原失败: {e}"));
+            tracing::error!(error = %e, "api/restore: multimodal restore failed (including retries)");
+            return err_json(hyper::StatusCode::BAD_GATEWAY, &format!("restore failed: {e}"));
         }
     };
     if let Some(ds) = req.design_system.as_deref() {
@@ -612,17 +637,17 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
         if reg.get(ds).is_some() {
             doc.active_design_system = Some(ds.to_string());
         } else {
-            tracing::warn!(design_system = %ds, "api/restore: 未知设计系统，忽略");
+            tracing::warn!(design_system = %ds, "api/restore: unknown design system, ignoring");
         }
     }
     match req.session {
         Some(sid) => {
-            match push_version(state, &sid, &doc, &format!("还原：{}", truncate(&hint, 40))) {
+            match push_version(state, &sid, &doc, &format!("restore: {}", truncate(&hint, 40))) {
                 Ok(v) => v,
                 Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
         }
-        None => match finalize_new_session(state, &doc, &format!("还原：{}", truncate(&hint, 40)))
+        None => match finalize_new_session(state, &doc, &format!("restore: {}", truncate(&hint, 40)))
         {
             Ok(v) => v,
             Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -635,7 +660,7 @@ pub fn session_info(state: &Arc<AppState>, id: &str) -> Resp {
         return err_field(
             hyper::StatusCode::NOT_FOUND,
             "session",
-            &format!("session {id} 不存在"),
+            &format!("session {id} does not exist"),
         );
     };
     ok_json(session_json(&sess))
@@ -656,7 +681,7 @@ pub fn version_doc(state: &Arc<AppState>, id: &str, version: u32) -> Resp {
     let Some(sess) = state.sessions.get(id) else {
         return err_json(
             hyper::StatusCode::NOT_FOUND,
-            &format!("session {id} 不存在"),
+            &format!("session {id} does not exist"),
         );
     };
     match sess.versions.iter().find(|v| v.version == version) {
@@ -666,7 +691,7 @@ pub fn version_doc(state: &Arc<AppState>, id: &str, version: u32) -> Resp {
         None => err_field(
             hyper::StatusCode::NOT_FOUND,
             "version",
-            &format!("session {id} 无版本 v{version}"),
+            &format!("session {id} has no version v{version}"),
         ),
     }
 }
@@ -684,7 +709,7 @@ pub fn rollback(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "body",
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -693,7 +718,7 @@ pub fn rollback(state: &Arc<AppState>, body: &[u8]) -> Resp {
     }
     let sess = match state.sessions.get(&req.session) {
         Some(s) => s,
-        None => return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "回退后会话丢失"),
+        None => return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "session lost after rollback"),
     };
     let cur = sess
         .current_doc()
@@ -709,13 +734,14 @@ pub fn rollback(state: &Arc<AppState>, body: &[u8]) -> Resp {
 #[derive(Deserialize)]
 pub struct ExportRequest {
     pub session: String,
-    /// html | react。
+    /// html | react.
     pub format: String,
     #[serde(default)]
     pub version: Option<u32>,
 }
 
-/// 导出：fd-codegen HTML / React+Tailwind（issue#31 验收：HTML 可打开、React 可编译）。
+/// Export: fd-codegen HTML / React+Tailwind (issue#31 acceptance: HTML opens,
+/// React compiles).
 pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
     let req: ExportRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
@@ -723,7 +749,7 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "body",
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -731,7 +757,7 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::NOT_FOUND,
             "session",
-            &format!("session {} 不存在", req.session),
+            &format!("session {} does not exist", req.session),
         );
     };
     let target_version = req.version.unwrap_or(sess.current);
@@ -739,14 +765,15 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::NOT_FOUND,
             "version",
-            &format!("session {} 无版本 v{}", req.session, target_version),
+            &format!("session {} has no version v{}", req.session, target_version),
         );
     };
     let doc = match doc_from_json(&entry.document) {
         Ok(d) => d,
         Err(e) => return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    // token 颜色解析：声明设计系统时把 var(--*) 落成具体色（#8 口径，导出件免依赖）。
+    // Token color resolution: when a design system is declared, resolve var(--*)
+    // to concrete colors (#8 policy, exported artifact is dependency-free).
     let doc = {
         let reg = state.registry.lock().unwrap();
         fd_codegen::resolve_tokens(&doc, &reg)
@@ -769,11 +796,11 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "format",
-                &format!("不支持的导出格式 {other}（支持 html / react）"),
+                &format!("unsupported export format {other} (supported: html / react)"),
             );
         }
     };
-    tracing::info!(session = %req.session, version = target_version, format = %req.format, "api/export: 导出");
+    tracing::info!(session = %req.session, version = target_version, format = %req.format, "api/export: export");
     ok_json(serde_json::json!({
         "filename": filename,
         "content": content,
@@ -781,7 +808,7 @@ pub fn export(state: &Arc<AppState>, body: &[u8]) -> Resp {
     }))
 }
 
-// ── 内部工具 ──
+// ── internal helpers ──
 
 fn session_json(sess: &crate::state::Session) -> serde_json::Value {
     serde_json::json!({
@@ -801,7 +828,7 @@ fn version_meta(v: &VersionEntry) -> serde_json::Value {
     })
 }
 
-/// 新会话 + 首版 + 回包（生成/还原共用）。
+/// New session + first version + response (shared by generate/restore).
 fn finalize_new_session(
     state: &Arc<AppState>,
     doc: &fd_canvas_core::PenDocument,
@@ -907,7 +934,7 @@ pub fn node_mutate(state: &Arc<AppState>, session: &str, body: &[u8]) -> Resp {
             return err_field(
                 hyper::StatusCode::BAD_REQUEST,
                 "body",
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -915,7 +942,7 @@ pub fn node_mutate(state: &Arc<AppState>, session: &str, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::BAD_REQUEST,
             "node_id",
-            "node_id 不能为空",
+            "node_id must not be empty",
         );
     }
     let has_change = req.x.is_some()
@@ -931,7 +958,7 @@ pub fn node_mutate(state: &Arc<AppState>, session: &str, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::BAD_REQUEST,
             "body",
-            "至少需要一个变更字段（x/y/w/h/fill/stroke/radius/font_size/opacity）",
+            "at least one change field is required (x/y/w/h/fill/stroke/radius/font_size/opacity)",
         );
     }
     let mut doc = match resolve_session_doc(state, session, None) {
@@ -942,19 +969,19 @@ pub fn node_mutate(state: &Arc<AppState>, session: &str, body: &[u8]) -> Resp {
         return err_field(
             hyper::StatusCode::NOT_FOUND,
             "node_id",
-            &format!("节点 {node_id} 不存在", node_id = req.node_id),
+            &format!("node {node_id} does not exist", node_id = req.node_id),
         );
     }
-    match push_version(state, session, &doc, &format!("编辑：{}", req.node_id)) {
+    match push_version(state, session, &doc, &format!("edit: {}", req.node_id)) {
         Ok(resp) => {
-            tracing::info!(session = %session, node_id = %req.node_id, "api/session/mutate: 节点已更新");
+            tracing::info!(session = %session, node_id = %req.node_id, "api/session/mutate: node updated");
             resp
         }
         Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-/// 生态 IPC 基目录：FUSION_DESIGN_DATA_DIR > ~/.fusion-design。
+/// Ecosystem IPC base directory: FUSION_DESIGN_DATA_DIR > ~/.fusion-design.
 fn ipc_base_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("FUSION_DESIGN_DATA_DIR") {
         return std::path::PathBuf::from(d);
@@ -963,7 +990,7 @@ fn ipc_base_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".fusion-design")
 }
 
-/// 解析会话当前/指定版本文档为 PenDocument。
+/// Resolves the session's current/specified version document into a PenDocument.
 fn resolve_session_doc(
     state: &Arc<AppState>,
     session: &str,
@@ -973,7 +1000,7 @@ fn resolve_session_doc(
         return Err(Box::new(err_field(
             hyper::StatusCode::NOT_FOUND,
             "session",
-            &format!("session {session} 不存在"),
+            &format!("session {session} does not exist"),
         )));
     };
     let entry = match version {
@@ -984,13 +1011,13 @@ fn resolve_session_doc(
         return Err(Box::new(err_field(
             hyper::StatusCode::NOT_FOUND,
             "version",
-            &format!("session {session} 无版本 v{:?}", version),
+            &format!("session {session} has no version v{:?}", version),
         )));
     };
     doc_from_json(&entry.document).map_err(|e| {
         Box::new(err_json(
             hyper::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("PenDocument 反序列化失败: {e}"),
+            &format!("PenDocument deserialization failed: {e}"),
         ))
     })
 }
@@ -1004,8 +1031,9 @@ pub struct SendToCodeRequest {
     pub component: Option<String>,
 }
 
-/// [→ 发给 Code]（issue#33/DS-2）：经 fd-ecosystem 文件 IPC 把当前设计导出
-/// （HTML + React/Tailwind）落到 fusion-code 约定目录并发通知消息。
+/// [Send to Code] (issue#33/DS-2): exports the current design via fd-ecosystem
+/// file IPC (HTML + React/Tailwind) into the fusion-code convention directory
+/// and sends a notification message.
 pub fn send_to_code(state: &Arc<AppState>, body: &[u8]) -> Resp {
     send_to_code_with_base(state, &ipc_base_dir(), body)
 }
@@ -1016,7 +1044,7 @@ pub fn send_to_code_with_base(state: &Arc<AppState>, base: &std::path::Path, bod
         Err(e) => {
             return err_json(
                 hyper::StatusCode::BAD_REQUEST,
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )
         }
     };
@@ -1033,7 +1061,7 @@ pub fn send_to_code_with_base(state: &Arc<AppState>, base: &std::path::Path, bod
             tracing::info!(
                 session = %req.session,
                 files = files.len(),
-                "api/send-to-code: 设计已导出到 fusion-code IPC 目录"
+                "api/send-to-code: design exported to the fusion-code IPC directory"
             );
             ok_json(serde_json::json!({
                 "ok": true,
@@ -1042,10 +1070,10 @@ pub fn send_to_code_with_base(state: &Arc<AppState>, base: &std::path::Path, bod
             }))
         }
         Err(e) => {
-            tracing::error!(error = %e, "api/send-to-code: IPC 写入失败");
+            tracing::error!(error = %e, "api/send-to-code: IPC write failed");
             err_json(
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("发给 Code 失败: {e}"),
+                &format!("send to Code failed: {e}"),
             )
         }
     }
@@ -1058,15 +1086,18 @@ pub struct SaveArtifactRequest {
     pub version: Option<u32>,
     #[serde(default)]
     pub title: Option<String>,
-    /// design / document / slides（落地页创建卡片带入）。
+    /// design / document / slides (carried in by landing-page create cards).
     #[serde(default)]
     pub kind: Option<String>,
 }
 
-/// [存 Artifacts]（issue#33/DS-2）：优先经 artifacts-engine REST 建产物
-/// （落地页可见、带 HTML 正文），成功即不再写 IPC——引擎自带的 IPC 消费者
-/// 会从同一目录再建一条 type=data 的产物，双写等于重复入库。引擎不可达时
-/// 才回退写 IPC（引擎恢复后由消费者补入库），响应带 engine_degraded 可见。
+/// [Save to Artifacts] (issue#33/DS-2): prefer creating the artifact via the
+/// artifacts-engine REST API (visible on the landing page, with HTML content);
+/// on success do not also write IPC — the engine's own IPC consumer would create
+/// another type=data artifact from the same directory, and double-writing means
+/// duplicate ingestion. Only when the engine is unreachable, fall back to writing
+/// IPC (the consumer back-fills ingestion after the engine recovers); the
+/// response carries engine_degraded for visibility.
 pub async fn save_artifact(state: &Arc<AppState>, body: &[u8]) -> Resp {
     save_artifact_dual(state, &ipc_base_dir(), body, None).await
 }
@@ -1099,7 +1130,7 @@ async fn save_artifact_dual(
     let engine_err = match client {
         Ok(c) => match c.create(&new_artifact).await {
             Ok(a) => {
-                tracing::info!(id = %a.id, "api/save-artifact: 已入库 artifacts-engine（不写 IPC，避免重复入库）");
+                tracing::info!(id = %a.id, "api/save-artifact: ingested into artifacts-engine (IPC not written to avoid duplicate ingestion)");
                 return ok_json(serde_json::json!({
                     "ok": true,
                     "artifact": a,
@@ -1111,7 +1142,7 @@ async fn save_artifact_dual(
         },
         Err(e) => e.to_string(),
     };
-    tracing::warn!(error = %engine_err, "api/save-artifact: 引擎入库失败，回退 IPC 补入库");
+    tracing::warn!(error = %engine_err, "api/save-artifact: engine ingestion failed, falling back to IPC write");
     let mut v = match write_artifact_ipc(state, base, body) {
         Ok(v) => v,
         Err(r) => return *r,
@@ -1122,8 +1153,9 @@ async fn save_artifact_dual(
     ok_json(v)
 }
 
-/// 「存 Artifacts」的入库请求：文档经 codegen 生成 HTML，映射为引擎能接受的
-/// kind（app / document / template），落地页据此展示与打开查看器。
+/// Ingestion request for "Save to Artifacts": the document is codegen'd to HTML
+/// and mapped to an engine-accepted kind (app / document / template); the landing
+/// page uses it for display and to open the viewer.
 fn engine_create_request(
     state: &Arc<AppState>,
     req: &SaveArtifactRequest,
@@ -1139,7 +1171,7 @@ fn engine_create_request(
         Some("slides") => "template",
         Some("design") | None => "app",
         Some(other) => {
-            tracing::warn!(kind = other, "api/save-artifact: 未知 kind，按 app 入库");
+            tracing::warn!(kind = other, "api/save-artifact: unknown kind, ingesting as app");
             "app"
         }
     };
@@ -1175,7 +1207,7 @@ fn write_artifact_ipc(
         Err(e) => {
             return Err(Box::new(err_json(
                 hyper::StatusCode::BAD_REQUEST,
-                &format!("请求体解析失败: {e}"),
+                &format!("failed to parse request body: {e}"),
             )))
         }
     };
@@ -1205,14 +1237,14 @@ fn write_artifact_ipc(
     let link = fd_ecosystem::EcosystemLink::new(base);
     match link.send(&msg) {
         Ok(path) => {
-            tracing::info!(path = %path.display(), "api/save-artifact: 保存消息已写入 IPC");
+            tracing::info!(path = %path.display(), "api/save-artifact: save message written to IPC");
             Ok(serde_json::json!({"ok": true, "ipc_message": path.display().to_string()}))
         }
         Err(e) => {
-            tracing::error!(error = %e, "api/save-artifact: IPC 写入失败");
+            tracing::error!(error = %e, "api/save-artifact: IPC write failed");
             Err(Box::new(err_json(
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("存 Artifacts 失败: {e}"),
+                &format!("save to Artifacts failed: {e}"),
             )))
         }
     }
@@ -1226,7 +1258,8 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// 从文档 JSON 提取首个页面名（迭代保持页面名稳定）。
+/// Extracts the first page name from document JSON (keeps page names stable
+/// across iterations).
 fn page_name_of(document_json: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(document_json)
         .ok()?
@@ -1241,8 +1274,9 @@ pub(crate) fn request_cap() -> usize {
     REQUEST_CAP
 }
 
-/// Artifacts 落地页查询：解析 `/api/artifacts?...` 的查询串。
-/// tab：all（缺省）/ mine（个人自由产物）/ shared（已分享产物，见 handler 说明）。
+/// Artifacts landing-page query: parses the `/api/artifacts?...` query string.
+/// tab: all (default) / mine (personal free artifacts) / shared (shared
+/// artifacts, see handler docs).
 pub fn artifacts_query(query: &str) -> (fd_ai_adapter::ArtifactQuery, String) {
     let get = |key: &str| {
         query.split('&').find_map(|kv| {
@@ -1297,7 +1331,8 @@ fn decode_component(s: &str) -> String {
         }
         out.push(b);
     }
-    // percent-decoded 多字节序列（中文搜索词）须按 UTF-8 组装，逐字节转 char 会乱码。
+    // percent-decoded multi-byte sequences (e.g. CJK search terms) must be
+    // assembled as UTF-8; byte-by-byte char conversion would corrupt them.
     String::from_utf8_lossy(&out).into_owned()
 }
 
@@ -1310,20 +1345,20 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// `GET /api/artifact/<id>?version=n`：查看器数据（元数据 + 正文）。
-/// Claude 同款：点产物在本地打开，不跳外部应用。
+/// `GET /api/artifact/<id>?version=n`: viewer data (metadata + content).
+/// Claude-style: clicking an artifact opens it locally, no external app.
 pub async fn artifact_detail(id: &str, version: Option<u32>) -> Resp {
     if id.is_empty()
         || !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return err_json(hyper::StatusCode::BAD_REQUEST, "产物 id 非法");
+        return err_json(hyper::StatusCode::BAD_REQUEST, "invalid artifact id");
     }
     let client = match fd_ai_adapter::ArtifactsClient::from_env() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "api/artifact: 客户端构造失败");
+            tracing::warn!(error = %e, "api/artifact: client construction failed");
             return ok_json(serde_json::json!({
                 "degraded": true, "error": e.to_string(),
             }));
@@ -1332,28 +1367,31 @@ pub async fn artifact_detail(id: &str, version: Option<u32>) -> Resp {
     match client.get(id).await {
         Ok(artifact) => match client.content(id, version).await {
             Ok(content) => {
-                tracing::info!(id, bytes = content.len(), "api/artifact: 正文返回");
+                tracing::info!(id, bytes = content.len(), "api/artifact: content returned");
                 ok_json(serde_json::json!({
                     "artifact": artifact, "content": content, "degraded": false,
                 }))
             }
             Err(e) => {
-                tracing::warn!(id, error = %e, "api/artifact: 正文读取失败");
+                tracing::warn!(id, error = %e, "api/artifact: content read failed");
                 ok_json(serde_json::json!({
                     "artifact": artifact, "content": "", "degraded": true, "error": e.to_string(),
                 }))
             }
         },
         Err(e) => {
-            tracing::warn!(id, error = %e, "api/artifact: 元数据读取失败");
+            tracing::warn!(id, error = %e, "api/artifact: metadata read failed");
             ok_json(serde_json::json!({ "degraded": true, "error": e.to_string() }))
         }
     }
 }
 
-/// `GET /api/artifacts`：落地页列表，数据源为本机 artifacts-engine。
-/// 引擎不可达时降级为「空列表 + degraded」，落地页仍可打开并创建新内容。
-/// tab=shared 时引擎无 share 过滤能力：单页取 100 条后本地筛 share_id 非空。
+/// `GET /api/artifacts`: landing-page list, sourced from the local
+/// artifacts-engine.
+/// When the engine is unreachable, degrades to "empty list + degraded"; the
+/// landing page stays open and can create new content.
+/// tab=shared: the engine has no share filter, so fetch 100 items per page and
+/// locally retain entries with a non-empty share_id.
 pub async fn artifacts(query: &str) -> Resp {
     let (mut q, tab) = artifacts_query(query);
     let shared_mode = tab == "shared";
@@ -1364,7 +1402,7 @@ pub async fn artifacts(query: &str) -> Resp {
     let client = match fd_ai_adapter::ArtifactsClient::from_env() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "api/artifacts: 客户端构造失败");
+            tracing::warn!(error = %e, "api/artifacts: client construction failed");
             return ok_json(serde_json::json!({
                 "artifacts": [], "total": 0, "page": q.page, "page_size": q.page_size,
                 "degraded": true, "error": e.to_string(),
@@ -1385,7 +1423,7 @@ pub async fn artifacts(query: &str) -> Resp {
                 page = q.page,
                 count = items.len(),
                 total,
-                "api/artifacts: 列表返回"
+                "api/artifacts: list returned"
             );
             ok_json(serde_json::json!({
                 "artifacts": items, "total": total, "page": q.page,
@@ -1393,7 +1431,7 @@ pub async fn artifacts(query: &str) -> Resp {
             }))
         }
         Err(e) => {
-            tracing::warn!(error = %e, tab = %tab, "api/artifacts: 引擎不可达，降级空列表");
+            tracing::warn!(error = %e, tab = %tab, "api/artifacts: engine unreachable, degrading to empty list");
             ok_json(serde_json::json!({
                 "artifacts": [], "total": 0, "page": q.page, "page_size": q.page_size,
                 "degraded": true, "error": e.to_string(),
@@ -1408,21 +1446,21 @@ mod tests {
 
     #[test]
     fn artifacts_query_parsing() {
-        // 缺省：全部 tab、updated_at、24/页。
+        // Defaults: all tab, updated_at, 24/page.
         let (q, tab) = artifacts_query("");
         assert_eq!(tab, "all");
         assert_eq!(q.sort, "updated_at");
         assert_eq!(q.page_size, 24);
         assert!(q.ownership_type.is_none());
 
-        // 我的 tab → ownership_type=free（引擎可过滤维度）。
+        // mine tab -> ownership_type=free (an engine-filterable dimension).
         let (q, tab) = artifacts_query("tab=mine&page=2&sort=starred");
         assert_eq!(tab, "mine");
         assert_eq!(q.ownership_type.as_deref(), Some("free"));
         assert_eq!(q.page, 2);
         assert_eq!(q.sort, "starred");
 
-        // 非法 sort 回落；page_size 夹取；搜索词 percent-decode。
+        // Invalid sort falls back; page_size clamped; search term percent-decoded.
         let (q, _) = artifacts_query("sort=evil&page_size=999&q=%E7%99%BB%E5%BD%95+x");
         assert_eq!(q.sort, "updated_at");
         assert_eq!(q.page_size, 100);
@@ -1431,9 +1469,10 @@ mod tests {
 
     #[test]
     fn resolve_model_chain() {
-        // 显式优先。
+        // Explicit model wins.
         assert_eq!(resolve_model(&Some("m-explicit".into())), "m-explicit");
-        // 空串视为未提供，落 env/缺省。env 全局竞态：本用例只断言非空回退。
+        // Empty string is treated as not provided; falls to env/default. Env is a
+        // global race: this case only asserts a non-empty fallback.
         let m = resolve_model(&Some("  ".into()));
         assert!(!m.is_empty());
     }
@@ -1458,7 +1497,7 @@ mod tests {
         assert_eq!(request_cap(), 8 * 1024 * 1024);
     }
 
-    /// 取响应体字节（测试辅助）。
+    /// Reads the response body bytes (test helper).
     async fn body_of(resp: Resp) -> Vec<u8> {
         use http_body_util::BodyExt;
         resp.into_body()
@@ -1473,7 +1512,7 @@ mod tests {
         serde_json::from_slice(&body_of(resp).await).unwrap()
     }
 
-    /// 离线导出链路：种子会话 → html/react 导出（无模型依赖）。
+    /// Offline export flow: seeded session -> html/react export (no model dependency).
     #[tokio::test]
     async fn export_html_and_react_from_seeded_session() {
         let state = std::sync::Arc::new(crate::AppState::new());
@@ -1494,21 +1533,21 @@ mod tests {
         let body = serde_json::json!({"session": sid, "format": "html"}).to_string();
         let resp = export(&state, body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert!(v["error"].is_null(), "html 导出不应报错: {v}");
+        assert!(v["error"].is_null(), "html export should not error: {v}");
         let content = v["content"].as_str().unwrap();
-        assert!(content.contains("<!DOCTYPE html>"), "HTML 导出须为完整文档");
-        assert!(content.contains("Fusion"), "HTML 导出须含 Text 节点文本");
+        assert!(content.contains("<!DOCTYPE html>"), "HTML export must be a complete document");
+        assert!(content.contains("Fusion"), "HTML export must contain the Text node content");
         assert!(v["filename"].as_str().unwrap().ends_with(".html"));
 
         let body = serde_json::json!({"session": sid, "format": "react"}).to_string();
         let resp = export(&state, body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert!(v["error"].is_null(), "react 导出不应报错: {v}");
+        assert!(v["error"].is_null(), "react export should not error: {v}");
         let content = v["content"].as_str().unwrap();
-        assert!(content.contains("export function"), "React 导出须为组件");
+        assert!(content.contains("export function"), "React export must be a component");
         assert!(v["filename"].as_str().unwrap().ends_with(".tsx"));
 
-        // 指定旧版导出 + 非法格式拒绝。
+        // Export a specific old version + reject invalid format.
         state
             .sessions
             .push_version(&sid, doc.clone(), "v2")
@@ -1516,17 +1555,17 @@ mod tests {
         let body = serde_json::json!({"session": sid, "format": "html", "version": 1}).to_string();
         let resp = export(&state, body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert!(v["error"].is_null(), "指定版本导出应成功");
+        assert!(v["error"].is_null(), "export of a specific version should succeed");
         let body = serde_json::json!({"session": sid, "format": "swiftui"}).to_string();
         let resp = export(&state, body.as_bytes());
         assert_eq!(
             resp.status(),
             hyper::StatusCode::BAD_REQUEST,
-            "非法格式应 400"
+            "invalid format should 400"
         );
     }
 
-    /// 回退 + 版本查询链路（无模型依赖）。
+    /// Rollback + version query flow (no model dependency).
     #[tokio::test]
     async fn rollback_and_version_flow() {
         let state = std::sync::Arc::new(crate::AppState::new());
@@ -1539,21 +1578,22 @@ mod tests {
         let body = serde_json::json!({"session": sid, "version": 1}).to_string();
         let resp = rollback(&state, body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert_eq!(v["current_version"], 1, "回退后 current=1");
+        assert_eq!(v["current_version"], 1, "current=1 after rollback");
         assert!(
             v["document"].as_str().unwrap().contains("\"nodes\":[]"),
-            "回退后文档为 v1"
+            "document after rollback is v1"
         );
 
         let resp = version_doc(&state, &sid, 2);
         let v: serde_json::Value = json_of(resp).await;
         assert!(
             v["document"].as_str().unwrap().contains("x"),
-            "v2 文档仍可查询"
+            "v2 document still queryable"
         );
     }
 
-    /// 生态出口（issue#33/DS-2）：发给 Code / 存 Artifacts 落盘验证（tempdir 隔离）。
+    /// Ecosystem exits (issue#33/DS-2): send-to-Code / save-to-Artifacts disk
+    /// verification (tempdir isolated).
     #[tokio::test]
     async fn send_to_code_and_save_artifact_write_ipc() {
         let state = std::sync::Arc::new(crate::AppState::new());
@@ -1570,26 +1610,26 @@ mod tests {
         let sid = state.sessions.create(doc, "seed");
         let base = tempfile::tempdir().unwrap();
 
-        // 发给 Code：HTML + TSX + 通知消息落 fusion-code 目录。
+        // Send to Code: HTML + TSX + notification message land in the fusion-code directory.
         let body = serde_json::json!({"session": sid}).to_string();
         let resp = send_to_code_with_base(&state, base.path(), body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert!(v["error"].is_null(), "send-to-code 不应报错: {v}");
+        assert!(v["error"].is_null(), "send-to-code should not error: {v}");
         assert_eq!(v["ok"], true);
         let files = v["files"].as_array().unwrap();
-        assert_eq!(files.len(), 2, "须写 HTML + TSX: {v}");
+        assert_eq!(files.len(), 2, "must write HTML + TSX: {v}");
         for f in files {
             let p = std::path::Path::new(f.as_str().unwrap());
-            assert!(p.exists(), "IPC 文件须真实落盘: {}", p.display());
+            assert!(p.exists(), "IPC files must actually be written: {}", p.display());
         }
         assert!(
             files
                 .iter()
                 .all(|f| f.as_str().unwrap().contains("fusion-code")),
-            "文件须落 fusion-code 约定目录"
+            "files must land in the fusion-code convention directory"
         );
 
-        // 指定组件名 + 不存在的会话拒绝。
+        // Custom component name + reject unknown session.
         let body = serde_json::json!({"session": sid, "component": "LoginCard"}).to_string();
         let resp = send_to_code_with_base(&state, base.path(), body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
@@ -1597,54 +1637,56 @@ mod tests {
             v["files"]
                 .as_array()
                 .is_some_and(|a| a.iter().any(|f| f.as_str().unwrap().contains("LoginCard"))),
-            "自定义组件名生效: {v}"
+            "custom component name takes effect: {v}"
         );
         let body = serde_json::json!({"session": "s-nope"}).to_string();
         let resp = send_to_code_with_base(&state, base.path(), body.as_bytes());
         assert_eq!(
             resp.status(),
             hyper::StatusCode::NOT_FOUND,
-            "未知会话应 404"
+            "unknown session should 404"
         );
 
-        // 存 Artifacts：IPC 消息落 fusion-artifacts-engine 目录且 payload 带溯源。
-        let body = serde_json::json!({"session": sid, "title": "登录页"}).to_string();
+        // Save to Artifacts: IPC message lands in the fusion-artifacts-engine
+        // directory and the payload carries provenance.
+        let body = serde_json::json!({"session": sid, "title": "Login Page"}).to_string();
         let resp = save_artifact_with_base(&state, base.path(), body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert!(v["error"].is_null(), "save-artifact 不应报错: {v}");
+        assert!(v["error"].is_null(), "save-artifact should not error: {v}");
         assert_eq!(v["ok"], true);
         let msg_path = std::path::Path::new(v["ipc_message"].as_str().unwrap());
-        assert!(msg_path.exists(), "IPC 消息须真实落盘");
+        assert!(msg_path.exists(), "IPC message must actually be written");
         assert!(
             msg_path
                 .to_string_lossy()
                 .contains("fusion-artifacts-engine"),
-            "消息须落 artifacts-engine 约定目录: {}",
+            "message must land in the artifacts-engine convention directory: {}",
             msg_path.display()
         );
         let payload: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(msg_path).unwrap()).unwrap();
         assert_eq!(payload["action"], "save_artifact");
         assert_eq!(payload["payload"]["source"], "fusion-design");
-        assert_eq!(payload["payload"]["title"], "登录页");
+        assert_eq!(payload["payload"]["title"], "Login Page");
         assert!(
             payload["payload"]["document"]
                 .as_str()
                 .unwrap_or("")
                 .contains("pages"),
-            "消息须携带完整文档"
+            "message must carry the full document"
         );
 
-        // 非法请求体拒绝。
+        // Invalid request body rejected.
         let resp = save_artifact_with_base(&state, base.path(), b"not-json");
         assert_eq!(
             resp.status(),
             hyper::StatusCode::BAD_REQUEST,
-            "非法请求体应 400"
+            "invalid request body should 400"
         );
     }
 
-    /// 引擎不可达时回退 IPC：引擎恢复后由消费者补入库，响应须 fail visibly。
+    /// IPC fallback when the engine is unreachable: the consumer back-fills
+    /// ingestion after the engine recovers; the response must fail visibly.
     #[tokio::test]
     async fn save_artifact_falls_back_to_ipc_when_engine_down() {
         let state = std::sync::Arc::new(crate::AppState::new());
@@ -1661,7 +1703,7 @@ mod tests {
         let sid = state.sessions.create(doc, "seed");
         let base = tempfile::tempdir().unwrap();
         let client = fd_ai_adapter::ArtifactsClient::new("http://127.0.0.1:1", "k").unwrap();
-        let body = serde_json::json!({"session": sid, "title": "登录页"}).to_string();
+        let body = serde_json::json!({"session": sid, "title": "Login Page"}).to_string();
         let resp = save_artifact_dual(&state, base.path(), body.as_bytes(), Some(client)).await;
         let v: serde_json::Value = json_of(resp).await;
         assert_eq!(v["ok"], true, "{v}");
@@ -1671,8 +1713,9 @@ mod tests {
         assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
     }
 
-    /// issue#34 契约：region 无命中节点 400（不触发模型调用）；命中时提示词
-    /// 走区域装配（TOC + 变更日志在前，区域 JSON + 指令在后）。
+    /// issue#34 contract: region with no matching nodes -> 400 (no model call);
+    /// on hit the prompt uses region assembly (TOC + changelog first, region
+    /// JSON + instruction last).
     #[tokio::test]
     async fn iterate_region_contract() {
         let state = std::sync::Arc::new(crate::AppState::new());
@@ -1692,44 +1735,45 @@ mod tests {
             .push_version(
                 &sid,
                 serde_json::json!({"pages":[]}).to_string(),
-                "迭代：加按钮",
+                "iterate: add button",
             )
             .unwrap();
 
-        // region 无命中 → 400，请求体校验在模型调用前。
+        // region with no match -> 400; request validation happens before any model call.
         let body =
             serde_json::json!({"session": sid, "instruction": "x", "region": ["nope"]}).to_string();
         let resp = iterate(&state, body.as_bytes()).await;
         assert_eq!(
             resp.status(),
             hyper::StatusCode::BAD_REQUEST,
-            "无命中须 400"
+            "no match must 400"
         );
 
-        // 装配契约（不触模型）：排序 + 区域 O(region) + 变更日志。
+        // Assembly contract (no model touched): ordering + region O(region) + changelog.
         let sess = state.sessions.get(&sid).unwrap();
         let user = crate::prompt::build_iterate_user(
             &sess.current_doc().unwrap().document,
             Some(&["n1".to_string()]),
             &crate::prompt::changelog_of(&sess),
-            "放大标题",
+            "make the title bigger",
         );
-        assert!(user.contains("文档结构"), "{user}");
-        assert!(user.contains("v2: 迭代：加按钮"), "{user}");
-        assert!(!user.contains("\"bg\""), "区域 JSON 不得带未选节点: {user}");
-        assert!(user.contains("放大标题"), "{user}");
+        assert!(user.contains("Document structure"), "{user}");
+        assert!(user.contains("v2: iterate: add button"), "{user}");
+        assert!(!user.contains("\"bg\""), "region JSON must not carry unselected nodes: {user}");
+        assert!(user.contains("make the title bigger"), "{user}");
         let sys = crate::prompt::ITERATE_SYS;
         assert!(
-            !sys.contains("文档结构") && !sys.contains("最近变更"),
-            "sys 不得嵌逐请求区块（prefix cache 稳定头部）"
+            !sys.contains("Document structure") && !sys.contains("Recent changes"),
+            "sys must not embed per-request blocks (prefix cache stable head)"
         );
     }
 }
 
 #[cfg(test)]
 mod contract_tests {
-    // issue#35 契约测试：钉住 generate/iterate/rollback/restore/tokens 的
-    // 请求/响应形状与字段定位 4xx。改动契约须同步改 docs/API.md 与本模块。
+    // issue#35 contract tests: pin the generate/iterate/rollback/restore/tokens
+    // request/response shapes and field-targeted 4xx. Changing the contract
+    // requires updating docs/API.md and this module together.
     use super::*;
 
     async fn body_of(resp: Resp) -> Vec<u8> {
@@ -1766,51 +1810,51 @@ mod contract_tests {
     async fn contract_4xx_errors_are_field_located() {
         let (state, sid, doc) = seeded_state();
 
-        // generate：空 prompt → 400 + field=prompt。
+        // generate: empty prompt -> 400 + field=prompt.
         let v = json_of(generate(&state, br#"{"prompt":"  "}"#).await).await;
         assert_eq!(v["field"], "prompt", "{v}");
 
-        // generate：坏 body → 400 + field=body。
+        // generate: bad body -> 400 + field=body.
         let v = json_of(generate(&state, br#"not json"#).await).await;
         assert_eq!(v["field"], "body", "{v}");
 
-        // iterate：空 instruction → 400 + field=instruction。
+        // iterate: empty instruction -> 400 + field=instruction.
         let b = serde_json::json!({"session": sid, "instruction": ""});
         let v = json_of(iterate(&state, b.to_string().as_bytes()).await).await;
         assert_eq!(v["field"], "instruction", "{v}");
 
-        // iterate：session 不存在 → 404 + field=session。
+        // iterate: unknown session -> 404 + field=session.
         let b = serde_json::json!({"session": "s-nope", "instruction": "x"});
         let v = json_of(iterate(&state, b.to_string().as_bytes()).await).await;
         assert_eq!(v["field"], "session", "{v}");
         assert!(v.as_object().unwrap()["error"].is_string(), "{v}");
 
-        // iterate：region 无命中 → 400 + field=region。
+        // iterate: region with no match -> 400 + field=region.
         let b = serde_json::json!({"session": sid, "instruction": "x", "region": ["ghost"]});
         let v = json_of(iterate(&state, b.to_string().as_bytes()).await).await;
         assert_eq!(v["field"], "region", "{v}");
 
-        // rollback：坏 body → 400 + field=body；不存在版本 → 404 + field=version。
+        // rollback: bad body -> 400 + field=body; unknown version -> 404 + field=version.
         let v = json_of(rollback(&state, br#"{"session":"x"}"#)).await;
         assert_eq!(v["field"], "body", "{v}");
         let b = serde_json::json!({"session": sid, "version": 99});
         let v = json_of(rollback(&state, b.to_string().as_bytes())).await;
         assert_eq!(v["field"], "version", "{v}");
 
-        // restore：空 image → 400 + field=image_base64。
+        // restore: empty image -> 400 + field=image_base64.
         let v = json_of(restore(&state, br#"{"image_base64":" "}"#).await).await;
         assert_eq!(v["field"], "image_base64", "{v}");
 
-        // export：非法 format → 400 + field=format。
+        // export: invalid format -> 400 + field=format.
         let b = serde_json::json!({"session": sid, "format": "pdf"});
         let v = json_of(export(&state, b.to_string().as_bytes())).await;
         assert_eq!(v["field"], "format", "{v}");
 
-        // tokens：不存在 ds → 404 + field=ds。
+        // tokens: unknown ds -> 404 + field=ds.
         let v = json_of(tokens(&state, "no-such-ds", "light")).await;
         assert_eq!(v["field"], "ds", "{v}");
 
-        // session_info：不存在 → 404 + field=session。
+        // session_info: unknown -> 404 + field=session.
         let v = json_of(session_info(&state, "s-nope")).await;
         assert_eq!(v["field"], "session", "{v}");
         let _ = doc;
@@ -1827,7 +1871,7 @@ mod contract_tests {
             v["css"].as_str().unwrap_or_default().contains("--"),
             "CSS vars: {v}"
         );
-        // issue#42：tokens 数组（name/value 对，dark 主题下为暗色合并视图）。
+        // issue#42: tokens array (name/value pairs; dark theme gives the dark merged view).
         let toks = v["tokens"].as_array().expect("tokens array");
         assert!(!toks.is_empty(), "{v}");
         let bg = toks
@@ -1839,20 +1883,20 @@ mod contract_tests {
 
     #[tokio::test]
     async fn contract_design_intel_search() {
-        // issue#44：GET /api/design-intel/search 数据集检索契约。
+        // issue#44: GET /api/design-intel/search dataset search contract.
 
-        // 空 q → 400 + field=q。
+        // empty q -> 400 + field=q.
         let v = json_of(design_intel_search("", "all", 5)).await;
         assert_eq!(v["field"], "q", "{v}");
         let v = json_of(design_intel_search("   ", "all", 5)).await;
         assert_eq!(v["field"], "q", "{v}");
 
-        // 未知 kind → 400 + field=kind（带合法值提示）。
+        // unknown kind -> 400 + field=kind (with valid values in the hint).
         let v = json_of(design_intel_search("dashboard", "nope", 5)).await;
         assert_eq!(v["field"], "kind", "{v}");
         assert!(v["error"].as_str().unwrap_or_default().contains("styles"));
 
-        // 命中：{kind, q, count, hits[{kind,id,title,detail,score}]}，score 降序。
+        // Hit: {kind, q, count, hits[{kind,id,title,detail,score}]}, score descending.
         let v = json_of(design_intel_search("dashboard dark console", "styles", 3)).await;
         assert!(v["error"].is_null(), "{v}");
         assert_eq!(v["kind"], "styles");
@@ -1862,7 +1906,7 @@ mod contract_tests {
         assert!(hits.len() <= 3, "limit respected: {v}");
         let first = &hits[0];
         for k in ["kind", "id", "title", "detail", "score"] {
-            assert!(!first[k].is_null(), "hit 缺 {k}: {v}");
+            assert!(!first[k].is_null(), "hit missing {k}: {v}");
         }
         for pair in hits.windows(2) {
             assert!(
@@ -1870,7 +1914,7 @@ mod contract_tests {
             );
         }
 
-        // all 混合检索返回多 kind；limit 缺省 5、非法值回落。
+        // all mixed search returns multiple kinds; limit defaults to 5, invalid values fall back.
         let v = json_of(design_intel_search("developer dashboard dark", "all", 20)).await;
         let hits = v["hits"].as_array().expect("hits array");
         let kinds: std::collections::HashSet<&str> =
@@ -1880,32 +1924,32 @@ mod contract_tests {
 
     #[tokio::test]
     async fn contract_node_mutate() {
-        // issue#42：POST /api/session/<id>/mutate 直改节点并落新版本。
+        // issue#42: POST /api/session/<id>/mutate mutates the node directly and pushes a new version.
         let (state, sid, _doc) = seeded_state();
 
-        // 坏 body → 400 + field=body。
+        // bad body -> 400 + field=body.
         let v = json_of(node_mutate(&state, &sid, b"not json")).await;
         assert_eq!(v["field"], "body", "{v}");
 
-        // 空 node_id → 400 + field=node_id。
+        // empty node_id -> 400 + field=node_id.
         let v = json_of(node_mutate(&state, &sid, br#"{"node_id":" "}"#)).await;
         assert_eq!(v["field"], "node_id", "{v}");
 
-        // 无变更字段 → 400。
+        // no change fields -> 400.
         let v = json_of(node_mutate(&state, &sid, br#"{"node_id":"n1"}"#)).await;
         assert_eq!(v["field"], "body", "{v}");
 
-        // session 不存在 → 404 + field=session。
+        // unknown session -> 404 + field=session.
         let b = serde_json::json!({"node_id": "n1", "x": 42.0});
         let v = json_of(node_mutate(&state, "s-nope", b.to_string().as_bytes())).await;
         assert_eq!(v["field"], "session", "{v}");
 
-        // 节点不存在 → 404 + field=node_id。
+        // unknown node -> 404 + field=node_id.
         let b = serde_json::json!({"node_id": "ghost", "x": 42.0});
         let v = json_of(node_mutate(&state, &sid, b.to_string().as_bytes())).await;
         assert_eq!(v["field"], "node_id", "{v}");
 
-        // 成功：{session, current_version, document}，新版本包含变更。
+        // Success: {session, current_version, document}, the new version contains the change.
         let b = serde_json::json!({"node_id": "n1", "x": 42.0, "fill": "#4F7CFF"});
         let v = json_of(node_mutate(&state, &sid, b.to_string().as_bytes())).await;
         assert!(v["error"].is_null(), "{v}");
@@ -1921,7 +1965,7 @@ mod contract_tests {
     async fn contract_success_shapes() {
         let (state, sid, doc) = seeded_state();
 
-        // rollback：{session, current_version, document}。
+        // rollback: {session, current_version, document}.
         state
             .sessions
             .push_version(&sid, doc.clone(), "v2")
@@ -1931,27 +1975,27 @@ mod contract_tests {
         assert!(v["error"].is_null(), "{v}");
         assert_eq!(v["session"], sid);
         assert_eq!(v["current_version"], 1);
-        assert!(v["document"].is_string(), "document 须为 JSON 字符串: {v}");
+        assert!(v["document"].is_string(), "document must be a JSON string: {v}");
 
-        // export：{filename, content, mime}。
+        // export: {filename, content, mime}.
         let b = serde_json::json!({"session": sid, "format": "html"});
         let v = json_of(export(&state, b.to_string().as_bytes())).await;
         assert!(v["error"].is_null(), "{v}");
         for k in ["filename", "content", "mime"] {
-            assert!(v[k].is_string(), "export 缺 {k}: {v}");
+            assert!(v[k].is_string(), "export missing {k}: {v}");
         }
 
-        // session_info：{session, current_version, versions[]}。
+        // session_info: {session, current_version, versions[]}.
         let v = json_of(session_info(&state, &sid)).await;
         assert_eq!(v["session"], sid);
         assert!(v["current_version"].is_u64());
         assert!(v["versions"].is_array());
         let first = &v["versions"][0];
         for k in ["version", "label", "created_at", "node_count"] {
-            assert!(first.get(k).is_some(), "version 条目缺 {k}: {first}");
+            assert!(first.get(k).is_some(), "version entry missing {k}: {first}");
         }
 
-        // version_doc：{version, document}。
+        // version_doc: {version, document}.
         let v = json_of(version_doc(&state, &sid, 2)).await;
         assert!(v["error"].is_null(), "{v}");
         assert_eq!(v["version"], 2);

@@ -1,7 +1,8 @@
-//! fusion-design-server 入口（issue#31 / DS-0）。
+//! fusion-design-server entry point (issue#31 / DS-0).
 //!
-//! 端口：FUSION_DESIGN_PORT > DEFAULT_PORT(11493，port-registry 登记属主 fusion-design)。
-//! 只绑 127.0.0.1（离线纪律）。日志 stdout（start.sh 重定向落盘）。
+//! Port: FUSION_DESIGN_PORT > DEFAULT_PORT (11493, registered to fusion-design via
+//! port-registry). Binds 127.0.0.1 only (offline discipline). Logs to stdout
+//! (start.sh redirects to file).
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ fn main() -> anyhow::Result<()> {
         Ok(p) => p
             .trim()
             .parse()
-            .map_err(|e| anyhow::anyhow!("FUSION_DESIGN_PORT={p:?} 非法端口: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("FUSION_DESIGN_PORT={p:?} is not a valid port: {e}"))?,
         Err(_) => fd_server::DEFAULT_PORT,
     };
 

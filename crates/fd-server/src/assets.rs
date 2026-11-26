@@ -1,9 +1,12 @@
-//! 静态资产：工作台页面编译期内嵌 + WASM 画布运行时查盘。
+//! Static assets: workbench pages embedded at compile time + WASM canvas runtime
+//! disk lookup.
 //!
-//! HTML/CSS/JS include_str! 编译期嵌入（CI ubuntu 无 wasm 也能编译，零构建顺序耦合）。
-//! fd_host_web_bg.wasm / .js 是 wasm-bindgen 后处理产物（编译期不可得），运行时
-//! 按目录链查盘：FUSION_DESIGN_WASM_DIR env > 可执行文件同目录 > cwd >
-//! target/wasm32-unknown-unknown/{release,debug}。缺失 404 + 诊断提示（fail visibly）。
+//! HTML/CSS/JS embedded at compile time via include_str! (CI ubuntu can compile
+//! without wasm, zero build-order coupling). fd_host_web_bg.wasm / .js are
+//! wasm-bindgen post-processing artifacts (unavailable at compile time), looked
+//! up on disk at runtime along the directory chain: FUSION_DESIGN_WASM_DIR env >
+//! exe directory > cwd > target/wasm32-unknown-unknown/{release,debug}. Missing
+//! assets 404 + diagnostic hint (fail visibly).
 
 use std::sync::OnceLock;
 
@@ -88,7 +91,7 @@ pub fn app_css() -> Resp {
     text_response(include_str!("web/app.css"), "text/css; charset=utf-8")
 }
 
-/// wasm-bindgen JS 胶水（查盘缓存）。
+/// wasm-bindgen JS glue (disk-lookup cache).
 pub fn wasm_js() -> Resp {
     match load_wasm_asset("fd_host_web.js") {
         Some(bytes) => bytes_response(bytes, "application/javascript; charset=utf-8"),
@@ -96,7 +99,7 @@ pub fn wasm_js() -> Resp {
     }
 }
 
-/// wasm 二进制（查盘缓存）。
+/// wasm binary (disk-lookup cache).
 pub fn wasm_bin() -> Resp {
     match load_wasm_asset("fd_host_web_bg.wasm") {
         Some(bytes) => bytes_response(bytes, "application/wasm"),
@@ -106,16 +109,16 @@ pub fn wasm_bin() -> Resp {
 
 fn wasm_missing_hint(name: &str) -> Resp {
     let msg = format!(
-        "{name} 未找到。生成方式：cargo build -p fd-host-web --release --target wasm32-unknown-unknown \
+        "{name} not found. Generate it with: cargo build -p fd-host-web --release --target wasm32-unknown-unknown \
 && wasm-bindgen --target web --out-dir target/wasm32-unknown-unknown/release \
-target/wasm32-unknown-unknown/release/fd_host_web.wasm；\
-或设 FUSION_DESIGN_WASM_DIR 指向含 {name} 的目录"
+target/wasm32-unknown-unknown/release/fd_host_web.wasm; \
+or set FUSION_DESIGN_WASM_DIR to a directory containing {name}"
     );
-    tracing::error!(asset = name, "WASM 画布资产缺失，画布不可用");
+    tracing::error!(asset = name, "WASM canvas asset missing, canvas unavailable");
     not_found_json(&msg)
 }
 
-/// wasm 资产查找目录链。
+/// Directory chain for wasm asset lookup.
 fn wasm_candidate_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(d) = std::env::var("FUSION_DESIGN_WASM_DIR") {
@@ -134,7 +137,8 @@ fn wasm_candidate_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// 按目录链查盘，成功后 OnceLock 缓存（进程内不重读）。
+/// Looks up the directory chain; caches via OnceLock on success (no re-reads
+/// within the process).
 fn load_wasm_asset(name: &str) -> Option<Vec<u8>> {
     static JS: OnceLock<Option<Vec<u8>>> = OnceLock::new();
     static BIN: OnceLock<Option<Vec<u8>>> = OnceLock::new();
@@ -144,13 +148,13 @@ fn load_wasm_asset(name: &str) -> Option<Vec<u8>> {
             let p = dir.join(name);
             match std::fs::read(&p) {
                 Ok(bytes) => {
-                    tracing::info!(path = %p.display(), bytes = bytes.len(), "WASM 资产已加载");
+                    tracing::info!(path = %p.display(), bytes = bytes.len(), "WASM asset loaded");
                     return Some(bytes);
                 }
                 Err(_) => continue,
             }
         }
-        tracing::warn!(asset = name, "WASM 资产在所有候选目录均未找到");
+        tracing::warn!(asset = name, "WASM asset not found in any candidate directory");
         None
     })
     .clone()
@@ -162,74 +166,78 @@ mod tests {
 
     #[test]
     fn workbench_embeds_html_skeleton() {
-        // 编译期嵌入冒烟：D1 三栏骨架 + wasm 加载钩子必须在页内。
+        // Compile-time embedding smoke test: D1 three-pane skeleton + wasm load
+        // hooks must be present in the page.
         let body = include_str!("web/workbench.html");
-        assert!(body.contains("id=\"fd-chat\""), "左栏对话容器");
-        assert!(body.contains("id=\"fd-canvas-stage\""), "中栏画布舞台");
-        assert!(body.contains("id=\"fd-versions\""), "右栏版本列表");
-        assert!(body.contains("fd-canvas-mount"), "mount 校验用 canvas 元素");
-        // 生态出口按钮（issue#33/DS-2）：发给 Code / 存 Artifacts。
-        assert!(body.contains("id=\"send-to-code\""), "发给 Code 按钮");
-        assert!(body.contains("id=\"save-artifact\""), "存 Artifacts 按钮");
-        // wasm 胶水由 app.js 动态 import，三栏骨架 + 桥容器齐备。
+        assert!(body.contains("id=\"fd-chat\""), "left pane chat container");
+        assert!(body.contains("id=\"fd-canvas-stage\""), "middle pane canvas stage");
+        assert!(body.contains("id=\"fd-versions\""), "right pane version list");
+        assert!(body.contains("fd-canvas-mount"), "canvas element used for mount verification");
+        // Ecosystem exit buttons (issue#33/DS-2): send to Code / save to Artifacts.
+        assert!(body.contains("id=\"send-to-code\""), "send-to-code button");
+        assert!(body.contains("id=\"save-artifact\""), "save-artifact button");
+        // wasm glue is dynamically imported by app.js; three-pane skeleton +
+        // bridge container must be present.
         let js = include_str!("web/app.js");
-        assert!(js.contains("fd_host_web.js"), "app.js 须动态加载 wasm 胶水");
+        assert!(js.contains("fd_host_web.js"), "app.js must dynamically load the wasm glue");
         assert!(
             js.contains("fd_host_web_bg.wasm"),
-            "app.js 须加载 wasm 二进制"
+            "app.js must load the wasm binary"
         );
-        assert!(js.contains("page.render-dom"), "须经桥命令驱动 DOM 渲染");
+        assert!(js.contains("page.render-dom"), "DOM rendering must be driven via bridge command");
         assert!(
             js.contains("/api/send-to-code"),
-            "app.js 须调 send-to-code 接口"
+            "app.js must call the send-to-code endpoint"
         );
         assert!(
             js.contains("/api/save-artifact"),
-            "app.js 须调 save-artifact 接口"
+            "app.js must call the save-artifact endpoint"
         );
     }
 
     #[test]
     fn assets_and_api_are_module_relative() {
-        // 经 gateway /shell/fusion-design/ 代理时，绝对路径 /app.css 会打到
-        // gateway 根（404 → 整页无样式）。资源引用与 API 基路径必须相对模块前缀。
+        // When proxied via gateway /shell/fusion-design/, absolute /app.css would
+        // hit the gateway root (404 -> whole page unstyled). Asset references and
+        // the API base path must be relative to the module prefix.
         let html = include_str!("web/index.html");
         assert!(
             html.contains("href=\"app.css\""),
-            "样式表须用相对路径，绝对 /app.css 在 shell 模块内 404"
+            "stylesheet must use a relative path; absolute /app.css 404s inside a shell module"
         );
-        assert!(!html.contains("href=\"/app.css\""), "禁止绝对 /app.css");
-        assert!(html.contains("src=\"landing.js\""), "脚本须用相对路径");
+        assert!(!html.contains("href=\"/app.css\""), "absolute /app.css is forbidden");
+        assert!(html.contains("src=\"landing.js\""), "scripts must use relative paths");
         assert!(
             !html.contains("src=\"/landing.js\""),
-            "禁止绝对 /landing.js"
+            "absolute /landing.js is forbidden"
         );
         let js = include_str!("web/app.js");
         assert!(
             js.contains("import.meta.url"),
-            "API 基路径须由模块 URL 推导，兼容 shell 前缀"
+            "API base path must be derived from the module URL, compatible with the shell prefix"
         );
         assert!(
             !js.contains("fetch(\"/api"),
-            "禁止绝对 /api fetch，shell 模块内会打到 gateway 根"
+            "absolute /api fetch is forbidden; inside a shell module it hits the gateway root"
         );
         let workbench = include_str!("web/workbench.html");
-        assert!(workbench.contains("href=\"app.css\""), "工作台样式相对路径");
-        assert!(workbench.contains("src=\"app.js\""), "工作台脚本相对路径");
+        assert!(workbench.contains("href=\"app.css\""), "workbench stylesheet must be relative");
+        assert!(workbench.contains("src=\"app.js\""), "workbench script must be relative");
         let landing_js = include_str!("web/landing.js");
         assert!(
             landing_js.contains("import.meta.url"),
-            "落地页同样按模块基路径"
+            "landing page must also use the module base path"
         );
         assert!(
             !landing_js.contains("fetch(\"/api"),
-            "落地页禁止绝对 /api fetch"
+            "landing page must not use absolute /api fetch"
         );
     }
 
     #[test]
     fn landing_page_has_claude_shape() {
-        // 落地页结构：三 tab + 搜索 + 排序 + 三个创建卡片 + 列表分页。
+        // Landing page structure: three tabs + search + sort + three create
+        // cards + list pagination.
         let body = include_str!("web/index.html");
         for id in [
             "tab-row",
@@ -241,29 +249,31 @@ mod tests {
             "create-slides",
             "create-design",
         ] {
-            assert!(body.contains(&format!("id=\"{id}\"")), "缺元素 {id}");
+            assert!(body.contains(&format!("id=\"{id}\"")), "missing element {id}");
         }
-        assert!(body.contains("data-i18n=\"tabAll\""), "全部 tab");
-        assert!(body.contains("data-i18n=\"tabMine\""), "我的 tab");
-        assert!(body.contains("data-i18n=\"tabShared\""), "与您共享 tab");
-        // 三个创建卡片跳工作台并带 kind。
+        assert!(body.contains("data-i18n=\"tabAll\""), "all tab");
+        assert!(body.contains("data-i18n=\"tabMine\""), "mine tab");
+        assert!(body.contains("data-i18n=\"tabShared\""), "shared-with-you tab");
+        // Three create cards navigate to the workbench with a kind.
         for kind in ["document", "slides", "design"] {
             assert!(
                 body.contains(&format!("workbench.html?kind={kind}")),
-                "创建卡片 {kind} 须跳工作台"
+                "create card {kind} must navigate to the workbench"
             );
         }
-        // 预填提示词：交互形状对齐，但不自称 Claude（本项目不是 Anthropic 产品）。
+        // Pre-filled prompts: interaction shape aligned, but must not claim to be
+        // Claude (this project is not an Anthropic product).
         let js = include_str!("web/landing.js");
-        assert!(js.contains("Make a Design artifact for "), "设计预填");
-        assert!(js.contains("Make a Document artifact about "), "文档预填");
-        assert!(js.contains("Make a Slides artifact about "), "幻灯片预填");
-        assert!(!js.contains("Claude"), "提示词不得出现 Claude");
+        assert!(js.contains("Make a Design artifact for "), "design prefill");
+        assert!(js.contains("Make a Document artifact about "), "document prefill");
+        assert!(js.contains("Make a Slides artifact about "), "slides prefill");
+        assert!(!js.contains("Claude"), "prompts must not mention Claude");
     }
 
     #[test]
     fn artifact_viewer_embeds_skeleton() {
-        // 查看器：就地看正文 + 下载 + 回工作台继续，资源全部相对路径。
+        // Viewer: view content in place + download + back to workbench to
+        // continue; all assets relative paths.
         let body = include_str!("web/artifact.html");
         for id in [
             "artifact-frame",
@@ -272,116 +282,120 @@ mod tests {
             "artifact-export",
             "artifact-open-workbench",
         ] {
-            assert!(body.contains(&format!("id=\"{id}\"")), "缺元素 {id}");
+            assert!(body.contains(&format!("id=\"{id}\"")), "missing element {id}");
         }
-        assert!(body.contains("href=\"app.css\""), "查看器样式相对路径");
-        assert!(body.contains("src=\"artifact.js\""), "查看器脚本相对路径");
+        assert!(body.contains("href=\"app.css\""), "viewer stylesheet must be relative");
+        assert!(body.contains("src=\"artifact.js\""), "viewer script must be relative");
         let js = include_str!("web/artifact.js");
-        assert!(js.contains("import.meta.url"), "查看器须按模块基路径取 API");
-        assert!(!js.contains("fetch(\"/api"), "查看器禁止绝对 /api fetch");
-        assert!(js.contains("api/artifact/"), "查看器须调 api/artifact/<id>");
-        assert!(js.contains("srcdoc"), "HTML 正文须经 iframe 渲染");
+        assert!(js.contains("import.meta.url"), "viewer must derive the API base from the module path");
+        assert!(!js.contains("fetch(\"/api"), "viewer must not use absolute /api fetch");
+        assert!(js.contains("api/artifact/"), "viewer must call api/artifact/<id>");
+        assert!(js.contains("srcdoc"), "HTML content must be rendered via iframe");
         let landing = include_str!("web/landing.js");
         assert!(
             landing.contains("artifact.html?id="),
-            "卡片点击须打开查看器"
+            "card click must open the viewer"
         );
     }
 
     #[test]
     fn pages_follow_shell_theme_and_lang_standard() {
-        // spec §2.1：主题/语言由 shell 统一管，模块不实现不复刻——
-        // 页面不得自带 lang-select / theme-toggle，也不得另立 fd-lang/fd-theme 键。
+        // spec §2.1: theme/lang are managed centrally by the shell; modules must
+        // not implement or duplicate them — pages must not ship their own
+        // lang-select / theme-toggle, nor introduce separate fd-lang/fd-theme keys.
         for html in [
             include_str!("web/index.html"),
             include_str!("web/workbench.html"),
             include_str!("web/artifact.html"),
         ] {
-            assert!(!html.contains("lang-select"), "禁止模块自带语言切换");
-            assert!(!html.contains("theme-toggle"), "禁止模块自带主题切换");
+            assert!(!html.contains("lang-select"), "module-provided language switch is forbidden");
+            assert!(!html.contains("theme-toggle"), "module-provided theme toggle is forbidden");
         }
         for js in [
             include_str!("web/landing.js"),
             include_str!("web/app.js"),
             include_str!("web/artifact.js"),
         ] {
-            assert!(!js.contains("fd-lang"), "禁止另立语言键 fd-lang");
-            assert!(!js.contains("fd-theme"), "禁止另立主题键 fd-theme");
+            assert!(!js.contains("fd-lang"), "separate language key fd-lang is forbidden");
+            assert!(!js.contains("fd-theme"), "separate theme key fd-theme is forbidden");
             assert!(
                 js.contains("shell-sync.js"),
-                "三页统一经 shell-sync 跟随外壳"
+                "all three pages must follow the shell via shell-sync"
             );
         }
         let sync = include_str!("web/shell-sync.js");
-        assert!(sync.contains("fusion.shell.theme"), "回退须用 shell 约定键");
-        assert!(sync.contains("fusion.shell.lang"), "回退须用 shell 约定键");
-        assert!(sync.contains("fusion:theme"), "须监听外壳主题事件");
-        assert!(sync.contains("fusion:lang"), "须监听外壳语言事件");
+        assert!(sync.contains("fusion.shell.theme"), "fallback must use the shell convention key");
+        assert!(sync.contains("fusion.shell.lang"), "fallback must use the shell convention key");
+        assert!(sync.contains("fusion:theme"), "must listen for shell theme events");
+        assert!(sync.contains("fusion:lang"), "must listen for shell lang events");
     }
 
     #[test]
     fn workbench_has_model_select() {
-        // 工作台须可切模型：下拉排除 embedding 类（bge 等），缺省用 chat_model。
+        // Workbench must allow model switching: the dropdown excludes embedding
+        // models (bge etc.), defaulting to chat_model.
         let html = include_str!("web/workbench.html");
-        assert!(html.contains("id=\"model-select\""), "缺模型下拉");
+        assert!(html.contains("id=\"model-select\""), "missing model dropdown");
         let js = include_str!("web/app.js");
-        assert!(js.contains("chat_model"), "须以服务端 chat_model 为缺省");
+        assert!(js.contains("chat_model"), "must default to the server-side chat_model");
         assert!(
             js.contains("model: state.model || undefined"),
-            "generate/iterate 须携带所选模型"
+            "generate/iterate must carry the selected model"
         );
-        assert!(js.contains("const fam ="), "须按对话模型家族过滤");
+        assert!(js.contains("const fam ="), "must filter by chat model family");
         assert!(
             js.contains("const bad ="),
-            "须排除图/视频/TTS/嵌入等非对话模型"
+            "must exclude non-chat models (image/video/TTS/embedding)"
         );
     }
 
     #[test]
     fn workbench_has_shell_module_ux() {
-        // issue#42 shell 模块化：Token 面板 + 保存 .fusiondesign + 内嵌模式 + 拖拽落库。
+        // issue#42 shell modularization: Token panel + save .fusiondesign +
+        // embedded mode + drag persistence.
         let html = include_str!("web/workbench.html");
-        assert!(html.contains("id=\"fd-tokens\""), "缺 Token 面板");
+        assert!(html.contains("id=\"fd-tokens\""), "missing Token panel");
         assert!(
             html.contains("id=\"save-file\""),
-            "缺保存 .fusiondesign 按钮"
+            "missing save .fusiondesign button"
         );
         let js = include_str!("web/app.js");
-        assert!(js.contains("loadTokenPanel"), "须加载 Token 面板");
-        assert!(js.contains("applyToken"), "须支持 Token 应用到选中节点");
-        assert!(js.contains("onWasmNodeDrag"), "须消费 node.drag 持久化拖拽");
-        assert!(js.contains("saveFile"), "须能保存 .fusiondesign");
-        assert!(js.contains("embedded"), "须支持 ?embedded=1 隐藏自有导航");
+        assert!(js.contains("loadTokenPanel"), "must load the Token panel");
+        assert!(js.contains("applyToken"), "must support applying a Token to the selected node");
+        assert!(js.contains("onWasmNodeDrag"), "must consume node.drag to persist drags");
+        assert!(js.contains("saveFile"), "must be able to save .fusiondesign");
+        assert!(js.contains("embedded"), "must support ?embedded=1 to hide its own navigation");
         assert!(
             js.contains("resp.status === 401") || js.contains("resp.status===401"),
-            "401 须内联报错不跳转（#28 合同）"
+            "401 must show an inline error, no redirect (#28 contract)"
         );
-        assert!(!js.contains("location.href"), "模块内禁止页面级跳转");
+        assert!(!js.contains("location.href"), "page-level navigation is forbidden inside a module");
         let css = include_str!("web/app.css");
-        assert!(css.contains(".token-item"), "缺 Token 条目样式");
-        assert!(css.contains("body.embedded"), "缺内嵌模式样式");
+        assert!(css.contains(".token-item"), "missing Token item style");
+        assert!(css.contains("body.embedded"), "missing embedded-mode style");
         let manifest = include_str!("../../../web/manifest.json");
         assert!(
             manifest.contains("\"id\": \"fusion-design\""),
-            "缺 shell manifest"
+            "missing shell manifest"
         );
-        assert!(manifest.contains("\"entry\""), "manifest 缺 entry");
+        assert!(manifest.contains("\"entry\""), "manifest missing entry");
     }
 
     #[test]
     fn workbench_has_canvas_ux_minimum() {
-        // issue#35 最小画布 UX：图层列表 + 节点选中联动 + 撤销/重做可见状态。
+        // issue#35 minimum canvas UX: layer list + node selection sync + visible
+        // undo/redo state.
         let html = include_str!("web/workbench.html");
-        assert!(html.contains("id=\"fd-layers\""), "缺图层列表面板");
-        assert!(html.contains("id=\"undo-btn\""), "缺撤销按钮");
-        assert!(html.contains("id=\"redo-btn\""), "缺重做按钮");
+        assert!(html.contains("id=\"fd-layers\""), "missing layer list panel");
+        assert!(html.contains("id=\"undo-btn\""), "missing undo button");
+        assert!(html.contains("id=\"redo-btn\""), "missing redo button");
         let js = include_str!("web/app.js");
-        assert!(js.contains("node.select"), "须驱动 wasm 选中高亮");
-        assert!(js.contains("pollWasmEvents"), "须消费画布点击事件同步图层");
-        assert!(js.contains("stepVersion"), "须有版本栈步进（undo/redo）");
-        assert!(js.contains("updateUndoRedo"), "undo/redo 须有可见禁用态");
+        assert!(js.contains("node.select"), "must drive wasm selection highlight");
+        assert!(js.contains("pollWasmEvents"), "must consume canvas click events to sync layers");
+        assert!(js.contains("stepVersion"), "must have version stack stepping (undo/redo)");
+        assert!(js.contains("updateUndoRedo"), "undo/redo must have a visible disabled state");
         let css = include_str!("web/app.css");
-        assert!(css.contains(".layer-item"), "缺图层条目样式");
+        assert!(css.contains(".layer-item"), "missing layer item style");
     }
 
     #[test]
@@ -390,12 +404,12 @@ mod tests {
         assert!(
             dirs.iter()
                 .any(|d| d.ends_with("target/wasm32-unknown-unknown/release")),
-            "须覆盖 bindgen release 产物目录"
+            "must cover the bindgen release output directory"
         );
         assert!(
             dirs.iter()
                 .any(|d| d.ends_with("target/wasm32-unknown-unknown/debug")),
-            "须覆盖 bindgen debug 产物目录"
+            "must cover the bindgen debug output directory"
         );
     }
 }

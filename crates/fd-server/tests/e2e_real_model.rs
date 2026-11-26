@@ -1,17 +1,18 @@
-//! 真模型 E2E（issue#31 验收）：--ignored 手动运行，须 gateway :11432 在线
-//! 且 FUSION_CLIENT_KEY 有效、视觉模型已加载。
+//! Real-model E2E (issue#31 acceptance): run manually with --ignored; requires
+//! gateway :11432 online, a valid FUSION_CLIENT_KEY, and the vision model loaded.
 //!
-//! 运行：cargo test -p fd-server --test e2e_real_model -- --ignored --test-threads=1
-//! 覆盖 UC-D1 主链路：health(deep) → generate → iterate → restore →
-//! export(html/react) → version 查询 → rollback。HTTP 客户端用 std TcpStream
-//! 手写（fd-server 禁出站 HTTP 库，测试同口径）。
+//! Run: cargo test -p fd-server --test e2e_real_model -- --ignored --test-threads=1
+//! Covers the UC-D1 main flow: health(deep) -> generate -> iterate -> restore ->
+//! export(html/react) -> version query -> rollback. The HTTP client is hand-written
+//! with std TcpStream (fd-server forbids outbound HTTP libraries; the test follows
+//! the same discipline).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-/// 手写 HTTP/1.1 请求（Connection: close，读至 EOF）。
+/// Hand-written HTTP/1.1 request (Connection: close, read to EOF).
 fn http_req(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("连接测试服务器");
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to test server");
     let body_bytes = body.unwrap_or("").as_bytes();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
@@ -35,7 +36,7 @@ fn http_req(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, St
     (status, body)
 }
 
-/// 找空闲端口（bind :0 后立刻释放，竞态窗口极小）。
+/// Finds a free port (bind :0 then release immediately; tiny race window).
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -45,12 +46,12 @@ fn free_port() -> u16 {
 }
 
 fn json_field(body: &str, key: &str) -> serde_json::Value {
-    let v: serde_json::Value = serde_json::from_str(body).expect("响应体须为 JSON");
+    let v: serde_json::Value = serde_json::from_str(body).expect("response body must be JSON");
     v.get(key).cloned().unwrap_or(serde_json::Value::Null)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "需真模型：gateway 11432 在线 + FUSION_CLIENT_KEY + 视觉模型已加载"]
+#[ignore = "requires a real model: gateway 11432 online + FUSION_CLIENT_KEY + vision model loaded"]
 async fn uc_d1_full_flow_with_real_model() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -60,7 +61,7 @@ async fn uc_d1_full_flow_with_real_model() {
     tokio::spawn(async move {
         let _ = fd_server::start_server(port, state).await;
     });
-    // 等监听就绪。
+    // Wait for the listener to be ready.
     for _ in 0..50 {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             break;
@@ -68,69 +69,69 @@ async fn uc_d1_full_flow_with_real_model() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    // 1. deep health：gateway + 模型 + 鉴权全通。
+    // 1. deep health: gateway + model + auth all pass.
     let (st, body) = http_req(port, "GET", "/api/health?deep=1", None);
-    assert_eq!(st, 200, "health 状态码: {body}");
+    assert_eq!(st, 200, "health status: {body}");
     let mlx = json_field(&body, "mlx");
     assert_eq!(
         mlx.get("available").and_then(|v| v.as_bool()),
         Some(true),
-        "deep health 须探测可用: {body}"
+        "deep health must probe available: {body}"
     );
     assert_eq!(
         mlx.get("auth_ok").and_then(|v| v.as_bool()),
         Some(true),
-        "deep health 鉴权须通过: {body}"
+        "deep health auth must pass: {body}"
     );
 
-    // 2. generate：登录页。
+    // 2. generate: login page.
     let (st, body) = http_req(
         port,
         "POST",
         "/api/generate",
-        Some(r#"{"prompt":"登录页，邮箱+密码表单，主色 indigo"}"#),
+        Some(r#"{"prompt":"Login page with an email + password form, indigo primary color"}"#),
     );
-    assert_eq!(st, 200, "generate 状态码: {body}");
+    assert_eq!(st, 200, "generate status: {body}");
     let sid = json_field(&body, "session")
         .as_str()
         .expect("session id")
         .to_string();
-    assert!(sid.starts_with("s-"), "会话 id 形状: {sid}");
+    assert!(sid.starts_with("s-"), "session id shape: {sid}");
     assert!(
         json_field(&body, "document")
             .as_str()
             .unwrap_or("")
             .contains("pages"),
-        "生成的文档须含 pages"
+        "generated document must contain pages"
     );
     assert_eq!(
         json_field(&body, "current_version").as_u64(),
         Some(1),
-        "首版须为 v1"
+        "first version must be v1"
     );
 
-    // 3. iterate：全页重写链路。
+    // 3. iterate: full-page rewrite flow.
     let (st, body) = http_req(
         port,
         "POST",
         "/api/iterate",
         Some(&format!(
-            r#"{{"session":"{sid}","instruction":"把主按钮文案改成 Sign In"}}"#
+            r#"{{"session":"{sid}","instruction":"Change the primary button text to Sign In"}}"#
         )),
     );
-    assert_eq!(st, 200, "iterate 状态码: {body}");
+    assert_eq!(st, 200, "iterate status: {body}");
     assert_eq!(
         json_field(&body, "current_version").as_u64(),
         Some(2),
-        "迭代须产 v2: {body}"
+        "iteration must produce v2: {body}"
     );
     assert_eq!(
         json_field(&body, "session").as_str().unwrap_or(""),
         sid,
-        "同会话"
+        "same session"
     );
 
-    // 4. restore：截图还原（fixtures/sample-ui.png base64）。
+    // 4. restore: screenshot restore (fixtures/sample-ui.png base64).
     let png = include_bytes!("fixtures/sample-ui.png");
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
@@ -139,37 +140,37 @@ async fn uc_d1_full_flow_with_real_model() {
         "POST",
         "/api/restore",
         Some(&format!(
-            r#"{{"image_base64":"{b64}","hint":"导航栏+两张卡片"}}"#
+            r#"{{"image_base64":"{b64}","hint":"A navigation bar plus two cards"}}"#
         )),
     );
-    assert_eq!(st, 200, "restore 状态码: {body}");
+    assert_eq!(st, 200, "restore status: {body}");
     let rsid = json_field(&body, "session")
         .as_str()
         .expect("restore session")
         .to_string();
-    assert_ne!(rsid, sid, "还原须新会话");
+    assert_ne!(rsid, sid, "restore must create a new session");
     assert!(
         json_field(&body, "document")
             .as_str()
             .unwrap_or("")
             .contains("pages"),
-        "还原文档须含 pages"
+        "restored document must contain pages"
     );
 
-    // 5. export：html + react（对生成会话）。
+    // 5. export: html + react (against the generated session).
     let (st, body) = http_req(
         port,
         "POST",
         "/api/export",
         Some(&format!(r#"{{"session":"{sid}","format":"html"}}"#)),
     );
-    assert_eq!(st, 200, "export html 状态码: {body}");
+    assert_eq!(st, 200, "export html status: {body}");
     assert!(
         json_field(&body, "content")
             .as_str()
             .unwrap_or("")
             .contains("<!DOCTYPE html>"),
-        "HTML 导出须为完整文档"
+        "HTML export must be a complete document"
     );
     let (st, body) = http_req(
         port,
@@ -177,24 +178,24 @@ async fn uc_d1_full_flow_with_real_model() {
         "/api/export",
         Some(&format!(r#"{{"session":"{sid}","format":"react"}}"#)),
     );
-    assert_eq!(st, 200, "export react 状态码: {body}");
+    assert_eq!(st, 200, "export react status: {body}");
     assert!(
         json_field(&body, "content")
             .as_str()
             .unwrap_or("")
             .contains("export"),
-        "React 导出须为组件代码"
+        "React export must be component code"
     );
 
-    // 6. version 查询 + rollback 到 v1。
+    // 6. version query + rollback to v1.
     let (st, body) = http_req(port, "GET", &format!("/api/version/{sid}/1"), None);
-    assert_eq!(st, 200, "version 查询状态码: {body}");
+    assert_eq!(st, 200, "version query status: {body}");
     assert!(
         json_field(&body, "document")
             .as_str()
             .unwrap_or("")
             .contains("pages"),
-        "v1 文档须可查"
+        "v1 document must be queryable"
     );
     let (st, body) = http_req(
         port,
@@ -202,18 +203,18 @@ async fn uc_d1_full_flow_with_real_model() {
         "/api/rollback",
         Some(&format!(r#"{{"session":"{sid}","version":1}}"#)),
     );
-    assert_eq!(st, 200, "rollback 状态码: {body}");
+    assert_eq!(st, 200, "rollback status: {body}");
     assert_eq!(
         json_field(&body, "current_version").as_u64().unwrap_or(0),
         1,
-        "回退后 current=1"
+        "current=1 after rollback"
     );
 
-    // 7. 会话列表含两会话。
+    // 7. session list contains both sessions.
     let (st, body) = http_req(port, "GET", "/api/sessions", None);
-    assert_eq!(st, 200, "sessions 状态码: {body}");
+    assert_eq!(st, 200, "sessions status: {body}");
     assert!(
         body.contains(&sid) && body.contains(&rsid),
-        "会话列表须含两会话: {body}"
+        "session list must contain both sessions: {body}"
     );
 }

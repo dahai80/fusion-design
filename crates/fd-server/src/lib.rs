@@ -1,16 +1,20 @@
-//! fd-server — Fusion-Design web 服务面（issue#31 / DS-0）。
+//! fd-server — Fusion-Design web service surface (issue#31 / DS-0).
 //!
-//! 三栏 D1 工作台（对话生成/迭代 + WASM 画布三视口预览 + 版本回溯 + fd-codegen 导出）
-//! 的服务端：hyper 入站监听 127.0.0.1:11493（端口走 port-registry 登记属主 fusion-design），
-//! 暴露 JSON API + 托管 fd-host-web WASM 画布 + 内嵌工作台静态页。
+//! Server for the three-pane D1 workbench (chat generation/iteration + WASM canvas
+//! three-viewport preview + version history + fd-codegen export): hyper inbound
+//! listener on 127.0.0.1:11493 (port registered to fusion-design via port-registry),
+//! exposing a JSON API + hosting the fd-host-web WASM canvas + embedded workbench
+//! static page.
 //!
-//! 离线硬约束：本 crate **只有入站监听**，零出站 HTTP——所有模型调用经
-//! fd-ai-adapter（唯一出站 crate，gateway 11432 / MLX 11434）。deny-external-http
-//! 门禁对 fd-server 白名单入站栈（hyper/hyper-util/http-body-util/http），
-//! 禁止 reqwest 等客户端库。
+//! Offline hard constraint: this crate **only accepts inbound connections**, zero
+//! outbound HTTP — all model calls go through fd-ai-adapter (the only outbound
+//! crate, gateway 11432 / MLX 11434). The deny-external-http gate allowlists
+//! fd-server's inbound stack (hyper/hyper-util/http-body-util/http); client
+//! libraries such as reqwest are forbidden.
 //!
-//! 版本模型：会话内版本栈（内存态，v1）。命名版本 API 不复活（H-A14 教训——
-//! 服务端会话栈是独立薄层，非 canvas-core 内嵌整快照方案）。
+//! Version model: in-session version stack (in-memory, v1). The named-version API
+//! is not revived (H-A14 lesson — the server-side session stack is a thin
+//! standalone layer, not the canvas-core embedded-whole-snapshot approach).
 
 pub mod assets;
 pub mod handlers;
@@ -20,10 +24,10 @@ pub mod state;
 
 use std::sync::Arc;
 
-/// 默认监听端口（port-registry.yaml 登记属主 fusion-design）。
+/// Default listening port (port-registry.yaml registered owner: fusion-design).
 pub const DEFAULT_PORT: u16 = 11493;
 
-/// 服务共享状态。
+/// Shared service state.
 pub struct AppState {
     pub sessions: state::SessionStore,
     pub registry: std::sync::Mutex<fd_design_system::DesignSystemRegistry>,
@@ -46,10 +50,11 @@ impl Default for AppState {
     }
 }
 
-/// 启动 HTTP 服务（阻塞当前 async 任务直至 listener 关闭）。
+/// Starts the HTTP service (blocks the current async task until the listener
+/// closes).
 ///
-/// `port` 来自 FUSION_DESIGN_PORT 覆盖或 DEFAULT_PORT；只绑 127.0.0.1
-/// （离线纪律：无 0.0.0.0 绑定，registry 规则 4）。
+/// `port` comes from the FUSION_DESIGN_PORT override or DEFAULT_PORT; binds
+/// 127.0.0.1 only (offline discipline: no 0.0.0.0 binding, registry rule 4).
 pub async fn start_server(port: u16, state: Arc<AppState>) -> anyhow::Result<()> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -58,7 +63,7 @@ pub async fn start_server(port: u16, state: Arc<AppState>) -> anyhow::Result<()>
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "accept 失败，跳过该连接");
+                tracing::warn!(error = %e, "accept failed, skipping connection");
                 continue;
             }
         };
@@ -73,7 +78,7 @@ pub async fn start_server(port: u16, state: Arc<AppState>) -> anyhow::Result<()>
                 .serve_connection(io, service)
                 .await
             {
-                tracing::debug!(peer = %peer, error = %e, "http1 连接结束（非致命）");
+                tracing::debug!(peer = %peer, error = %e, "http1 connection ended (non-fatal)");
             }
         });
     }
@@ -85,7 +90,8 @@ mod tests {
 
     #[test]
     fn default_port_is_registry_allocated() {
-        // port-registry.yaml：fusion-design 11493。改端口须同步改本常量 + registry。
+        // port-registry.yaml: fusion-design 11493. Changing the port requires
+        // updating this constant + the registry together.
         assert_eq!(DEFAULT_PORT, 11493);
     }
 
@@ -96,7 +102,7 @@ mod tests {
         assert_eq!(
             reg.list().len(),
             4,
-            "4 内置预设：apple-hig/minimal-dashboard/robot-sim/desigma-aligned"
+            "4 built-in presets: apple-hig/minimal-dashboard/robot-sim/desigma-aligned"
         );
     }
 }
