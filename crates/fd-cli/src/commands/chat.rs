@@ -1,17 +1,23 @@
-//! A-3：Chat 子命令 handler（从 main.rs 拆出）。
+//! A-3: Chat subcommand handler (split out of main.rs).
 //!
-//! 机器可读流式 chat：流式推理接口，供 fusion-studio subprocess 与 CLI 管道共用。
-//! 鉴权 / X-Fusion-Route header / endpoint 解析复用 fd-ai-adapter，调用方不重实现。
+//! Machine-readable streaming chat: streaming inference interface shared by the
+//! fusion-studio subprocess and CLI pipelines.
+//! Auth / X-Fusion-Route header / endpoint resolution reuse fd-ai-adapter; callers do not
+//! reimplement them.
 //!
-//! 消费方声明（issue #17 → issue #20 演进）：issue #17 原设想此子命令为 studio
-//! subprocess 入口取代直连 MLX，早期核实认为 studio 走 fusion-gateway TCP 故无
-//! studio 消费方。后核实 studio DesignBridge.sendDesignChat 实为内联 URLSession
-//! HTTP（自管 Bearer + SSE 解析 + X-Fusion-Route），重复实现 adapter 保护逻辑。
-//! issue #20 闭合方向：studio 改调本子命令，鉴权/RouteGuard/validate_localhost/
-//! false-green(check_generate) 复用 adapter，调用方不重实现。为兼容 studio 现有
-//! runFusionDesignStream 子进程解析器（按 `data: ` 前缀取 choices[0].delta.content，
-//! 遇 `data: [DONE]` 结束），新增 `--format sse` 输出 raw OpenAI text/event-stream。
-//! `--format ndjson`（默认）保留 issue #17 既有契约（每行一帧 delta/chat_done/error）。
+//! Consumer declaration (issue #17 → issue #20 evolution): issue #17 originally envisioned
+//! this subcommand as the studio subprocess entry replacing direct MLX access; early
+//! verification assumed studio went through fusion-gateway TCP so there was no studio
+//! consumer. Later verification showed studio DesignBridge.sendDesignChat is actually
+//! inline URLSession HTTP (self-managed Bearer + SSE parsing + X-Fusion-Route),
+//! duplicating adapter protection logic.
+//! issue #20 closing direction: studio calls this subcommand;
+//! auth/RouteGuard/validate_localhost/false-green(check_generate) reuse the adapter,
+//! callers do not reimplement them. For compatibility with studio's existing
+//! runFusionDesignStream subprocess parser (takes choices[0].delta.content on the
+//! `data: ` prefix, ends at `data: [DONE]`), `--format sse` was added to emit raw OpenAI
+//! text/event-stream. `--format ndjson` (default) keeps the existing issue #17 contract
+//! (one delta/chat_done/error frame per line).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -42,25 +48,26 @@ pub async fn run(
         fd_ai_adapter::FusionMlxClient::resolve_endpoint(&endpoint)?,
     )?;
 
-    // system prompt：--system-prompt-file 优先于内联 --system-prompt
+    // system prompt: --system-prompt-file takes precedence over inline --system-prompt
     let sys = match system_prompt_file {
         Some(p) => read_file_capped(&p)?,
         None => system_prompt,
     };
-    // RAG 上下文注入 system prompt 尾部
+    // Inject RAG context at the tail of the system prompt
     let sys = match rag_context_file {
         Some(p) => {
             let rag = read_file_capped(&p)?;
             if sys.is_empty() {
                 rag
             } else {
+                // i18n: user-facing (LLM prompt separator)
                 format!("{sys}\n\n--- 以下为参考上下文 ---\n{rag}")
             }
         }
         None => sys,
     };
 
-    // messages：--messages-file 多轮历史（JSON 数组），缺省则空
+    // messages: --messages-file multi-turn history (JSON array), empty if absent
     let mut messages: Vec<MlxChatMessage> = match messages_file {
         Some(p) => {
             let raw = read_file_capped(&p)?;
@@ -72,7 +79,7 @@ pub async fn run(
         }
         None => Vec::new(),
     };
-    // 前置 system 消息（若给定）
+    // Prepend the system message (when given)
     if !sys.is_empty() {
         messages.insert(
             0,
@@ -83,20 +90,23 @@ pub async fn run(
         );
     }
     if messages.is_empty() {
-        anyhow::bail!("chat: 无 messages（--messages-file 缺失或空）且无 system prompt");
+        anyhow::bail!("chat: no messages (--messages-file missing or empty) and no system prompt");
     }
-    // L-8：role 护栏——非法 role 直接 bail，不透传给 MLX 引发歧义错误。
+    // L-8: role guard — bail directly on invalid roles instead of forwarding them to MLX
+    // and triggering ambiguous errors.
     for m in &messages {
         if !matches!(m.role.as_str(), "system" | "user" | "assistant") {
-            anyhow::bail!("chat: 非法 role '{}'，仅支持 system/user/assistant", m.role);
+            anyhow::bail!("chat: invalid role '{}', only system/user/assistant are supported", m.role);
         }
     }
-    tracing::info!(model = %model, count = messages.len(), "chat: 流式推理开始");
+    tracing::info!(model = %model, count = messages.len(), "chat: streaming inference started");
 
-    // 成帧输出：--format 选 ndjson（issue #17 契约）或 sse（raw OpenAI
-    // text/event-stream，对齐 fusion-studio runFusionDesignStream 解析器）。
-    // 子进程管道 block-buffered，每帧须 flush stdout，否则 studio readabilityHandler
-    // 攒块到缓冲满才收，流式体验退化。H-A16/P1-8 回溯已废：studio 经本子命令消费。
+    // Framed output: --format selects ndjson (issue #17 contract) or sse (raw OpenAI
+    // text/event-stream, aligned with the fusion-studio runFusionDesignStream parser).
+    // Subprocess pipes are block-buffered; each frame must flush stdout, otherwise studio's
+    // readabilityHandler only receives data when the buffer fills, degrading the streaming
+    // experience. The H-A16/P1-8 retrospective item is obsolete: studio consumes via this
+    // subcommand.
     if stream && json {
         let s = fd_ai_adapter::chat_stream_messages(client, model, messages, max_tokens).await;
         futures::pin_mut!(s);
@@ -138,17 +148,17 @@ pub async fn run(
                         }
                     }
                     let _ = stdout.flush();
-                    tracing::error!(error = %e, "chat: 流式错误");
+                    tracing::error!(error = %e, "chat: streaming error");
                     stream_failed = Some(e.to_string());
                     break;
                 }
             }
         }
         if let Some(e) = stream_failed {
-            anyhow::bail!("chat 流式失败: {e}");
+            anyhow::bail!("chat streaming failed: {e}");
         }
     } else {
-        anyhow::bail!("chat: 当前仅支持 --stream --json 流式输出（--format ndjson|sse 选成帧）");
+        anyhow::bail!("chat: only --stream --json streaming output is currently supported (--format ndjson|sse selects framing)");
     }
     Ok(())
 }

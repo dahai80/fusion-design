@@ -1,6 +1,7 @@
-//! A-3：Export 子命令 handler（从 main.rs 拆出）。
+//! A-3: Export subcommand handler (split out of main.rs).
 //!
-//! 单文档导出到指定格式，可选经 fd-ecosystem IPC 通知 FusionCLI。
+//! Exports a single document to the given format, optionally notifying FusionCLI via
+//! fd-ecosystem IPC.
 
 use std::path::PathBuf;
 
@@ -17,11 +18,12 @@ pub async fn run(
     let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
     let reg = build_registry(&doc);
     let fmt: fd_export::ExportFormat = format.into();
-    // E-11：IPC format 字段旧实现 `{:?}` Debug 输出大写（"Html"/"Svg"），
-    // 与文件扩展名/IPC 消费方期望的小写不一致。改用 extension() 稳定小写契约。
+    // E-11: the IPC format field's old implementation used `{:?}` Debug output, which is
+    // uppercase ("Html"/"Svg") and inconsistent with the lowercase expected by file
+    // extensions/IPC consumers. Switched to extension() for a stable lowercase contract.
     let format_str = fmt.extension().to_string();
     let files = fd_export::Exporter::from_pen_document_with_tokens(&doc, fmt, &out, &reg)?;
-    println!("已导出 {} 个页面到 {out:?}", files.len());
+    println!("exported {} page(s) to {out:?}", files.len());
     if let Some(base) = ipc_base {
         let link = fd_ecosystem::EcosystemLink::new(&base);
         let msg = fd_ecosystem::LinkMessage {
@@ -33,7 +35,7 @@ pub async fn run(
             }),
         };
         link.send(&msg)?;
-        tracing::info!("export: IPC 消息已发送");
+        tracing::info!("export: IPC message sent");
     }
     Ok(())
 }

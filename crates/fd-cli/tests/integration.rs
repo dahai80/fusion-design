@@ -1,7 +1,9 @@
-// OPS-10：fd-cli 集成测试。
-// 验证两个零网络/可确定性子命令：list-design-systems（内置 preset，无网络）
-// + health（mock 127.0.0.1 TcpListener，手写极简 HTTP 响应）。
-// Rule 5：可确定性验证不路由模型；不引 mock server crate，手写 TcpListener 最小依赖。
+// OPS-10: fd-cli integration tests.
+// Verifies two zero-network/deterministic subcommands: list-design-systems (built-in
+// presets, no network) + health (mock 127.0.0.1 TcpListener, hand-written minimal HTTP
+// response).
+// Rule 5: deterministic verification does not route to a model; no mock-server crate is
+// introduced — a hand-written TcpListener keeps deps minimal.
 
 use std::process::Command;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,28 +11,29 @@ use tokio::net::TcpListener;
 
 fn bin() -> String {
     std::env::var("CARGO_BIN_EXE_fusion-design")
-        .expect("CARGO_BIN_EXE_fusion-design 应由 cargo test 自动注入")
+        .expect("CARGO_BIN_EXE_fusion-design should be injected automatically by cargo test")
 }
 
-// list-design-systems：无网络，验证内置 3 preset 全部打印。
+// list-design-systems: no network; verify all 3 built-in presets are printed.
 #[test]
 fn list_design_systems_prints_builtin_presets() {
     let output = Command::new(bin())
         .arg("list-design-systems")
         .output()
-        .expect("fusion-design 进程应能启动");
+        .expect("fusion-design process should start");
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::info!(stdout = %stdout, "list-design-systems stdout");
-    assert!(stdout.contains("apple-hig"), "应含 apple-hig: {stdout}");
+    assert!(stdout.contains("apple-hig"), "should contain apple-hig: {stdout}");
     assert!(
         stdout.contains("minimal-dashboard"),
-        "应含 minimal-dashboard: {stdout}"
+        "should contain minimal-dashboard: {stdout}"
     );
-    assert!(stdout.contains("robot-sim"), "应含 robot-sim: {stdout}");
+    assert!(stdout.contains("robot-sim"), "should contain robot-sim: {stdout}");
 }
 
-// health：mock 返 200 + 非空 data → available:true，退出码 0。
-// multi_thread：output() 阻塞当前 worker，单线程会饿死 mock accept 任务。
+// health: mock returns 200 + non-empty data → available:true, exit code 0.
+// multi_thread: output() blocks the current worker; single-thread would starve the mock
+// accept task.
 #[tokio::test(flavor = "multi_thread")]
 async fn health_available_exits_zero() {
     let url = mock_models_server(r#"{"data":[{"id":"test-model"}]}"#).await;
@@ -40,22 +43,23 @@ async fn health_available_exits_zero() {
         .arg(&url)
         .env("FUSION_MLX_BASE_URL", &url)
         .output()
-        .expect("fusion-design 进程应能启动");
+        .expect("fusion-design process should start");
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::info!(stdout = %stdout, status = output.status.code(), "health available stdout");
     assert!(
         stdout.contains("\"available\": true") || stdout.contains("\"available\":true"),
-        "应报 available:true: {stdout}"
+        "should report available:true: {stdout}"
     );
     assert!(
         stdout.contains("test-model"),
-        "应列出 mock 模型名: {stdout}"
+        "should list the mock model name: {stdout}"
     );
-    // rtk 代理吞退出码：用文案校验而非 status.code()。
+    // The rtk proxy swallows exit codes: assert on output text instead of status.code().
 }
 
-// health：mock 返 200 + 空 data → available:false，文案点失败（非零退出语义）。
-// multi_thread：同上，output() 阻塞需独立 worker 跑 mock accept。
+// health: mock returns 200 + empty data → available:false, text-level failure
+// (non-zero-exit semantics).
+// multi_thread: same as above; output() blocks so the mock accept needs its own worker.
 #[tokio::test(flavor = "multi_thread")]
 async fn health_unavailable_reports_failure() {
     let url = mock_models_server(r#"{"data":[]}"#).await;
@@ -65,30 +69,34 @@ async fn health_unavailable_reports_failure() {
         .arg(&url)
         .env("FUSION_MLX_BASE_URL", &url)
         .output()
-        .expect("fusion-design 进程应能启动");
+        .expect("fusion-design process should start");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     tracing::info!(stdout = %stdout, stderr = %stderr, "health unavailable output");
     assert!(
         stdout.contains("\"available\": false") || stdout.contains("\"available\":false"),
-        "应报 available:false: {stdout}"
+        "should report available:false: {stdout}"
     );
-    // 区分「空 data 假绿」与「连接失败」：本用例是空 data，不应是「不可达」。
+    // Distinguish an "empty-data false green" from a "connection failure": this case is
+    // empty data, not "unreachable".
     assert!(
-        !stdout.contains("不可达") && !stderr.contains("error sending request"),
-        "空 data 应是假绿路径非连接失败: stdout={stdout} stderr={stderr}"
+        !stdout.contains("unreachable") && !stderr.contains("error sending request"),
+        "empty data should take the false-green path, not a connection failure: stdout={stdout} stderr={stderr}"
     );
-    // R-14：available=false 须非零退出。rtk 吞码用 stderr/状态兜底：
-    // 退出码非 0 或 stderr 含失败标记（直接调 cargo test 时 status 可信）。
-    let failed = !output.status.success() || stderr.contains("失败") || stderr.contains("bail");
+    // R-14: available=false must exit non-zero. The rtk proxy swallows exit codes, so fall
+    // back to stderr/status: non-zero exit, or stderr contains a failure marker (status is
+    // trustworthy when invoked via cargo test directly).
+    let failed = !output.status.success() || stderr.contains("failed") || stderr.contains("bail");
     assert!(
         failed,
-        "available=false 应判失败（非零退出或 stderr 失败标记）"
+        "available=false should count as failed (non-zero exit or stderr failure marker)"
     );
 }
 
-// 辅助：起 127.0.0.1:0 TcpListener，对所有请求回固定 /v1/models JSON。
-// 忽略请求路径与 body，固定 200 + body（最小 mock，仅够 health_check GET /v1/models）。
+// Helper: bind a 127.0.0.1:0 TcpListener that answers every request with a fixed
+// /v1/models JSON.
+// Ignores request path and body; always returns 200 + body (minimal mock, just enough for
+// health_check's GET /v1/models).
 async fn mock_models_server(body: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

@@ -1,48 +1,52 @@
-//! OPS-13：fd-cli 文件日志落地。
+//! OPS-13: fd-cli file logging.
 //!
-//! WKWebView 内嵌主渠道下 fd-cli 子进程 stdout 被壳吞，现场故障零持久诊断件。
-//! 本模块建日轮转文件 appender + stdout 双写 subscriber，返 WorkerGuard 保活。
+//! When embedded in the WKWebView host channel, fd-cli subprocess stdout is swallowed by
+//! the shell, leaving no persisted diagnostics for field failures. This module builds a
+//! daily-rotating file appender + stdout dual-write subscriber and returns a WorkerGuard
+//! to keep the writer alive.
 //!
-//! env 网关：
-//! - `FUSION_LOG_DISABLE_FILE=1|true` → stdout-only，无 guard。
-//! - `FUSION_LOG_DIR` → 覆盖日志目录（默认 macOS `~/Library/Logs/fusion-design`）。
+//! env gates:
+//! - `FUSION_LOG_DISABLE_FILE=1|true` → stdout-only, no guard.
+//! - `FUSION_LOG_DIR` → override log directory (default macOS `~/Library/Logs/fusion-design`).
 //!
-//! 任何环节失败（目录解析/创建）安全回退 stdout-only，不阻断 CLI 主流程。
+//! Any failure (directory resolution/creation) safely falls back to stdout-only without
+//! blocking the CLI main flow.
 
 use std::path::PathBuf;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::prelude::*;
 
-/// 初始化日志：文件日轮转 + stdout 双写。返 `Some(guard)` 表示文件 appender 已建，
-/// 调用方须持有 guard 至进程结束（drop 即 flush 关闭 file writer）。`None` = stdout-only。
+/// Initialize logging: daily-rotating file + stdout dual write. Returns `Some(guard)` when
+/// the file appender was created; the caller must hold the guard until process exit
+/// (dropping it flushes and closes the file writer). `None` = stdout-only.
 ///
-/// 全局 subscriber 只能 init 一次/进程，由 main() 一次性调用。
+/// The global subscriber can only be initialized once per process; called once from main().
 pub fn init_logging() -> Option<WorkerGuard> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
 
-    // FUSION_LOG_DISABLE_FILE=1 → stdout-only，无 guard。
+    // FUSION_LOG_DISABLE_FILE=1 → stdout-only, no guard.
     if should_disable_file() {
-        eprintln!("[fusion-design] 文件日志禁用 (FUSION_LOG_DISABLE_FILE)，stdout-only");
+        eprintln!("[fusion-design] file logging disabled (FUSION_LOG_DISABLE_FILE), stdout-only");
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
         return None;
     }
 
-    // 解析日志目录：FUSION_LOG_DIR 覆盖 > 平台默认 > 回退 stdout。
+    // Resolve log directory: FUSION_LOG_DIR override > platform default > fall back to stdout.
     let log_dir = match resolve_log_dir() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[fusion-design] 日志目录解析失败，回退 stdout: {e}");
+            eprintln!("[fusion-design] failed to resolve log directory, falling back to stdout: {e}");
             tracing_subscriber::fmt().with_env_filter(env_filter).init();
             return None;
         }
     };
 
-    // 确保目录存在（mkdir -p）。失败回退 stdout。
+    // Ensure the directory exists (mkdir -p). On failure fall back to stdout.
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         eprintln!(
-            "[fusion-design] 日志目录创建失败 {}: {e}，回退 stdout",
+            "[fusion-design] failed to create log directory {}: {e}, falling back to stdout",
             log_dir.display()
         );
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
@@ -52,7 +56,7 @@ pub fn init_logging() -> Option<WorkerGuard> {
     let file_appender = tracing_appender::rolling::daily(&log_dir, "fusion-design.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // layered：file NonBlocking writer（无 ANSI 色码）+ stdout 并发。
+    // layered: file NonBlocking writer (no ANSI color codes) + stdout concurrent.
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false);
@@ -65,13 +69,14 @@ pub fn init_logging() -> Option<WorkerGuard> {
         .init();
 
     eprintln!(
-        "[fusion-design] 文件日志启用: {}/fusion-design.log",
+        "[fusion-design] file logging enabled: {}/fusion-design.log",
         log_dir.display()
     );
     Some(guard)
 }
 
-/// 判定是否禁用文件日志。`FUSION_LOG_DISABLE_FILE=1` 或 `=true`（大小写不敏感）→ true。
+/// Whether file logging is disabled. `FUSION_LOG_DISABLE_FILE=1` or `=true`
+/// (case-insensitive) → true.
 fn should_disable_file() -> bool {
     match std::env::var("FUSION_LOG_DISABLE_FILE") {
         Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
@@ -79,8 +84,9 @@ fn should_disable_file() -> bool {
     }
 }
 
-/// 解析日志目录。`FUSION_LOG_DIR` 非空显式覆盖优先；否则按平台默认：
-/// - macOS：`~/Library/Logs/fusion-design`（经 home_dir 拼装，dirs 5 已移除 log_dir）。
+/// Resolve the log directory. A non-empty `FUSION_LOG_DIR` takes precedence; otherwise the
+/// platform default applies:
+/// - macOS: `~/Library/Logs/fusion-design` (assembled via home_dir; dirs 5 removed log_dir).
 /// - Linux：`~/.local/share/fusion-design/logs`（XDG data_local）。
 fn resolve_log_dir() -> Result<PathBuf, String> {
     if let Ok(d) = std::env::var("FUSION_LOG_DIR") {
@@ -90,13 +96,14 @@ fn resolve_log_dir() -> Result<PathBuf, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let home = dirs::home_dir().ok_or_else(|| "dirs::home_dir() 无法解析 HOME".to_string())?;
+        let home = dirs::home_dir()
+            .ok_or_else(|| "dirs::home_dir() failed to resolve HOME".to_string())?;
         Ok(home.join("Library/Logs/fusion-design"))
     }
     #[cfg(not(target_os = "macos"))]
     {
         let base = dirs::data_local_dir()
-            .ok_or_else(|| "dirs::data_local_dir() 无法解析本地数据目录".to_string())?;
+            .ok_or_else(|| "dirs::data_local_dir() failed to resolve local data dir".to_string())?;
         Ok(base.join("fusion-design").join("logs"))
     }
 }
@@ -105,18 +112,20 @@ fn resolve_log_dir() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    // env-var 测试并发 mutate 共享进程 env → race。用 static mutex 串行化。
+    // Tests concurrently mutate the shared process env via env vars → race. Serialize with
+    // a static mutex.
     use std::sync::{Mutex, OnceLock};
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     fn lock() -> &'static Mutex<()> {
         ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
-    // 测纯函数，不真跑 init_logging 全局 init（set_global_default 单次限制，多测同进程 panic）。
+    // Test pure functions only; never run init_logging's global init here
+    // (set_global_default is once-per-process; multiple tests would panic).
 
     #[test]
     fn disable_file_unset_is_false() {
         let _g = lock().lock().unwrap();
-        // 显式清空隔离父进程可能残留的 env。
+        // Explicitly clear env vars possibly inherited from the parent process.
         std::env::remove_var("FUSION_LOG_DISABLE_FILE");
         assert!(!should_disable_file());
     }
@@ -160,16 +169,17 @@ mod tests {
     fn resolve_log_dir_empty_env_falls_back() {
         let _g = lock().lock().unwrap();
         std::env::set_var("FUSION_LOG_DIR", "");
-        // 空字符串视为未设，回退平台默认。
-        // macOS 末端 fusion-design；Linux 末端 logs。不假设平台，断言含 fusion-design 段。
+        // Empty string counts as unset; fall back to the platform default.
+        // macOS ends with fusion-design; Linux ends with logs. Do not assume the platform;
+        // assert the path contains a fusion-design segment.
         let result = resolve_log_dir();
         std::env::remove_var("FUSION_LOG_DIR");
         match result {
             Ok(d) => {
                 let has_seg = d.components().any(|c| c.as_os_str() == "fusion-design");
-                assert!(has_seg, "平台默认路径应含 fusion-design 段: {d:?}");
+                assert!(has_seg, "platform default path should contain fusion-design segment: {d:?}");
             }
-            Err(_) => { /* 平台无 HOME（CI 无 HOME 场景），Err 合理 */ }
+            Err(_) => { /* platform has no HOME (CI without HOME); Err is acceptable */ }
         }
     }
 }

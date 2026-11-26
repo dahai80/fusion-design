@@ -1,4 +1,4 @@
-//! A-3：AI 技能子命令 handler（ImageToUi/MultiVariants/SpecDoc/PageFlow/Train）。
+//! A-3: AI skill subcommand handlers (ImageToUi/MultiVariants/SpecDoc/PageFlow/Train).
 
 use crate::common::{pick_multi_variant_styles, read_file_capped};
 
@@ -21,7 +21,7 @@ pub async fn image_to_ui(
     match out {
         Some(p) => {
             tokio::fs::write(&p, &json).await?;
-            println!("已生成图生 UI PenDocument JSON 到 {p:?}");
+            println!("image-to-ui PenDocument JSON written to {p:?}");
         }
         None => println!("{json}"),
     }
@@ -52,7 +52,7 @@ pub async fn multi_variants(
     match out {
         Some(p) => {
             tokio::fs::write(&p, &json).await?;
-            println!("已生成 3 套多方案 PenDocument JSON 到 {p:?}");
+            println!("3 multi-variant PenDocument JSONs written to {p:?}");
         }
         None => println!("{json}"),
     }
@@ -76,7 +76,7 @@ pub async fn spec_doc(
     match out {
         Some(p) => {
             tokio::fs::write(&p, &json).await?;
-            println!("已生成设计规范文档到 {p:?}");
+            println!("design spec document written to {p:?}");
         }
         None => println!("{json}"),
     }
@@ -99,7 +99,7 @@ pub async fn page_flow(
     match out {
         Some(p) => {
             tokio::fs::write(&p, &json).await?;
-            println!("已生成 PageFlow 多页面文档到 {p:?}");
+            println!("PageFlow multi-page document written to {p:?}");
         }
         None => println!("{json}"),
     }
@@ -116,10 +116,10 @@ pub async fn train(
     let status = match method.as_str() {
         "grpo" => trainer.run_rlsl("grpo", &dataset, &model, config.as_deref())?,
         "sft" => trainer.run_sft(&dataset, &model, config.as_deref())?,
-        other => anyhow::bail!("不支持的 --method: {other} (仅 sft|grpo)"),
+        other => anyhow::bail!("unsupported --method: {other} (only sft|grpo)"),
     };
     if !status.success() {
-        anyhow::bail!("fusion-trainer 退出码 {}", status.code().unwrap_or(-1));
+        anyhow::bail!("fusion-trainer exited with code {}", status.code().unwrap_or(-1));
     }
     Ok(())
 }

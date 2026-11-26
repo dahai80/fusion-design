@@ -1,6 +1,7 @@
-//! A-3：Generate 子命令 handler（从 main.rs 拆出）。
+//! A-3: Generate subcommand handler (split out of main.rs).
 //!
-//! 文生 UI：自然语言 → PenDocument JSON。支持流式 SSE token 与 fd-ecosystem IPC。
+//! Text-to-UI: natural language → PenDocument JSON. Supports streaming SSE tokens and
+//! fd-ecosystem IPC.
 
 use std::path::PathBuf;
 
@@ -18,8 +19,10 @@ pub async fn run(
     )?;
     if stream {
         let model_owned = model.clone();
+        // i18n: user-facing (LLM prompt, Chinese wording is intentional product behavior)
         let sys = "你是 fusion-design UI 生成器。根据用户描述，\
 输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
+        // i18n: user-facing (LLM prompt, Chinese wording is intentional product behavior)
         let user_msg = format!("描述：{prompt}\n生成页面「{page}」对应的 UI 布局。");
         let s =
             fd_ai_adapter::chat_stream(client, model_owned, sys.to_string(), user_msg, 2048).await;
@@ -31,7 +34,7 @@ pub async fn run(
                 Ok(d) if d.finished => break,
                 Ok(d) => print!("{}", d.token),
                 Err(e) => {
-                    eprintln!("流式输出错误: {e}");
+                    eprintln!("streaming output error: {e}");
                     stream_failed = Some(e.to_string());
                     break;
                 }
@@ -39,7 +42,7 @@ pub async fn run(
         }
         println!();
         if let Some(e) = stream_failed {
-            anyhow::bail!("generate 流式失败: {e}");
+            anyhow::bail!("generate streaming failed: {e}");
         }
         return Ok(());
     }
@@ -57,10 +60,10 @@ pub async fn run(
             }),
         };
         link.send(&msg)?;
-        tracing::info!("generate: IPC 消息已发送");
+        tracing::info!("generate: IPC message sent");
         if let Some(p) = out {
             std::fs::write(&p, &json)?;
-            println!("已生成 PenDocument JSON 到 {p:?}");
+            println!("PenDocument JSON written to {p:?}");
         } else {
             println!("{json}");
         }
@@ -68,7 +71,7 @@ pub async fn run(
         match out {
             Some(p) => {
                 std::fs::write(&p, &json)?;
-                println!("已生成 PenDocument JSON 到 {p:?}");
+                println!("PenDocument JSON written to {p:?}");
             }
             None => println!("{json}"),
         }

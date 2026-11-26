@@ -1,4 +1,4 @@
-//! A-3：IO/校验子命令 handler（ExportBatch/CheckFrontend/ParseHtml/Codegen/Diff）。
+//! A-3: IO/validation subcommand handlers (ExportBatch/CheckFrontend/ParseHtml/Codegen/Diff).
 
 use std::path::PathBuf;
 
@@ -21,30 +21,32 @@ pub async fn export_batch(
         vec![format.into()]
     };
     let mut total = 0;
-    // E-12/E-24：批量导出旧实现首个格式失败即 `?` 传播，其余格式静默跳过。
-    // 改为收集所有失败，末尾汇总打印 + 若有失败退出非零（fail visibly，不阻断已成功项）。
+    // E-12/E-24: the old batch-export implementation propagated the first format failure
+    // via `?` and silently skipped the remaining formats. Now collect all failures, print
+    // a summary at the end, and exit non-zero if any failed (fail visibly without blocking
+    // already-succeeded items).
     let mut failures: Vec<String> = Vec::new();
     for fmt in fmt_list {
         match fd_export::Exporter::from_pen_document_with_tokens(&doc, fmt, &out, &reg) {
             Ok(files) => {
-                tracing::info!(format = ?fmt, count = files.len(), "批量导出完成");
+                tracing::info!(format = ?fmt, count = files.len(), "batch export finished");
                 total += files.len();
             }
             Err(e) => {
                 let fmt_str = fmt.extension();
-                tracing::warn!(format = fmt_str, error = %e, "批量导出该格式失败");
+                tracing::warn!(format = fmt_str, error = %e, "batch export failed for this format");
                 failures.push(format!("{fmt_str}: {e}"));
             }
         }
     }
-    println!("已批量导出 {} 个页面到 {out:?}", total);
+    println!("batch-exported {} page(s) to {out:?}", total);
     if !failures.is_empty() {
-        eprintln!("批量导出部分失败 ({} 项):", failures.len());
+        eprintln!("batch export partially failed ({} item(s)):", failures.len());
         for f in &failures {
             eprintln!("  - {f}");
         }
         return Err(anyhow::anyhow!(
-            "批量导出部分失败: 成功导出 {total} 页，{} 项格式失败",
+            "batch export partially failed: exported {total} page(s), {} format(s) failed",
             failures.len()
         ));
     }
@@ -58,7 +60,7 @@ pub async fn check_frontend(dir: PathBuf, backend: String) -> anyhow::Result<()>
         block_external: true,
     }
     .validate()?;
-    println!("前端目录校验通过");
+    println!("frontend directory validation passed");
     Ok(())
 }
 
@@ -85,10 +87,11 @@ pub async fn codegen(
         None => read_stdin_capped()?,
     };
     let doc: fd_canvas_core::PenDocument = serde_json::from_str(&json)?;
-    // H-A11：codegen 前解析 token 引用（token:color.accent → 实际 hex）。
-    // 旧实现直接把 PenDocument 传 codegen，token:xxx 原样输出——浏览器不认，
-    // SwiftUI 侧 DesignTokens.xxx 未定义编译失败。按文档声明的
-    // active_design_system 构建注册表并解析，递归覆盖嵌套 children。
+    // H-A11: resolve token references before codegen (token:color.accent → actual hex).
+    // The old implementation passed the PenDocument straight to codegen, emitting
+    // token:xxx verbatim — browsers reject it and the SwiftUI side fails to compile with
+    // undefined DesignTokens.xxx. Build a registry from the document-declared
+    // active_design_system and resolve, recursively overriding nested children.
     let reg = build_registry(&doc);
     let doc = fd_codegen::resolve_tokens(&doc, &reg);
     let code = match target {
@@ -118,7 +121,7 @@ pub async fn codegen(
     match out {
         Some(p) => {
             tokio::fs::write(&p, &code).await?;
-            tracing::info!("已导出代码到 {p:?}");
+            tracing::info!("code exported to {p:?}");
         }
         None => println!("{code}"),
     }
