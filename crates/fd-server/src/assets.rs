@@ -114,7 +114,10 @@ fn wasm_missing_hint(name: &str) -> Resp {
 target/wasm32-unknown-unknown/release/fd_host_web.wasm; \
 or set FUSION_DESIGN_WASM_DIR to a directory containing {name}"
     );
-    tracing::error!(asset = name, "WASM canvas asset missing, canvas unavailable");
+    tracing::error!(
+        asset = name,
+        "WASM canvas asset missing, canvas unavailable"
+    );
     not_found_json(&msg)
 }
 
@@ -154,7 +157,10 @@ fn load_wasm_asset(name: &str) -> Option<Vec<u8>> {
                 Err(_) => continue,
             }
         }
-        tracing::warn!(asset = name, "WASM asset not found in any candidate directory");
+        tracing::warn!(
+            asset = name,
+            "WASM asset not found in any candidate directory"
+        );
         None
     })
     .clone()
@@ -170,21 +176,39 @@ mod tests {
         // hooks must be present in the page.
         let body = include_str!("web/workbench.html");
         assert!(body.contains("id=\"fd-chat\""), "left pane chat container");
-        assert!(body.contains("id=\"fd-canvas-stage\""), "middle pane canvas stage");
-        assert!(body.contains("id=\"fd-versions\""), "right pane version list");
-        assert!(body.contains("fd-canvas-mount"), "canvas element used for mount verification");
+        assert!(
+            body.contains("id=\"fd-canvas-stage\""),
+            "middle pane canvas stage"
+        );
+        assert!(
+            body.contains("id=\"fd-versions\""),
+            "right pane version list"
+        );
+        assert!(
+            body.contains("fd-canvas-mount"),
+            "canvas element used for mount verification"
+        );
         // Ecosystem exit buttons (issue#33/DS-2): send to Code / save to Artifacts.
         assert!(body.contains("id=\"send-to-code\""), "send-to-code button");
-        assert!(body.contains("id=\"save-artifact\""), "save-artifact button");
+        assert!(
+            body.contains("id=\"save-artifact\""),
+            "save-artifact button"
+        );
         // wasm glue is dynamically imported by app.js; three-pane skeleton +
         // bridge container must be present.
         let js = include_str!("web/app.js");
-        assert!(js.contains("fd_host_web.js"), "app.js must dynamically load the wasm glue");
+        assert!(
+            js.contains("fd_host_web.js"),
+            "app.js must dynamically load the wasm glue"
+        );
         assert!(
             js.contains("fd_host_web_bg.wasm"),
             "app.js must load the wasm binary"
         );
-        assert!(js.contains("page.render-dom"), "DOM rendering must be driven via bridge command");
+        assert!(
+            js.contains("page.render-dom"),
+            "DOM rendering must be driven via bridge command"
+        );
         assert!(
             js.contains("/api/send-to-code"),
             "app.js must call the send-to-code endpoint"
@@ -205,8 +229,14 @@ mod tests {
             html.contains("href=\"app.css\""),
             "stylesheet must use a relative path; absolute /app.css 404s inside a shell module"
         );
-        assert!(!html.contains("href=\"/app.css\""), "absolute /app.css is forbidden");
-        assert!(html.contains("src=\"landing.js\""), "scripts must use relative paths");
+        assert!(
+            !html.contains("href=\"/app.css\""),
+            "absolute /app.css is forbidden"
+        );
+        assert!(
+            html.contains("src=\"landing.js\""),
+            "scripts must use relative paths"
+        );
         assert!(
             !html.contains("src=\"/landing.js\""),
             "absolute /landing.js is forbidden"
@@ -221,8 +251,14 @@ mod tests {
             "absolute /api fetch is forbidden; inside a shell module it hits the gateway root"
         );
         let workbench = include_str!("web/workbench.html");
-        assert!(workbench.contains("href=\"app.css\""), "workbench stylesheet must be relative");
-        assert!(workbench.contains("src=\"app.js\""), "workbench script must be relative");
+        assert!(
+            workbench.contains("href=\"app.css\""),
+            "workbench stylesheet must be relative"
+        );
+        assert!(
+            workbench.contains("src=\"app.js\""),
+            "workbench script must be relative"
+        );
         let landing_js = include_str!("web/landing.js");
         assert!(
             landing_js.contains("import.meta.url"),
@@ -249,11 +285,17 @@ mod tests {
             "create-slides",
             "create-design",
         ] {
-            assert!(body.contains(&format!("id=\"{id}\"")), "missing element {id}");
+            assert!(
+                body.contains(&format!("id=\"{id}\"")),
+                "missing element {id}"
+            );
         }
         assert!(body.contains("data-i18n=\"tabAll\""), "all tab");
         assert!(body.contains("data-i18n=\"tabMine\""), "mine tab");
-        assert!(body.contains("data-i18n=\"tabShared\""), "shared-with-you tab");
+        assert!(
+            body.contains("data-i18n=\"tabShared\""),
+            "shared-with-you tab"
+        );
         // Three create cards navigate to the workbench with a kind.
         for kind in ["document", "slides", "design"] {
             assert!(
@@ -265,8 +307,14 @@ mod tests {
         // Claude (this project is not an Anthropic product).
         let js = include_str!("web/landing.js");
         assert!(js.contains("Make a Design artifact for "), "design prefill");
-        assert!(js.contains("Make a Document artifact about "), "document prefill");
-        assert!(js.contains("Make a Slides artifact about "), "slides prefill");
+        assert!(
+            js.contains("Make a Document artifact about "),
+            "document prefill"
+        );
+        assert!(
+            js.contains("Make a Slides artifact about "),
+            "slides prefill"
+        );
         assert!(!js.contains("Claude"), "prompts must not mention Claude");
     }
 
@@ -282,15 +330,36 @@ mod tests {
             "artifact-export",
             "artifact-open-workbench",
         ] {
-            assert!(body.contains(&format!("id=\"{id}\"")), "missing element {id}");
+            assert!(
+                body.contains(&format!("id=\"{id}\"")),
+                "missing element {id}"
+            );
         }
-        assert!(body.contains("href=\"app.css\""), "viewer stylesheet must be relative");
-        assert!(body.contains("src=\"artifact.js\""), "viewer script must be relative");
+        assert!(
+            body.contains("href=\"app.css\""),
+            "viewer stylesheet must be relative"
+        );
+        assert!(
+            body.contains("src=\"artifact.js\""),
+            "viewer script must be relative"
+        );
         let js = include_str!("web/artifact.js");
-        assert!(js.contains("import.meta.url"), "viewer must derive the API base from the module path");
-        assert!(!js.contains("fetch(\"/api"), "viewer must not use absolute /api fetch");
-        assert!(js.contains("api/artifact/"), "viewer must call api/artifact/<id>");
-        assert!(js.contains("srcdoc"), "HTML content must be rendered via iframe");
+        assert!(
+            js.contains("import.meta.url"),
+            "viewer must derive the API base from the module path"
+        );
+        assert!(
+            !js.contains("fetch(\"/api"),
+            "viewer must not use absolute /api fetch"
+        );
+        assert!(
+            js.contains("api/artifact/"),
+            "viewer must call api/artifact/<id>"
+        );
+        assert!(
+            js.contains("srcdoc"),
+            "HTML content must be rendered via iframe"
+        );
         let landing = include_str!("web/landing.js");
         assert!(
             landing.contains("artifact.html?id="),
@@ -308,26 +377,50 @@ mod tests {
             include_str!("web/workbench.html"),
             include_str!("web/artifact.html"),
         ] {
-            assert!(!html.contains("lang-select"), "module-provided language switch is forbidden");
-            assert!(!html.contains("theme-toggle"), "module-provided theme toggle is forbidden");
+            assert!(
+                !html.contains("lang-select"),
+                "module-provided language switch is forbidden"
+            );
+            assert!(
+                !html.contains("theme-toggle"),
+                "module-provided theme toggle is forbidden"
+            );
         }
         for js in [
             include_str!("web/landing.js"),
             include_str!("web/app.js"),
             include_str!("web/artifact.js"),
         ] {
-            assert!(!js.contains("fd-lang"), "separate language key fd-lang is forbidden");
-            assert!(!js.contains("fd-theme"), "separate theme key fd-theme is forbidden");
+            assert!(
+                !js.contains("fd-lang"),
+                "separate language key fd-lang is forbidden"
+            );
+            assert!(
+                !js.contains("fd-theme"),
+                "separate theme key fd-theme is forbidden"
+            );
             assert!(
                 js.contains("shell-sync.js"),
                 "all three pages must follow the shell via shell-sync"
             );
         }
         let sync = include_str!("web/shell-sync.js");
-        assert!(sync.contains("fusion.shell.theme"), "fallback must use the shell convention key");
-        assert!(sync.contains("fusion.shell.lang"), "fallback must use the shell convention key");
-        assert!(sync.contains("fusion:theme"), "must listen for shell theme events");
-        assert!(sync.contains("fusion:lang"), "must listen for shell lang events");
+        assert!(
+            sync.contains("fusion.shell.theme"),
+            "fallback must use the shell convention key"
+        );
+        assert!(
+            sync.contains("fusion.shell.lang"),
+            "fallback must use the shell convention key"
+        );
+        assert!(
+            sync.contains("fusion:theme"),
+            "must listen for shell theme events"
+        );
+        assert!(
+            sync.contains("fusion:lang"),
+            "must listen for shell lang events"
+        );
     }
 
     #[test]
@@ -335,14 +428,23 @@ mod tests {
         // Workbench must allow model switching: the dropdown excludes embedding
         // models (bge etc.), defaulting to chat_model.
         let html = include_str!("web/workbench.html");
-        assert!(html.contains("id=\"model-select\""), "missing model dropdown");
+        assert!(
+            html.contains("id=\"model-select\""),
+            "missing model dropdown"
+        );
         let js = include_str!("web/app.js");
-        assert!(js.contains("chat_model"), "must default to the server-side chat_model");
+        assert!(
+            js.contains("chat_model"),
+            "must default to the server-side chat_model"
+        );
         assert!(
             js.contains("model: state.model || undefined"),
             "generate/iterate must carry the selected model"
         );
-        assert!(js.contains("const fam ="), "must filter by chat model family");
+        assert!(
+            js.contains("const fam ="),
+            "must filter by chat model family"
+        );
         assert!(
             js.contains("const bad ="),
             "must exclude non-chat models (image/video/TTS/embedding)"
@@ -361,15 +463,30 @@ mod tests {
         );
         let js = include_str!("web/app.js");
         assert!(js.contains("loadTokenPanel"), "must load the Token panel");
-        assert!(js.contains("applyToken"), "must support applying a Token to the selected node");
-        assert!(js.contains("onWasmNodeDrag"), "must consume node.drag to persist drags");
-        assert!(js.contains("saveFile"), "must be able to save .fusiondesign");
-        assert!(js.contains("embedded"), "must support ?embedded=1 to hide its own navigation");
+        assert!(
+            js.contains("applyToken"),
+            "must support applying a Token to the selected node"
+        );
+        assert!(
+            js.contains("onWasmNodeDrag"),
+            "must consume node.drag to persist drags"
+        );
+        assert!(
+            js.contains("saveFile"),
+            "must be able to save .fusiondesign"
+        );
+        assert!(
+            js.contains("embedded"),
+            "must support ?embedded=1 to hide its own navigation"
+        );
         assert!(
             js.contains("resp.status === 401") || js.contains("resp.status===401"),
             "401 must show an inline error, no redirect (#28 contract)"
         );
-        assert!(!js.contains("location.href"), "page-level navigation is forbidden inside a module");
+        assert!(
+            !js.contains("location.href"),
+            "page-level navigation is forbidden inside a module"
+        );
         let css = include_str!("web/app.css");
         assert!(css.contains(".token-item"), "missing Token item style");
         assert!(css.contains("body.embedded"), "missing embedded-mode style");
@@ -386,14 +503,29 @@ mod tests {
         // issue#35 minimum canvas UX: layer list + node selection sync + visible
         // undo/redo state.
         let html = include_str!("web/workbench.html");
-        assert!(html.contains("id=\"fd-layers\""), "missing layer list panel");
+        assert!(
+            html.contains("id=\"fd-layers\""),
+            "missing layer list panel"
+        );
         assert!(html.contains("id=\"undo-btn\""), "missing undo button");
         assert!(html.contains("id=\"redo-btn\""), "missing redo button");
         let js = include_str!("web/app.js");
-        assert!(js.contains("node.select"), "must drive wasm selection highlight");
-        assert!(js.contains("pollWasmEvents"), "must consume canvas click events to sync layers");
-        assert!(js.contains("stepVersion"), "must have version stack stepping (undo/redo)");
-        assert!(js.contains("updateUndoRedo"), "undo/redo must have a visible disabled state");
+        assert!(
+            js.contains("node.select"),
+            "must drive wasm selection highlight"
+        );
+        assert!(
+            js.contains("pollWasmEvents"),
+            "must consume canvas click events to sync layers"
+        );
+        assert!(
+            js.contains("stepVersion"),
+            "must have version stack stepping (undo/redo)"
+        );
+        assert!(
+            js.contains("updateUndoRedo"),
+            "undo/redo must have a visible disabled state"
+        );
         let css = include_str!("web/app.css");
         assert!(css.contains(".layer-item"), "missing layer item style");
     }

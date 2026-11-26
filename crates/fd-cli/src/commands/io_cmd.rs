@@ -41,7 +41,10 @@ pub async fn export_batch(
     }
     println!("batch-exported {} page(s) to {out:?}", total);
     if !failures.is_empty() {
-        eprintln!("batch export partially failed ({} item(s)):", failures.len());
+        eprintln!(
+            "batch export partially failed ({} item(s)):",
+            failures.len()
+        );
         for f in &failures {
             eprintln!("  - {f}");
         }

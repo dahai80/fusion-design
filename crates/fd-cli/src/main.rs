@@ -517,7 +517,8 @@ fn report_error(e: &anyhow::Error) {
     } else if msg.contains("HTTP 401") || msg.contains("Unauthorized") {
         (
             "authentication failed".into(),
-            "check that FUSION_CLIENT_KEY is the gateway master_key or a fusion-mlx backend key".into(),
+            "check that FUSION_CLIENT_KEY is the gateway master_key or a fusion-mlx backend key"
+                .into(),
         )
     } else if msg.contains("HTTP 404") || msg.contains("connection refused") {
         (
@@ -527,7 +528,8 @@ fn report_error(e: &anyhow::Error) {
     } else if msg.contains("HTTP 5") || msg.contains("502") {
         (
             "upstream service error".into(),
-            "fusion-mlx/gateway is temporarily unavailable; check the model is loaded and retry".into(),
+            "fusion-mlx/gateway is temporarily unavailable; check the model is loaded and retry"
+                .into(),
         )
     // i18n: user-facing (match key for legacy error text, do not translate)
     } else if msg.contains("Empty choices") || msg.contains("空 choices") {
@@ -882,7 +884,10 @@ mod tests {
         // i18n: user-facing (multibyte token fixture)
         let frame = ndjson_frame_delta("你");
         assert_eq!(frame["type"], "delta", "delta frame type must be delta");
-        assert_eq!(frame["token"], "你", "delta frame token passes through verbatim");
+        assert_eq!(
+            frame["token"], "你",
+            "delta frame token passes through verbatim"
+        );
     }
 
     #[test]

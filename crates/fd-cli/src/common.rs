@@ -128,7 +128,9 @@ pub fn build_registry(doc: &fd_canvas_core::PenDocument) -> fd_cli::design::Desi
     reg.register_builtin();
     if let Some(ref id) = doc.active_design_system {
         match reg.activate(id) {
-            Ok(()) => tracing::info!(design_system = %id, "activated the design system declared by the document"),
+            Ok(()) => {
+                tracing::info!(design_system = %id, "activated the design system declared by the document")
+            }
             Err(e) => {
                 tracing::warn!(design_system = %id, error = %e, "design system declared by the document not found, using default")
             }

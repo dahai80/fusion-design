@@ -148,7 +148,11 @@ impl DesignSystem {
                 return value.to_css_value();
             }
             if visited.contains(target) {
-                tracing::warn!("circular token reference detected: {:?}, visited: {:?}", target, visited);
+                tracing::warn!(
+                    "circular token reference detected: {:?}, visited: {:?}",
+                    target,
+                    visited
+                );
                 return value.to_css_value();
             }
             visited.insert(target.to_string());
@@ -1315,7 +1319,11 @@ mod tests {
         assert_eq!(reg.list().len(), 4);
         // Second call: count unchanged, no error.
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 4, "repeated registration must not double or overwrite");
+        assert_eq!(
+            reg.list().len(),
+            4,
+            "repeated registration must not double or overwrite"
+        );
     }
 
     #[test]
@@ -1330,7 +1338,11 @@ mod tests {
         reg.register(custom).unwrap();
         // Then register builtins: apple-hig should be skipped and the rest filled in.
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 4, "builtins fill in the other three; apple-hig is skipped");
+        assert_eq!(
+            reg.list().len(),
+            4,
+            "builtins fill in the other three; apple-hig is skipped"
+        );
         // Verify apple-hig is still the user-customized version.
         reg.activate("apple-hig").unwrap();
         assert_eq!(
@@ -1432,7 +1444,11 @@ mod tests {
         .unwrap();
         let resolved = reg.resolve("custom").unwrap();
         // Parent's 5 tokens + child overrides color.bg (same-name override, no growth) = 5.
-        assert_eq!(resolved.tokens.len(), 5, "inherits all parent tokens; child override does not add");
+        assert_eq!(
+            resolved.tokens.len(),
+            5,
+            "inherits all parent tokens; child override does not add"
+        );
         // color.bg is overridden to red by the child.
         let bg = resolved
             .tokens
@@ -1497,13 +1513,21 @@ mod tests {
             .iter()
             .find(|t| t.name == "b")
             .expect("b should exist");
-        assert_eq!(b.value, TokenValue::Number(20.0), "mid's override b=20 should win");
+        assert_eq!(
+            b.value,
+            TokenValue::Number(20.0),
+            "mid's override b=20 should win"
+        );
         let a = resolved
             .tokens
             .iter()
             .find(|t| t.name == "a")
             .expect("a should exist");
-        assert_eq!(a.value, TokenValue::Number(1.0), "grand's a=1 should be inherited");
+        assert_eq!(
+            a.value,
+            TokenValue::Number(1.0),
+            "grand's a=1 should be inherited"
+        );
     }
 
     #[test]
@@ -1531,7 +1555,10 @@ mod tests {
         .unwrap();
         match reg.resolve("x") {
             Err(ResolveError::Circular { id, .. }) => assert_eq!(id, "x"),
-            other => panic!("expected Circular, got {:?}", other.map_err(|e| e.to_string())),
+            other => panic!(
+                "expected Circular, got {:?}",
+                other.map_err(|e| e.to_string())
+            ),
         }
     }
 
@@ -1575,7 +1602,10 @@ mod tests {
         ))
         .unwrap();
         let resolved = reg.resolve("child-no-dark").unwrap();
-        assert!(resolved.dark_tokens.is_some(), "parent dark_tokens should be inherited by the child");
+        assert!(
+            resolved.dark_tokens.is_some(),
+            "parent dark_tokens should be inherited by the child"
+        );
         let dark = resolved.dark_tokens.as_ref().unwrap();
         assert!(
             dark.iter().any(|t| t.name == "color.bg"),

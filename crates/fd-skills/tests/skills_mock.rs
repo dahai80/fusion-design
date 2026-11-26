@@ -551,7 +551,8 @@ fn parse_ui_json_recovers_missing_element_open_brace() {
     // (fail visibly is not triggered).
     // i18n: user-facing (model-output fixture with CJK node text)
     let broken = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"g1","kind":"group","x":0,"y":0,"w":100,"h":100},"id":"t1","kind":"text","x":10,"y":10,"w":50,"h":20,"text":"标题"}]}}"#;
-    let doc = parse_ui_json(broken, "page-1").expect("repair chain should recover the missing open brace");
+    let doc = parse_ui_json(broken, "page-1")
+        .expect("repair chain should recover the missing open brace");
     let page = doc.pages.first().expect("page exists");
     assert_eq!(page.nodes.len(), 2);
     assert!(page.nodes.iter().any(|n| n.id == "t1"));

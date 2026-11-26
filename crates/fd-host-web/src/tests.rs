@@ -36,7 +36,11 @@ fn log_ring_buffer_overflow_drops_oldest() {
         LOG_RING_CAPACITY,
         "over capacity should drop the oldest and keep exactly capacity entries"
     );
-    assert_eq!(dump[0].msg, format!("m{}", 50), "the oldest 50 entries should be dropped");
+    assert_eq!(
+        dump[0].msg,
+        format!("m{}", 50),
+        "the oldest 50 entries should be dropped"
+    );
     assert_eq!(
         dump.last().unwrap().msg,
         format!("m{}", LOG_RING_CAPACITY + 49)
@@ -94,11 +98,17 @@ fn sanitize_css_color_strips_escape_chars() {
     assert_eq!(sanitize_css_color("rgb(255, 0, 0)"), "rgb(255, 0, 0)");
     // Escape characters ; { } < > should be stripped, keeping the color body.
     let out = sanitize_css_color("red;} * { background:#fff }");
-    assert!(!out.contains(';'), "semicolons should be stripped to prevent attribute escape");
+    assert!(
+        !out.contains(';'),
+        "semicolons should be stripped to prevent attribute escape"
+    );
     assert!(!out.contains('{'), "left brace should be stripped");
     assert!(!out.contains('}'), "right brace should be stripped");
     assert!(out.contains("red"), "valid color names should be kept");
-    assert!(out.contains("background:#fff"), "unescaped declarations should be kept");
+    assert!(
+        out.contains("background:#fff"),
+        "unescaped declarations should be kept"
+    );
 }
 
 // E-40/P3 regression: sanitize_token_css must strip /* */ comments before keyword matching,
@@ -109,18 +119,33 @@ fn sanitize_token_css_strips_comment_obfuscated_danger() {
     // Comment-split url() must be stripped.
     let bad = "--bg: u/**/rl(http://evil/x.png)";
     let (out, stripped) = sanitize_token_css_inner(bad);
-    assert!(!out.contains("evil"), "comment-split url() must be stripped");
-    assert_eq!(stripped, 1, "the dangerous line is dropped whole, counted as 1");
-    assert!(out.is_empty(), "after dropping the dangerous line the output should be empty");
+    assert!(
+        !out.contains("evil"),
+        "comment-split url() must be stripped"
+    );
+    assert_eq!(
+        stripped, 1,
+        "the dangerous line is dropped whole, counted as 1"
+    );
+    assert!(
+        out.is_empty(),
+        "after dropping the dangerous line the output should be empty"
+    );
     // Comment-split @import must be stripped.
     let bad2 = "@imp/**/ort url(http://evil.css)";
     let (out2, s2) = sanitize_token_css_inner(bad2);
-    assert!(!out2.contains("evil"), "comment-split @import must be stripped");
+    assert!(
+        !out2.contains("evil"),
+        "comment-split @import must be stripped"
+    );
     assert_eq!(s2, 1);
     // Comment-split expression() must be stripped.
     let bad3 = "--x: expr/**/ession(alert(1))";
     let (out3, s3) = sanitize_token_css_inner(bad3);
-    assert!(!out3.contains("alert"), "comment-split expression() must be stripped");
+    assert!(
+        !out3.contains("alert"),
+        "comment-split expression() must be stripped"
+    );
     assert_eq!(s3, 1);
 }
 
@@ -133,11 +158,17 @@ fn sanitize_token_css_preserves_safe_token_declarations() {
         out.contains("--color-bg: #ffffff;"),
         "valid declarations should be kept: {out}"
     );
-    assert_eq!(stripped, 0, "no dangerous keywords, nothing should be stripped");
+    assert_eq!(
+        stripped, 0,
+        "no dangerous keywords, nothing should be stripped"
+    );
     // Safe comment lines can be kept (no dangerous keyword match).
     let safe2 = "/* comment only */\n--space-1: 4px;";
     let (out2, s2) = sanitize_token_css_inner(safe2);
-    assert!(out2.contains("--space-1: 4px;"), "valid declarations should be kept");
+    assert!(
+        out2.contains("--space-1: 4px;"),
+        "valid declarations should be kept"
+    );
     assert_eq!(s2, 0);
 }
 
@@ -146,7 +177,10 @@ fn sanitize_token_css_plain_danger_still_stripped() {
     // E-40 regression: plain url()/@import without comments is still stripped (does not break the original C10 behavior).
     let css = "--bg: url(http://evil.png);\n@import url(evil.css);\n--ok: #fff;";
     let (out, stripped) = sanitize_token_css_inner(css);
-    assert!(!out.contains("evil"), "plain url()/@import is still stripped");
+    assert!(
+        !out.contains("evil"),
+        "plain url()/@import is still stripped"
+    );
     assert!(out.contains("--ok: #fff;"), "valid declarations are kept");
     assert_eq!(stripped, 2, "two dangerous CSS lines are stripped");
 }
@@ -574,13 +608,22 @@ fn node_geom_guard_rejects_bad_zoom() {
     let node = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 10.0, 10.0);
     assert!(is_node_geom_valid(&node, 1.0), "normal zoom should pass");
     assert!(!is_node_geom_valid(&node, 0.0), "zoom=0 should be rejected");
-    assert!(!is_node_geom_valid(&node, -2.0), "negative zoom should be rejected");
-    assert!(!is_node_geom_valid(&node, f64::NAN), "NaN zoom should be rejected");
+    assert!(
+        !is_node_geom_valid(&node, -2.0),
+        "negative zoom should be rejected"
+    );
+    assert!(
+        !is_node_geom_valid(&node, f64::NAN),
+        "NaN zoom should be rejected"
+    );
     assert!(
         !is_node_geom_valid(&node, MAX_ZOOM + 1.0),
         "beyond MAX_ZOOM should be rejected"
     );
-    assert!(is_node_geom_valid(&node, MAX_ZOOM), "exactly MAX_ZOOM should pass");
+    assert!(
+        is_node_geom_valid(&node, MAX_ZOOM),
+        "exactly MAX_ZOOM should pass"
+    );
 }
 
 // E-38/P2-5 regression: valid nodes (normal sizes + boundary values) pass the guard.
@@ -706,7 +749,11 @@ fn children_take_cap_truncates_oversized_sibling_list() {
         .take(MAX_CHILDREN_PER_NODE)
         .copied()
         .collect();
-    assert_eq!(rendered.len(), MAX_CHILDREN_PER_NODE, "over the limit must truncate to the cap");
+    assert_eq!(
+        rendered.len(),
+        MAX_CHILDREN_PER_NODE,
+        "over the limit must truncate to the cap"
+    );
     assert_eq!(rendered[0], 0, "the first children keep their order");
     assert_eq!(
         rendered[MAX_CHILDREN_PER_NODE - 1],
@@ -720,5 +767,9 @@ fn children_take_cap_preserves_undersized_sibling_list() {
     // E-38/P2-5: a legitimate small fan-out is unaffected by the guard. 500 children < cap, all kept.
     let normal: Vec<u32> = (0..500).collect();
     let rendered: Vec<u32> = normal.iter().take(MAX_CHILDREN_PER_NODE).copied().collect();
-    assert_eq!(rendered.len(), 500, "under the limit all entries must be kept");
+    assert_eq!(
+        rendered.len(),
+        500,
+        "under the limit all entries must be kept"
+    );
 }

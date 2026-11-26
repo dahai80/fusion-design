@@ -380,14 +380,23 @@ mod tests {
         assert!(url.starts_with("http://127.0.0.1:11451/api/v1/artifacts?page=2&page_size=10"));
         assert!(url.contains("sort=updated_at"));
         assert!(url.contains("filters="));
-        assert!(!url.contains(' '), "query string must contain no bare spaces: {url}");
-        assert!(url.contains("%22type%22"), "filters must be URL-encoded when sent");
+        assert!(
+            !url.contains(' '),
+            "query string must contain no bare spaces: {url}"
+        );
+        assert!(
+            url.contains("%22type%22"),
+            "filters must be URL-encoded when sent"
+        );
     }
 
     #[test]
     fn url_omits_empty_filters() {
         let url = client().build_url(&ArtifactQuery::default());
-        assert!(!url.contains("filters="), "filters must not be sent when there are no filters");
+        assert!(
+            !url.contains("filters="),
+            "filters must not be sent when there are no filters"
+        );
         assert!(url.contains("page_size=24"));
     }
 
@@ -402,8 +411,12 @@ mod tests {
 
     #[test]
     fn non_local_endpoint_rejected() {
-        let err = ArtifactsClient::new("http://example.com:11451", "k").expect_err("public endpoint must be rejected");
-        assert!(err.to_string().contains("offline hard constraint"), "err={err}");
+        let err = ArtifactsClient::new("http://example.com:11451", "k")
+            .expect_err("public endpoint must be rejected");
+        assert!(
+            err.to_string().contains("offline hard constraint"),
+            "err={err}"
+        );
         assert!(ArtifactsClient::new("http://192.168.1.9:11451", "k").is_ok());
     }
 

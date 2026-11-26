@@ -1010,7 +1010,11 @@ pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
         .len();
     if len > MAX_IMAGE_BYTES {
         tracing::warn!(size = len, "sketch exceeds 50MB limit, refusing to encode");
-        anyhow::bail!("sketch {} exceeds the 50MB limit ({} bytes)", path.display(), len);
+        anyhow::bail!(
+            "sketch {} exceeds the 50MB limit ({} bytes)",
+            path.display(),
+            len
+        );
     }
     let bytes = std::fs::read(path)?;
     Ok(base64::Engine::encode(
@@ -1030,7 +1034,11 @@ pub async fn encode_image_base64_async(path: &std::path::Path) -> anyhow::Result
         .len();
     if len > MAX_IMAGE_BYTES {
         tracing::warn!(size = len, "sketch exceeds 50MB limit, refusing to encode");
-        anyhow::bail!("sketch {} exceeds the 50MB limit ({} bytes)", path.display(), len);
+        anyhow::bail!(
+            "sketch {} exceeds the 50MB limit ({} bytes)",
+            path.display(),
+            len
+        );
     }
     let bytes = tokio::fs::read(path).await?;
     Ok(base64::Engine::encode(
@@ -1257,7 +1265,10 @@ fn balance_json_braces(s: &mut String) {
     }
     if let Some(pos) = cut_len {
         s.truncate(pos);
-        tracing::info!(pos, "balance_json_braces: truncated trailing extra closing brackets");
+        tracing::info!(
+            pos,
+            "balance_json_braces: truncated trailing extra closing brackets"
+        );
         return;
     }
     if !stack.is_empty() {
@@ -1265,7 +1276,10 @@ fn balance_json_braces(s: &mut String) {
         while let Some(b) = stack.pop() {
             tail.push(if b == b'{' { '}' } else { ']' });
         }
-        tracing::info!(missing = tail.len(), "balance_json_braces: appended missing closing brackets");
+        tracing::info!(
+            missing = tail.len(),
+            "balance_json_braces: appended missing closing brackets"
+        );
         s.push_str(&tail);
     }
 }
@@ -1334,7 +1348,9 @@ fn fix_element_open_brace(s: &str) -> String {
                 if trimmed.ends_with(',') {
                     let keep = trimmed.len() - 1;
                     out.truncate(keep);
-                    tracing::info!("fix_element_open_brace: removed trailing comma before closing bracket");
+                    tracing::info!(
+                        "fix_element_open_brace: removed trailing comma before closing bracket"
+                    );
                 }
                 out.push_str(slice);
             }
@@ -1595,7 +1611,10 @@ fn salvage_pen_document(s: &str) -> Option<PenDocument> {
     for n in nodes {
         page.add(n);
     }
-    tracing::info!(nodes = page.nodes.len(), "salvage: node-level salvage produced document");
+    tracing::info!(
+        nodes = page.nodes.len(),
+        "salvage: node-level salvage produced document"
+    );
     doc.add_page(page);
     Some(doc)
 }
@@ -1742,11 +1761,19 @@ fn sanitize_node_id(id: &str) -> String {
 
 fn validate_node(mut node: PenNode) -> PenNode {
     if node.w <= 0.0 {
-        tracing::warn!("node {} w={:.1} is non-positive, corrected to 1.0", node.id, node.w);
+        tracing::warn!(
+            "node {} w={:.1} is non-positive, corrected to 1.0",
+            node.id,
+            node.w
+        );
         node.w = 1.0;
     }
     if node.h <= 0.0 {
-        tracing::warn!("node {} h={:.1} is non-positive, corrected to 1.0", node.id, node.h);
+        tracing::warn!(
+            "node {} h={:.1} is non-positive, corrected to 1.0",
+            node.id,
+            node.h
+        );
         node.h = 1.0;
     }
     node.children = node.children.into_iter().map(validate_node).collect();

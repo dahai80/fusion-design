@@ -50,14 +50,21 @@ pub fn migrate_schema(from: u32, doc: &mut serde_json::Value) -> Result<u32, Can
                     serde_json::json!(SCHEMA_VERSION),
                 );
             }
-            tracing::info!(from = 0, to = 1, "schema migration v0 -> v1 (no-op, only stamps the version)");
+            tracing::info!(
+                from = 0,
+                to = 1,
+                "schema migration v0 -> v1 (no-op, only stamps the version)"
+            );
             Ok(1)
         }
         // Already at the current version: should not be called, but defensively return as-is.
         v if v >= SCHEMA_VERSION => Ok(v),
         // Reserved slot: future breaking-migration arms like 1 => Ok(2).
         other => {
-            tracing::warn!(from = other, "schema migration: no matching arm, keeping original version");
+            tracing::warn!(
+                from = other,
+                "schema migration: no matching arm, keeping original version"
+            );
             Ok(other)
         }
     }
@@ -589,8 +596,11 @@ impl PenDocument {
         while v < SCHEMA_VERSION {
             v = migrate_schema(v, &mut value)?;
         }
-        let doc: PenDocument = serde_json::from_value(value)
-            .map_err(|e| CanvasError::ParseError(format!("deserialization with safety guardrails failed: {e}")))?;
+        let doc: PenDocument = serde_json::from_value(value).map_err(|e| {
+            CanvasError::ParseError(format!(
+                "deserialization with safety guardrails failed: {e}"
+            ))
+        })?;
         // Suspected truncation: non-empty input (not pure whitespace/empty object) but zero pages
         // parsed. Warns the user the file may be corrupted.
         if !trimmed.is_empty() && trimmed != "{}" && doc.pages.is_empty() {
@@ -1639,7 +1649,10 @@ mod security_tests {
         }
         json.push_str(&node);
         json.push_str("]}],\"variables\":null,\"active_design_system\":null}");
-        assert!(PenDocument::from_json(&json).is_err(), "depth over limit should be rejected");
+        assert!(
+            PenDocument::from_json(&json).is_err(),
+            "depth over limit should be rejected"
+        );
     }
 
     /// A4: a bare `serde_json::from_str::<PenDocument>` (the path bypassing from_json) must be
@@ -1684,7 +1697,10 @@ mod security_tests {
             r#"{{"pages":[{{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":[{nodes}]}}]}}"#
         );
         let result: Result<PenDocument, _> = serde_json::from_str(&json);
-        assert!(result.is_err(), "bare from_str with too many nodes must be rejected (A4)");
+        assert!(
+            result.is_err(),
+            "bare from_str with too many nodes must be rejected (A4)"
+        );
     }
 
     /// A1: missing schema_version (old file) counts as 1 and loads normally.
@@ -1724,7 +1740,10 @@ mod security_tests {
     #[test]
     fn validate_limits_accepts_normal_doc() {
         let doc = sample_doc("ok");
-        assert!(doc.validate_limits().is_ok(), "normal document should pass validation");
+        assert!(
+            doc.validate_limits().is_ok(),
+            "normal document should pass validation"
+        );
     }
 
     /// Performance baseline: serialize/deserialize/layout timings for a 1000-node document.
@@ -1763,7 +1782,10 @@ mod security_tests {
         let doc2 = PenDocument::from_json(&json).unwrap();
         let de_ms = t.elapsed().as_millis();
         eprintln!("perf deserialize(1000): {de_ms}ms");
-        assert!(doc2.pages[0].nodes.len() >= 1000, "deserialized node count should be >=1000");
+        assert!(
+            doc2.pages[0].nodes.len() >= 1000,
+            "deserialized node count should be >=1000"
+        );
 
         assert!(
             ser_ms < THRESHOLD_MS,
@@ -1783,7 +1805,8 @@ mod security_tests {
         // legitimate empty document) but should recognize the suspicious case (here reflected by
         // returning Ok + an internal warn; behavioral assertions: no panic, empty-pages document).
         let truncated = r#"{"schema_version":1,"variables":null}"#;
-        let doc = PenDocument::from_json(truncated).expect("truncated file should parse without error");
+        let doc =
+            PenDocument::from_json(truncated).expect("truncated file should parse without error");
         assert!(doc.pages.is_empty(), "truncated file pages should be empty");
         assert_eq!(doc.schema_version, 1);
     }

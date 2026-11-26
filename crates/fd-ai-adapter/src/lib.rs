@@ -305,8 +305,9 @@ impl Default for FusionMlxClient {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(error = %e, "default endpoint construction failed, falling back to local default");
-                Self::with_endpoint(DEFAULT_MLX_ENDPOINT)
-                    .expect("DEFAULT_MLX_ENDPOINT must be a valid localhost (guaranteed at compile time)")
+                Self::with_endpoint(DEFAULT_MLX_ENDPOINT).expect(
+                    "DEFAULT_MLX_ENDPOINT must be a valid localhost (guaranteed at compile time)",
+                )
             }
         }
     }
@@ -724,7 +725,11 @@ async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>
                     continue;
                 }
                 if attempt + 1 < max {
-                    tracing::warn!(attempt, code, "retry_async_post: permanent error, not retrying");
+                    tracing::warn!(
+                        attempt,
+                        code,
+                        "retry_async_post: permanent error, not retrying"
+                    );
                 } else {
                     tracing::error!(attempt, code, "retry_async_post: retries exhausted");
                 }
@@ -750,7 +755,8 @@ async fn retry_async_post<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("retry_async_post: retry loop exited abnormally")))
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("retry_async_post: retry loop exited abnormally")))
 }
 
 // ── SSE streaming inference ──
@@ -919,8 +925,9 @@ pub async fn chat_stream_messages(
         match got {
             Some(r) => r,
             None => {
-                let e = last_err
-                    .unwrap_or_else(|| anyhow::anyhow!("chat_stream_messages: retry loop exited abnormally"));
+                let e = last_err.unwrap_or_else(|| {
+                    anyhow::anyhow!("chat_stream_messages: retry loop exited abnormally")
+                });
                 return futures::stream::once(async move { Err(e) }).boxed();
             }
         }
@@ -1269,7 +1276,11 @@ impl FusionMlxClient {
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        tracing::warn!(code, msg, "check_generate: model not loaded, retries exhausted");
+                        tracing::warn!(
+                            code,
+                            msg,
+                            "check_generate: model not loaded, retries exhausted"
+                        );
                         return Ok(GenerateProbeStatus {
                             model_loaded: false,
                             available: false,
@@ -1282,7 +1293,9 @@ impl FusionMlxClient {
                         return Ok(GenerateProbeStatus {
                             model_loaded: false,
                             available: false,
-                            status: Some(format!("auth failed ({code}): FUSION_CLIENT_KEY invalid")),
+                            status: Some(format!(
+                                "auth failed ({code}): FUSION_CLIENT_KEY invalid"
+                            )),
                             http_code: Some(code),
                         });
                     } else {
@@ -1309,7 +1322,9 @@ impl FusionMlxClient {
                     return Ok(GenerateProbeStatus {
                         model_loaded: false,
                         available: false,
-                        status: Some(format!("generate request failed (after {max} retries): {e}")),
+                        status: Some(format!(
+                            "generate request failed (after {max} retries): {e}"
+                        )),
                         http_code: None,
                     });
                 }
@@ -1824,7 +1839,8 @@ each entry of the nodes list is {id,kind(rect|circle|text|image|group),x,y,w,h,t
         let b64 = encode_image_base64(image_path)?;
         tracing::info!(path = %image_path.display(), size_b64 = b64.len(), "screenshot_to_ui: image encoded");
         let sys = ui_generator_system_prompt();
-        let user = format!("Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\".");
+        let user =
+            format!("Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\".");
         let resp = chat_with_image(
             &self.client,
             &self.default_model,
@@ -2017,7 +2033,10 @@ mod skills_tests {
         // A-1: any public endpoint among the values rejects the whole list.
         std::env::remove_var("FUSION_MLX_BASE_URL");
         let r = FusionMlxClient::resolve_endpoint("http://127.0.0.1:11432,http://8.8.8.8:11432");
-        assert!(r.is_err(), "a list containing a public IP must be rejected as a whole");
+        assert!(
+            r.is_err(),
+            "a list containing a public IP must be rejected as a whole"
+        );
     }
 
     #[test]
@@ -2390,7 +2409,11 @@ mod mlx_integration {
         let (url, captured) = spawn_header_capture_server(body).await;
         let client = mock_client(&url);
         let _ = client.chat_async("m", "s", "u", 64).await.unwrap();
-        let raw = captured.lock().unwrap().clone().expect("request not captured");
+        let raw = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request not captured");
         assert!(
             raw.to_lowercase().contains("x-fusion-route: fusion-design"),
             "missing X-Fusion-Route header: {raw}"
@@ -2405,7 +2428,11 @@ mod mlx_integration {
         let (url, captured) = spawn_header_capture_server(body).await;
         let client = mock_client(&url);
         let _ = client.health_check().await.unwrap();
-        let raw = captured.lock().unwrap().clone().expect("request not captured");
+        let raw = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request not captured");
         assert!(
             raw.to_lowercase().contains("x-fusion-route: fusion-design"),
             "missing X-Fusion-Route header: {raw}"
@@ -2876,7 +2903,10 @@ mod mlx_integration {
         ));
         let client = mock_client(&url);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_err(), "constant 503 should fail after retries are exhausted");
+        assert!(
+            out.is_err(),
+            "constant 503 should fail after retries are exhausted"
+        );
         let calls = count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             calls, RETRY_DEFAULT_MAX_ATTEMPTS,
@@ -2904,11 +2934,21 @@ mod mlx_integration {
         let (url_b, count_b) = rt.block_on(spawn_sequence_server(vec![], body.clone()));
         let client = mock_client_endpoints(vec![url_a, url_b]);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_ok(), "A 503 should fail over to B and succeed: {:?}", out);
+        assert!(
+            out.is_ok(),
+            "A 503 should fail over to B and succeed: {:?}",
+            out
+        );
         let calls_a = count_a.load(std::sync::atomic::Ordering::SeqCst);
         let calls_b = count_b.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(calls_a, 1, "A should be called exactly once (first request lands on A, then switches away)");
-        assert_eq!(calls_b, 1, "B should be called once (failover lands on B successfully)");
+        assert_eq!(
+            calls_a, 1,
+            "A should be called exactly once (first request lands on A, then switches away)"
+        );
+        assert_eq!(
+            calls_b, 1,
+            "B should be called once (failover lands on B successfully)"
+        );
     }
 
     /// A-1: all nodes 503 → retries exhausted, both nodes polled.
@@ -2925,7 +2965,10 @@ mod mlx_integration {
         ));
         let client = mock_client_endpoints(vec![url_a, url_b]);
         let out = client.chat_sync("m", "sys", "ping", 1);
-        assert!(out.is_err(), "all nodes 503 should exhaust retries and fail");
+        assert!(
+            out.is_err(),
+            "all nodes 503 should exhaust retries and fail"
+        );
         let total = count_a.load(std::sync::atomic::Ordering::SeqCst)
             + count_b.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
@@ -2941,7 +2984,10 @@ mod mlx_integration {
         let (url, count) = spawn_sequence_server(vec![503, 503], body).await;
         let client = mock_client(&url);
         let p = client.check_generate("qwen3.5-4b-4bit").await.unwrap();
-        assert!(p.model_loaded, "after 503x2 the retry should succeed and mark model_loaded");
+        assert!(
+            p.model_loaded,
+            "after 503x2 the retry should succeed and mark model_loaded"
+        );
         assert!(p.available);
         assert_eq!(p.http_code, Some(200));
         assert_eq!(
@@ -2983,7 +3029,10 @@ mod mlx_integration {
         let (tokens, saw_done) = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
             .await
             .expect("after the 502 retry, connect and finish the stream within 5 seconds");
-        assert_eq!(tokens, "Hi", "deltas should be produced normally after retry");
+        assert_eq!(
+            tokens, "Hi",
+            "deltas should be produced normally after retry"
+        );
         assert!(saw_done, "the stream should end normally with [DONE]");
     }
 
@@ -3025,7 +3074,10 @@ mod mlx_integration {
         let errored = tokio::time::timeout(std::time::Duration::from_secs(10), drain)
             .await
             .expect("the stall stream should end with Err within 10 seconds, not hang forever");
-        assert!(errored, "the stall stream should end with Err (FAULT-1 fail visibly)");
+        assert!(
+            errored,
+            "the stall stream should end with Err (FAULT-1 fail visibly)"
+        );
         std::env::remove_var("FUSION_MLX_STREAM_IDLE_SECS");
     }
 
@@ -3071,7 +3123,11 @@ mod mlx_integration {
         let _ = chat_with_image(&client, "m", "sys", "usr", &b64, 128)
             .await
             .unwrap();
-        let raw = captured.lock().unwrap().clone().expect("request not captured");
+        let raw = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request not captured");
         assert!(
             raw.contains("data:image/png;base64,"),
             "multimodal payload missing the data:image/png;base64 prefix: {}",
@@ -3096,7 +3152,11 @@ mod mlx_integration {
             .unwrap();
         assert_eq!(doc.pages.len(), 1);
         assert_eq!(doc.pages[0].nodes[0].id, "c");
-        let raw = captured.lock().unwrap().clone().expect("request not captured");
+        let raw = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request not captured");
         assert!(
             raw.contains("data:image/png;base64,"),
             "image_to_ui_async did not send a real image payload (still a text description): {}",
@@ -3160,7 +3220,10 @@ mod mlx_integration {
         let skills = DesignSkills::new(client, "qwen3.5");
         let sketch = write_fixture_png();
         let result = skills.image_to_ui_async(&sketch, "test", "Home").await;
-        assert!(result.is_err(), "HTTP 5xx should propagate, not silently succeed");
+        assert!(
+            result.is_err(),
+            "HTTP 5xx should propagate, not silently succeed"
+        );
     }
     #[tokio::test]
     async fn chat_stream_messages_emits_deltas_and_finishes() {
@@ -3222,9 +3285,14 @@ mod mlx_integration {
         };
         tokio::time::timeout(std::time::Duration::from_secs(3), drain)
             .await
-            .expect("the stream should terminate within 3 seconds, no infinite loop (#18 regression)");
+            .expect(
+                "the stream should terminate within 3 seconds, no infinite loop (#18 regression)",
+            );
         // Both frames were buffered and drained by the EOF branch → "Hello" is not lost
-        assert_eq!(tokens, "Hello", "early EOF must not lose already-emitted tail deltas");
+        assert_eq!(
+            tokens, "Hello",
+            "early EOF must not lose already-emitted tail deltas"
+        );
     }
 
     // L6 regression: a CJK multi-byte character cut mid-character by network chunking.
@@ -3289,7 +3357,10 @@ mod mlx_integration {
             tokens, "登录",
             "the CJK character cut across chunks should be restored intact, no U+FFFD replacement"
         );
-        assert!(!tokens.contains('\u{fffd}'), "no U+FFFD replacement character may appear");
+        assert!(
+            !tokens.contains('\u{fffd}'),
+            "no U+FFFD replacement character may appear"
+        );
     }
 
     /// Mock server capturing the request body into a Mutex: returns a fixed response while
@@ -3409,10 +3480,17 @@ mod mlx_integration {
         let payload: serde_json::Value =
             serde_json::from_slice(&raw.as_bytes()[body_start..]).unwrap();
         let msgs = payload["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 1, "an empty system_prompt must not produce a system message");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "an empty system_prompt must not produce a system message"
+        );
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"], "hi");
-        assert_eq!(payload["model"], "default-model", "model=None falls back to default");
+        assert_eq!(
+            payload["model"], "default-model",
+            "model=None falls back to default"
+        );
     }
 
     /// H-A7: multi-line text should chunk per line into multiple TextDeltas, not collapse into a

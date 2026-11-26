@@ -37,7 +37,9 @@ pub(crate) fn render_dom(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            fd_log_error(&format!("fd-host-web: DOM render PenDocument parse failed: {e}"));
+            fd_log_error(&format!(
+                "fd-host-web: DOM render PenDocument parse failed: {e}"
+            ));
             return;
         }
     };
@@ -70,7 +72,9 @@ pub(crate) fn render_dom(doc_json: &str) {
                     div
                 }
                 Err(_) => {
-                    web_sys::console::warn_1(&"fd-host-web: render_dom failed to create container div".into());
+                    web_sys::console::warn_1(
+                        &"fd-host-web: render_dom failed to create container div".into(),
+                    );
                     return;
                 }
             }
@@ -99,7 +103,10 @@ pub(crate) fn render_dom(doc_json: &str) {
             inner.selected_ids.clear();
         }
     }
-    web_sys::console::log_1(&"fd-host-web: data-fd-doc attribute cache removed, switched to in-memory cache (C11)".into());
+    web_sys::console::log_1(
+        &"fd-host-web: data-fd-doc attribute cache removed, switched to in-memory cache (C11)"
+            .into(),
+    );
 
     // Batch-insert via a DocumentFragment
     let fragment = document.create_document_fragment();
@@ -119,7 +126,8 @@ pub(crate) fn render_dom(doc_json: &str) {
     container.append_child(&fragment).ok();
 
     web_sys::console::log_1(
-        &format!("fd-host-web: DOM render done, {node_count} nodes (after viewport culling)").into(),
+        &format!("fd-host-web: DOM render done, {node_count} nodes (after viewport culling)")
+            .into(),
     );
 
     // Event delegation: container-level listeners install once per container (L-15).
@@ -130,7 +138,9 @@ pub(crate) fn render_dom(doc_json: &str) {
         setup_canvas_zoom_listener("fusion-dom-root");
         setup_canvas_pan_listener("fusion-dom-root");
         setup_marquee_listener("fusion-dom-root");
-        web_sys::console::log_1(&"fd-host-web: container-level listeners installed (per-container)".into());
+        web_sys::console::log_1(
+            &"fd-host-web: container-level listeners installed (per-container)".into(),
+        );
     }
 }
 
@@ -267,7 +277,9 @@ pub(crate) fn viewport_cull_update() {
                 match PenDocument::from_json(&doc_json) {
                     Ok(d) => d,
                     Err(e) => {
-                        fd_log_error(&format!("fd-host-web: viewport_cull_update parse failed: {e}"));
+                        fd_log_error(&format!(
+                            "fd-host-web: viewport_cull_update parse failed: {e}"
+                        ));
                         return;
                     }
                 }
@@ -324,7 +336,11 @@ pub(crate) fn viewport_cull_update() {
     }
 
     web_sys::console::log_1(
-        &format!("fd-host-web: viewport cull update, added {} nodes", ids_to_add.len()).into(),
+        &format!(
+            "fd-host-web: viewport cull update, added {} nodes",
+            ids_to_add.len()
+        )
+        .into(),
     );
 }
 
@@ -567,7 +583,10 @@ fn render_node_to_dom(
         }
     } else {
         web_sys::console::warn_1(
-            &format!("render_node_to_dom: nesting depth beyond {MAX_RENDER_DEPTH}, skipping subtree").into(),
+            &format!(
+                "render_node_to_dom: nesting depth beyond {MAX_RENDER_DEPTH}, skipping subtree"
+            )
+            .into(),
         );
     }
 

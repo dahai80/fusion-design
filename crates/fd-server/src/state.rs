@@ -275,7 +275,9 @@ mod tests {
         store.rollback(&id, 1).unwrap();
         let s = store.get(&id).unwrap();
         assert_eq!(s.current, 1);
-        let v3 = store.push_version(&id, doc(4), "try another direction").unwrap();
+        let v3 = store
+            .push_version(&id, doc(4), "try another direction")
+            .unwrap();
         assert_eq!(v3, 3);
         let s = store.get(&id).unwrap();
         assert_eq!(s.current, 3);

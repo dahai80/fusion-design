@@ -23,7 +23,10 @@ pub async fn token_css(design_system: String) -> anyhow::Result<()> {
     let mut reg = fd_design_system::DesignSystemRegistry::new();
     reg.register_builtin();
     let system = reg.get(&design_system).ok_or_else(|| {
-        anyhow::anyhow!("design system '{design_system}' not found, available: {:?}", reg.list())
+        anyhow::anyhow!(
+            "design system '{design_system}' not found, available: {:?}",
+            reg.list()
+        )
     })?;
     println!("{}", system.to_css_custom_properties());
     Ok(())
@@ -33,7 +36,10 @@ pub async fn theme(design_system: String, mode: ThemeModeArg) -> anyhow::Result<
     let mut reg = fd_design_system::DesignSystemRegistry::new();
     reg.register_builtin();
     let system = reg.get(&design_system).ok_or_else(|| {
-        anyhow::anyhow!("design system '{design_system}' not found, available: {:?}", reg.list())
+        anyhow::anyhow!(
+            "design system '{design_system}' not found, available: {:?}",
+            reg.list()
+        )
     })?;
     let css = system.to_css_custom_properties_for_theme(mode.into());
     println!("{css}");

@@ -119,7 +119,10 @@ pub async fn train(
         other => anyhow::bail!("unsupported --method: {other} (only sft|grpo)"),
     };
     if !status.success() {
-        anyhow::bail!("fusion-trainer exited with code {}", status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "fusion-trainer exited with code {}",
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(())
 }

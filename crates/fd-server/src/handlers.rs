@@ -53,7 +53,8 @@ fn doc_json(doc: &fd_canvas_core::PenDocument) -> anyhow::Result<String> {
 }
 
 fn doc_from_json(json: &str) -> anyhow::Result<fd_canvas_core::PenDocument> {
-    serde_json::from_str(json).map_err(|e| anyhow::anyhow!("PenDocument deserialization failed: {e}"))
+    serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("PenDocument deserialization failed: {e}"))
 }
 
 /// Unified JSON response wrapper.
@@ -324,7 +325,11 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             tracing::warn!(design_system = %ds, "api/generate: unknown design system, ignoring");
         }
     }
-    match finalize_new_session(state, &doc, &format!("generate: {}", truncate(&req.prompt, 40))) {
+    match finalize_new_session(
+        state,
+        &doc,
+        &format!("generate: {}", truncate(&req.prompt, 40)),
+    ) {
         Ok(v) => v,
         Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -377,7 +382,10 @@ pub async fn iterate(state: &Arc<AppState>, body: &[u8]) -> Resp {
         );
     };
     let Some(cur) = sess.current_doc() else {
-        return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "session has no current version");
+        return err_json(
+            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            "session has no current version",
+        );
     };
     // Region externalization (issue#34): region given but no match -> 400 (fail
     // visibly, no silent fallback to full document).
@@ -615,7 +623,9 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
         let attempt_hint = if attempt == 1 {
             hint.clone()
         } else {
-            format!("{hint} (attempt {attempt}, output valid complete JSON strictly, no extra quotes)")
+            format!(
+                "{hint} (attempt {attempt}, output valid complete JSON strictly, no extra quotes)"
+            )
         };
         result = run_restore(&img_path, &model, &attempt_hint, &page).await;
         if result.is_ok() {
@@ -629,7 +639,10 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, "api/restore: multimodal restore failed (including retries)");
-            return err_json(hyper::StatusCode::BAD_GATEWAY, &format!("restore failed: {e}"));
+            return err_json(
+                hyper::StatusCode::BAD_GATEWAY,
+                &format!("restore failed: {e}"),
+            );
         }
     };
     if let Some(ds) = req.design_system.as_deref() {
@@ -642,16 +655,22 @@ pub async fn restore(state: &Arc<AppState>, body: &[u8]) -> Resp {
     }
     match req.session {
         Some(sid) => {
-            match push_version(state, &sid, &doc, &format!("restore: {}", truncate(&hint, 40))) {
+            match push_version(
+                state,
+                &sid,
+                &doc,
+                &format!("restore: {}", truncate(&hint, 40)),
+            ) {
                 Ok(v) => v,
                 Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
         }
-        None => match finalize_new_session(state, &doc, &format!("restore: {}", truncate(&hint, 40)))
-        {
-            Ok(v) => v,
-            Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        },
+        None => {
+            match finalize_new_session(state, &doc, &format!("restore: {}", truncate(&hint, 40))) {
+                Ok(v) => v,
+                Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            }
+        }
     }
 }
 
@@ -718,7 +737,12 @@ pub fn rollback(state: &Arc<AppState>, body: &[u8]) -> Resp {
     }
     let sess = match state.sessions.get(&req.session) {
         Some(s) => s,
-        None => return err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, "session lost after rollback"),
+        None => {
+            return err_json(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                "session lost after rollback",
+            )
+        }
     };
     let cur = sess
         .current_doc()
@@ -1171,7 +1195,10 @@ fn engine_create_request(
         Some("slides") => "template",
         Some("design") | None => "app",
         Some(other) => {
-            tracing::warn!(kind = other, "api/save-artifact: unknown kind, ingesting as app");
+            tracing::warn!(
+                kind = other,
+                "api/save-artifact: unknown kind, ingesting as app"
+            );
             "app"
         }
     };
@@ -1535,8 +1562,14 @@ mod tests {
         let v: serde_json::Value = json_of(resp).await;
         assert!(v["error"].is_null(), "html export should not error: {v}");
         let content = v["content"].as_str().unwrap();
-        assert!(content.contains("<!DOCTYPE html>"), "HTML export must be a complete document");
-        assert!(content.contains("Fusion"), "HTML export must contain the Text node content");
+        assert!(
+            content.contains("<!DOCTYPE html>"),
+            "HTML export must be a complete document"
+        );
+        assert!(
+            content.contains("Fusion"),
+            "HTML export must contain the Text node content"
+        );
         assert!(v["filename"].as_str().unwrap().ends_with(".html"));
 
         let body = serde_json::json!({"session": sid, "format": "react"}).to_string();
@@ -1544,7 +1577,10 @@ mod tests {
         let v: serde_json::Value = json_of(resp).await;
         assert!(v["error"].is_null(), "react export should not error: {v}");
         let content = v["content"].as_str().unwrap();
-        assert!(content.contains("export function"), "React export must be a component");
+        assert!(
+            content.contains("export function"),
+            "React export must be a component"
+        );
         assert!(v["filename"].as_str().unwrap().ends_with(".tsx"));
 
         // Export a specific old version + reject invalid format.
@@ -1555,7 +1591,10 @@ mod tests {
         let body = serde_json::json!({"session": sid, "format": "html", "version": 1}).to_string();
         let resp = export(&state, body.as_bytes());
         let v: serde_json::Value = json_of(resp).await;
-        assert!(v["error"].is_null(), "export of a specific version should succeed");
+        assert!(
+            v["error"].is_null(),
+            "export of a specific version should succeed"
+        );
         let body = serde_json::json!({"session": sid, "format": "swiftui"}).to_string();
         let resp = export(&state, body.as_bytes());
         assert_eq!(
@@ -1620,7 +1659,11 @@ mod tests {
         assert_eq!(files.len(), 2, "must write HTML + TSX: {v}");
         for f in files {
             let p = std::path::Path::new(f.as_str().unwrap());
-            assert!(p.exists(), "IPC files must actually be written: {}", p.display());
+            assert!(
+                p.exists(),
+                "IPC files must actually be written: {}",
+                p.display()
+            );
         }
         assert!(
             files
@@ -1759,7 +1802,10 @@ mod tests {
         );
         assert!(user.contains("Document structure"), "{user}");
         assert!(user.contains("v2: iterate: add button"), "{user}");
-        assert!(!user.contains("\"bg\""), "region JSON must not carry unselected nodes: {user}");
+        assert!(
+            !user.contains("\"bg\""),
+            "region JSON must not carry unselected nodes: {user}"
+        );
         assert!(user.contains("make the title bigger"), "{user}");
         let sys = crate::prompt::ITERATE_SYS;
         assert!(
@@ -1975,7 +2021,10 @@ mod contract_tests {
         assert!(v["error"].is_null(), "{v}");
         assert_eq!(v["session"], sid);
         assert_eq!(v["current_version"], 1);
-        assert!(v["document"].is_string(), "document must be a JSON string: {v}");
+        assert!(
+            v["document"].is_string(),
+            "document must be a JSON string: {v}"
+        );
 
         // export: {filename, content, mime}.
         let b = serde_json::json!({"session": sid, "format": "html"});

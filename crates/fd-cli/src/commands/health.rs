@@ -25,7 +25,9 @@ pub async fn run(endpoint: String) -> anyhow::Result<()> {
     };
     println!("{output}");
     if failed {
-        tracing::error!("MLX health check failed: service unavailable (available=false or request error)");
+        tracing::error!(
+            "MLX health check failed: service unavailable (available=false or request error)"
+        );
         anyhow::bail!("MLX health check failed (see the JSON diagnostics above)");
     }
     Ok(())

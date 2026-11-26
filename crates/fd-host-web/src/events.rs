@@ -769,7 +769,9 @@ pub(crate) fn setup_marquee_listener(container_id: &str) {
         let marquee_el = match doc.create_element("div") {
             Ok(el) => el,
             Err(_) => {
-                web_sys::console::warn_1(&"fd-host-web: marquee failed to create marquee element".into());
+                web_sys::console::warn_1(
+                    &"fd-host-web: marquee failed to create marquee element".into(),
+                );
                 return;
             }
         };

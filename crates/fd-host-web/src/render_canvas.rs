@@ -86,7 +86,9 @@ pub(crate) fn render_plan_preview(doc_json: &str) {
     let overlay = match document.create_element("div") {
         Ok(el) => el,
         Err(_) => {
-            web_sys::console::warn_1(&"fd-host-web: render_plan_preview failed to create overlay".into());
+            web_sys::console::warn_1(
+                &"fd-host-web: render_plan_preview failed to create overlay".into(),
+            );
             return;
         }
     };
@@ -294,7 +296,10 @@ fn render_node(
         fd_canvas_core::NodeKind::Group => {
             if depth >= MAX_RENDER_DEPTH {
                 web_sys::console::warn_1(
-                    &format!("render_node: nesting depth beyond {MAX_RENDER_DEPTH}, skipping subtree").into(),
+                    &format!(
+                        "render_node: nesting depth beyond {MAX_RENDER_DEPTH}, skipping subtree"
+                    )
+                    .into(),
                 );
                 return;
             }

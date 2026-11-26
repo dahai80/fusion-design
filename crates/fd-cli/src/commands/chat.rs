@@ -96,7 +96,10 @@ pub async fn run(
     // and triggering ambiguous errors.
     for m in &messages {
         if !matches!(m.role.as_str(), "system" | "user" | "assistant") {
-            anyhow::bail!("chat: invalid role '{}', only system/user/assistant are supported", m.role);
+            anyhow::bail!(
+                "chat: invalid role '{}', only system/user/assistant are supported",
+                m.role
+            );
         }
     }
     tracing::info!(model = %model, count = messages.len(), "chat: streaming inference started");

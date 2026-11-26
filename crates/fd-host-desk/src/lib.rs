@@ -133,7 +133,9 @@ pub enum HostConfigError {
     InvalidEndpoint(String),
     #[error("offline constraint violated: endpoint host {0} is not localhost")]
     PublicEndpoint(String),
-    #[error("offline hard constraint violated: block_external=false, offline mode cannot be disabled")]
+    #[error(
+        "offline hard constraint violated: block_external=false, offline mode cannot be disabled"
+    )]
     OfflineConstraintViolated,
     /// A2: the bridge protocol version is above what this side supports; an explicit error must be
     /// sent back instead of silently dropping features.
@@ -315,7 +317,10 @@ mod tests {
         let s = r#"{"direction":"WebViewToBackend","kind":"ai.generate","payload":{}}"#;
         let m: HostMessage = serde_json::from_str(s).unwrap();
         assert_eq!(m.schema_version, 0);
-        assert!(m.check_protocol().is_ok(), "legacy messages should pass for compatibility");
+        assert!(
+            m.check_protocol().is_ok(),
+            "legacy messages should pass for compatibility"
+        );
     }
 
     // A2 regression: a version above ours → check_protocol errors (no silent feature loss).
@@ -327,6 +332,9 @@ mod tests {
             payload: serde_json::json!({}),
             schema_version: HOST_PROTOCOL_VERSION + 1,
         };
-        assert!(m.check_protocol().is_err(), "a version above ours must be rejected");
+        assert!(
+            m.check_protocol().is_err(),
+            "a version above ours must be rejected"
+        );
     }
 }

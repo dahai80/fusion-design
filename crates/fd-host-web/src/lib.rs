@@ -413,7 +413,9 @@ pub(crate) fn show_snap_lines(x_lines: &[f32], y_lines: &[f32]) {
     let overlay = match document.create_element("div") {
         Ok(el) => el,
         Err(_) => {
-            web_sys::console::warn_1(&"fd-host-web: show_snap_lines failed to create overlay".into());
+            web_sys::console::warn_1(
+                &"fd-host-web: show_snap_lines failed to create overlay".into(),
+            );
             return;
         }
     };
@@ -485,7 +487,9 @@ pub(crate) fn apply_tokens_css(css: &str) {
     let style_el = match document.create_element("style") {
         Ok(el) => el,
         Err(_) => {
-            web_sys::console::warn_1(&"fd-host-web: apply_tokens_css failed to create <style>".into());
+            web_sys::console::warn_1(
+                &"fd-host-web: apply_tokens_css failed to create <style>".into(),
+            );
             return;
         }
     };
@@ -534,7 +538,8 @@ fn sanitize_token_css(css: &str) -> String {
     let (safe, stripped) = sanitize_token_css_inner(css);
     if stripped > 0 {
         web_sys::console::warn_1(
-            &format!("fd-host-web: sanitize_token_css stripped {stripped} dangerous CSS lines").into(),
+            &format!("fd-host-web: sanitize_token_css stripped {stripped} dangerous CSS lines")
+                .into(),
         );
     }
     safe

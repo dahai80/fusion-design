@@ -37,7 +37,9 @@ pub fn init_logging() -> Option<WorkerGuard> {
     let log_dir = match resolve_log_dir() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[fusion-design] failed to resolve log directory, falling back to stdout: {e}");
+            eprintln!(
+                "[fusion-design] failed to resolve log directory, falling back to stdout: {e}"
+            );
             tracing_subscriber::fmt().with_env_filter(env_filter).init();
             return None;
         }
@@ -177,7 +179,10 @@ mod tests {
         match result {
             Ok(d) => {
                 let has_seg = d.components().any(|c| c.as_os_str() == "fusion-design");
-                assert!(has_seg, "platform default path should contain fusion-design segment: {d:?}");
+                assert!(
+                    has_seg,
+                    "platform default path should contain fusion-design segment: {d:?}"
+                );
             }
             Err(_) => { /* platform has no HOME (CI without HOME); Err is acceptable */ }
         }

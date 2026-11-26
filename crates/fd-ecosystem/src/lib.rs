@@ -119,7 +119,10 @@ fn reject_symlink_below_base(base: &Path, joined: &Path) -> anyhow::Result<()> {
                     component = %acc.display(),
                     "IPC subpath contains a symlink component below base, rejecting under fallback check to prevent traversal"
                 );
-                anyhow::bail!("IPC subpath contains a symlink component: {}", acc.display());
+                anyhow::bail!(
+                    "IPC subpath contains a symlink component: {}",
+                    acc.display()
+                );
             }
         }
     }
@@ -397,12 +400,17 @@ impl EcosystemLink {
         // R-7: atomic claim. .processing/ shares the parent with the message directory; same-filesystem rename is atomic.
         let proc_dir = file
             .parent()
-            .ok_or_else(|| anyhow::anyhow!("IPC message file has no parent directory: {}", file.display()))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IPC message file has no parent directory: {}",
+                    file.display()
+                )
+            })?
             .join(".processing");
         std::fs::create_dir_all(&proc_dir)?;
-        let proc_name = file
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("IPC message file has no file name: {}", file.display()))?;
+        let proc_name = file.file_name().ok_or_else(|| {
+            anyhow::anyhow!("IPC message file has no file name: {}", file.display())
+        })?;
         let proc_file = proc_dir.join(proc_name);
         match std::fs::rename(file, &proc_file) {
             Ok(()) => {
@@ -418,7 +426,10 @@ impl EcosystemLink {
                     file = %file.display(),
                     "consume: file already claimed by another consumer, skipping"
                 );
-                anyhow::bail!("IPC message already consumed by another consumer: {}", file.display());
+                anyhow::bail!(
+                    "IPC message already consumed by another consumer: {}",
+                    file.display()
+                );
             }
             Err(e) => {
                 tracing::warn!(file = %file.display(), error = %e, "consume: rename claim failed");
@@ -428,19 +439,35 @@ impl EcosystemLink {
         // L-6: TOCTOU fix — single-fd closed loop, no metadata() precheck (the file can change between meta and read).
         // After open, take(cap) limits reads; the upper bound is validated by the actual bytes read.
         const MAX_IPC_FILE: u64 = 8 * 1024 * 1024;
-        let f = std::fs::File::open(&proc_file)
-            .map_err(|e| anyhow::anyhow!("failed to open IPC message file {}: {e}", proc_file.display()))?;
+        let f = std::fs::File::open(&proc_file).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to open IPC message file {}: {e}",
+                proc_file.display()
+            )
+        })?;
         use std::io::Read;
         let mut buf = Vec::new();
         f.take(MAX_IPC_FILE + 1)
             .read_to_end(&mut buf)
-            .map_err(|e| anyhow::anyhow!("failed to read IPC message file {}: {e}", proc_file.display()))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to read IPC message file {}: {e}",
+                    proc_file.display()
+                )
+            })?;
         if buf.len() as u64 > MAX_IPC_FILE {
-            tracing::warn!(size = buf.len(), "IPC message file exceeds the 8MB limit, rejecting read");
-            anyhow::bail!("IPC message file {} exceeds the 8MB safety limit", proc_file.display());
+            tracing::warn!(
+                size = buf.len(),
+                "IPC message file exceeds the 8MB limit, rejecting read"
+            );
+            anyhow::bail!(
+                "IPC message file {} exceeds the 8MB safety limit",
+                proc_file.display()
+            );
         }
-        let json = String::from_utf8(buf)
-            .map_err(|e| anyhow::anyhow!("IPC message file is not UTF-8 {}: {e}", proc_file.display()))?;
+        let json = String::from_utf8(buf).map_err(|e| {
+            anyhow::anyhow!("IPC message file is not UTF-8 {}: {e}", proc_file.display())
+        })?;
         let msg: LinkMessage = serde_json::from_str(&json).map_err(|e| {
             // R-A2: on parse failure do not delete the processing file, keep it for diagnostics, report the path explicitly.
             anyhow::anyhow!(
@@ -449,7 +476,10 @@ impl EcosystemLink {
             )
         })?;
         std::fs::remove_file(&proc_file).map_err(|e| {
-            anyhow::anyhow!("failed to delete IPC message file after consumption {}: {e}", proc_file.display())
+            anyhow::anyhow!(
+                "failed to delete IPC message file after consumption {}: {e}",
+                proc_file.display()
+            )
         })?;
         Ok(msg)
     }
@@ -571,7 +601,10 @@ impl EcosystemLink {
             }
         }
         if !commands.is_empty() {
-            tracing::info!(count = commands.len(), "watch_code_changes: found style changes");
+            tracing::info!(
+                count = commands.len(),
+                "watch_code_changes: found style changes"
+            );
         } else {
             tracing::debug!("watch_code_changes: no valid style-change commands");
         }
@@ -819,16 +852,25 @@ mod tests {
         // Half-written invalid JSON (simulating an interrupted rename / full disk)
         std::fs::write(&corrupt, "{ not valid json").unwrap();
         let result = link.consume(&corrupt);
-        assert!(result.is_err(), "corrupt file should fail to parse and return Err");
+        assert!(
+            result.is_err(),
+            "corrupt file should fail to parse and return Err"
+        );
         // R-7: the original path was renamed away by the claim; the file is kept in .processing/ for diagnostics (not silently dropped).
-        assert!(!corrupt.exists(), "original file should have been renamed away by the claim");
+        assert!(
+            !corrupt.exists(),
+            "original file should have been renamed away by the claim"
+        );
         let proc_file = dir.join(".processing").join("corrupt.json");
         assert!(
             proc_file.exists(),
             "corrupt file should be kept in .processing/ for diagnostics, not deleted by consume"
         );
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("not deleted"), "Err message should state the file is kept");
+        assert!(
+            err_msg.contains("not deleted"),
+            "Err message should state the file is kept"
+        );
     }
 
     // R-A2 + R-7: consuming an oversized file should be rejected; the file is kept in .processing/ for diagnostics.
@@ -844,7 +886,10 @@ mod tests {
         let result = link.consume(&big);
         assert!(result.is_err(), "oversized file should be rejected");
         let proc_file = dir.join(".processing").join("big.json");
-        assert!(proc_file.exists(), "oversized file should be kept in .processing/, not deleted");
+        assert!(
+            proc_file.exists(),
+            "oversized file should be kept in .processing/, not deleted"
+        );
     }
 
     // R-A2/P2-3 + R-7: watch_code_changes must neither panic nor stay silent on corrupt files — it
@@ -858,7 +903,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.json"), "{ broken").unwrap();
         // Should return Ok (empty commands) without panic; the corrupt file is claimed into .processing/ and kept for diagnostics.
-        let cmds = link.watch_code_changes().expect("corrupt file should not cause overall failure");
+        let cmds = link
+            .watch_code_changes()
+            .expect("corrupt file should not cause overall failure");
         assert!(cmds.is_empty());
         assert!(
             dir.join(".processing").join("bad.json").exists(),
@@ -916,17 +963,33 @@ mod tests {
         let file = link.send(&msg).unwrap();
         let fname = file.file_name().unwrap().to_string_lossy().to_string();
         let pid = std::process::id().to_string();
-        assert!(fname.contains(&pid), "filename should contain pid={pid}, actual: {fname}");
+        assert!(
+            fname.contains(&pid),
+            "filename should contain pid={pid}, actual: {fname}"
+        );
         // Shape: <numeric nanoseconds>_<pid>_<numeric seq>.json
         let stem = fname
             .strip_suffix(".json")
             .unwrap_or_else(|| panic!("filename should end with .json: {fname}"));
         let parts: Vec<&str> = stem.rsplitn(3, '_').collect();
         // rsplitn output order: seq, pid, stamp (3 segments split right-to-left)
-        assert_eq!(parts.len(), 3, "filename should have stamp_pid_seq segments: {fname}");
-        assert!(parts[0].parse::<u64>().is_ok(), "seq should be numeric: {fname}");
-        assert_eq!(parts[1], pid, "pid segment should match the current process: {fname}");
-        assert!(parts[2].parse::<u128>().is_ok(), "stamp should be numeric: {fname}");
+        assert_eq!(
+            parts.len(),
+            3,
+            "filename should have stamp_pid_seq segments: {fname}"
+        );
+        assert!(
+            parts[0].parse::<u64>().is_ok(),
+            "seq should be numeric: {fname}"
+        );
+        assert_eq!(
+            parts[1], pid,
+            "pid segment should match the current process: {fname}"
+        );
+        assert!(
+            parts[2].parse::<u128>().is_ok(),
+            "stamp should be numeric: {fname}"
+        );
     }
 
     #[test]
@@ -1447,7 +1510,11 @@ mod builtin_template_tests {
     fn builtin_templates_valid_json() {
         for tmpl in builtin_scene_templates() {
             let v: serde_json::Value = serde_json::from_str(&tmpl.document_json).unwrap();
-            assert!(v.get("pages").is_some(), "template {} is missing pages", tmpl.id);
+            assert!(
+                v.get("pages").is_some(),
+                "template {} is missing pages",
+                tmpl.id
+            );
         }
     }
 
@@ -1477,10 +1544,16 @@ mod builtin_template_tests {
         let corrupt_file = templates_dir.join(format!("{first_id}.json"));
         std::fs::write(&corrupt_file, "{ corrupted not json").unwrap();
         let reinstalled = link.install_builtin_templates().unwrap();
-        assert_eq!(reinstalled, 1, "corrupt file must be overwritten and reinstalled (1 template)");
+        assert_eq!(
+            reinstalled, 1,
+            "corrupt file must be overwritten and reinstalled (1 template)"
+        );
         let restored = std::fs::read_to_string(&corrupt_file).unwrap();
         let parsed: DesignTemplate = serde_json::from_str(&restored).unwrap();
-        assert_eq!(parsed.id, *first_id, "reinstalled content is a valid builtin template");
+        assert_eq!(
+            parsed.id, *first_id,
+            "reinstalled content is a valid builtin template"
+        );
     }
 
     #[test]

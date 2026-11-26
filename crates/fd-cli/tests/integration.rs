@@ -23,12 +23,18 @@ fn list_design_systems_prints_builtin_presets() {
         .expect("fusion-design process should start");
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::info!(stdout = %stdout, "list-design-systems stdout");
-    assert!(stdout.contains("apple-hig"), "should contain apple-hig: {stdout}");
+    assert!(
+        stdout.contains("apple-hig"),
+        "should contain apple-hig: {stdout}"
+    );
     assert!(
         stdout.contains("minimal-dashboard"),
         "should contain minimal-dashboard: {stdout}"
     );
-    assert!(stdout.contains("robot-sim"), "should contain robot-sim: {stdout}");
+    assert!(
+        stdout.contains("robot-sim"),
+        "should contain robot-sim: {stdout}"
+    );
 }
 
 // health: mock returns 200 + non-empty data → available:true, exit code 0.
