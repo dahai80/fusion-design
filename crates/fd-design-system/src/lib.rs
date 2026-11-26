@@ -1,36 +1,39 @@
-//! Fusion-Design 设计系统 — 三套内置规范 + Token 管理。
+//! Fusion-Design design system — three built-in presets + Token management.
 //!
-//! 对应 PRD 模块 3「本地设计系统与组件库」。
-//! 全局 Token（颜色/字号/间距/圆角/阴影）统一定义，一键同步所有页面。
+//! Corresponds to PRD module 3 "Local design system and component library".
+//! Global tokens (color/font size/spacing/radius/shadow) are defined centrally and
+//! synced to all pages with one click.
 
 use std::collections::HashMap;
 
 use fd_canvas_core::sanitize_css_value;
 use serde::{Deserialize, Serialize};
 
-/// P-5：token 引用链深度上限。防超长非环链栈溢出（visited 仅防环，不防深度）。
+/// P-5: token reference chain depth cap. Prevents stack overflow from very long non-cyclic
+/// chains (visited only guards cycles, not depth).
 const MAX_REFERENCE_DEPTH: u32 = 64;
-/// P-5：import_json 合理上限。设计规范 token 数远低于此，超限视为恶意/错误输入。
+/// P-5: sane cap for import_json. Design systems have far fewer tokens than this; anything
+/// over the cap is treated as malicious/erroneous input.
 const MAX_IMPORT_TOKENS: usize = 10000;
-/// P-5：单 token 字符串值长度上限（字节）。防巨串占内存。
+/// P-5: per-token string value length cap (bytes). Prevents huge strings from hogging memory.
 const MAX_TOKEN_STR_LEN: usize = 4096;
 
-/// 设计 Token 值类型。
+/// Design token value type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TokenValue {
     Color(String),  // hex, e.g. "#FFFFFF"
-    Number(f32),    // 字号/间距/圆角
+    Number(f32),    // font size/spacing/radius
     Shadow(String), // CSS box-shadow
-    String(String), // 字体族等 / token:xxx 引用
+    String(String), // font family etc. / token:xxx reference
 }
 
 impl TokenValue {
-    /// 转换为 CSS 属性值字符串。
-    /// - Color → 直接输出 hex
-    /// - Number → 输出 `Npx`（字号/间距/圆角默认 px）
-    /// - Shadow → 直接输出 CSS box-shadow
-    /// - String → 直接输出（字体族等）；若为 `token:xxx` 引用则输出 `var(--xxx)`
+    /// Convert to a CSS property value string.
+    /// - Color → outputs the hex directly
+    /// - Number → outputs `Npx` (font size/spacing/radius default to px)
+    /// - Shadow → outputs the CSS box-shadow directly
+    /// - String → outputs directly (font family etc.); a `token:xxx` reference outputs `var(--xxx)`
     pub fn to_css_value(&self) -> String {
         match self {
             TokenValue::Color(c) => sanitize_css_value(c, "transparent"),
@@ -46,7 +49,7 @@ impl TokenValue {
         }
     }
 
-    /// 检查是否为 token 引用（`token:xxx` 格式）。
+    /// Check whether this is a token reference (`token:xxx` format).
     pub fn is_reference(&self) -> bool {
         match self {
             TokenValue::String(s) => s.starts_with("token:"),
@@ -54,7 +57,7 @@ impl TokenValue {
         }
     }
 
-    /// 提取引用目标名（`token:xxx` → `xxx`）。
+    /// Extract the reference target name (`token:xxx` → `xxx`).
     pub fn reference_target(&self) -> Option<&str> {
         match self {
             TokenValue::String(s) => s.strip_prefix("token:"),
@@ -64,7 +67,7 @@ impl TokenValue {
     }
 }
 
-/// 单个 Token 定义。
+/// A single token definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Token {
     pub name: String,
@@ -72,7 +75,7 @@ pub struct Token {
     pub description: String,
 }
 
-/// 设计规范（一组 Token 集合）。
+/// Design system (a set of tokens).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesignSystem {
     pub id: String,
@@ -80,13 +83,14 @@ pub struct DesignSystem {
     pub tokens: Vec<Token>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dark_tokens: Option<Vec<Token>>,
-    // A-8：继承父规范名（如 "apple-hig"）。自定义规范可仅覆写个别 token，
-    // 其余从父规范继承。None 表示无父（内置规范/已 resolve 的全量规范）。
+    // A-8: name of the parent system to inherit from (e.g. "apple-hig"). A custom system may
+    // override only individual tokens, inheriting the rest from the parent. None means no parent
+    // (builtin systems / fully resolved systems).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
 }
 
-/// 主题模式。
+/// Theme mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Theme {
     #[default]
@@ -95,10 +99,11 @@ pub enum Theme {
 }
 
 impl DesignSystem {
-    /// 生成 CSS Custom Properties 输出：`:root { --token-name: value; ... }`
-    /// Token name 中的 `.` 替换为 `-` 以符合 CSS 自定义属性命名规范。
-    /// 引用类型 token（`token:xxx`）会递归解析为最终值。
-    /// P-5：预构 token map 一次，resolve 走 O(1) 查，避免循环内 O(n) find = O(n²)。
+    /// Generate CSS Custom Properties output: `:root { --token-name: value; ... }`
+    /// `.` in token names is replaced with `-` to comply with CSS custom property naming.
+    /// Reference tokens (`token:xxx`) are recursively resolved to their final value.
+    /// P-5: build the token map once up front; resolution does O(1) lookups, avoiding an
+    /// O(n) find inside the loop = O(n²).
     pub fn to_css_custom_properties(&self) -> String {
         let map = self.token_map();
         let mut lines = vec![":root {".to_string()];
@@ -113,8 +118,9 @@ impl DesignSystem {
         lines.join("\n")
     }
 
-    /// 解析 token 引用：若值为 `token:xxx` 则查找目标 token 的值并递归解析。
-    /// 防止循环引用（visited 集合）+ 深度封顶 64（防超长非环链栈溢出）。
+    /// Resolve a token reference: if the value is `token:xxx`, look up the target token's value
+    /// and resolve recursively. Guards against circular references (visited set) with a depth
+    /// cap of 64 (prevents stack overflow from very long non-cyclic chains).
     pub fn resolve_reference(
         &self,
         value: &TokenValue,
@@ -124,7 +130,7 @@ impl DesignSystem {
         self.resolve_reference_inner(value, visited, &map, 0)
     }
 
-    /// 引用解析内部实现：token map O(1) 查 + 显式深度计数。
+    /// Reference resolution internals: O(1) token map lookup + explicit depth counting.
     fn resolve_reference_inner(
         &self,
         value: &TokenValue,
@@ -137,19 +143,19 @@ impl DesignSystem {
                 tracing::warn!(
                     target,
                     depth = MAX_REFERENCE_DEPTH,
-                    "token 引用链超深度上限，回退原始 CSS var"
+                    "token reference chain exceeded the depth cap, falling back to the original CSS var"
                 );
                 return value.to_css_value();
             }
             if visited.contains(target) {
-                tracing::warn!("检测到循环 token 引用: {:?}, 已访问: {:?}", target, visited);
+                tracing::warn!("circular token reference detected: {:?}, visited: {:?}", target, visited);
                 return value.to_css_value();
             }
             visited.insert(target.to_string());
             if let Some(resolved) = map.get(target).copied() {
                 self.resolve_reference_inner(resolved, visited, map, depth + 1)
             } else {
-                tracing::warn!("Token 引用目标未找到: {}", target);
+                tracing::warn!("token reference target not found: {}", target);
                 value.to_css_value()
             }
         } else {
@@ -157,7 +163,7 @@ impl DesignSystem {
         }
     }
 
-    /// P-5：预构 token name→value map（O(1) 查）。借用 self.tokens，生命周期绑 self。
+    /// P-5: pre-build a token name→value map (O(1) lookup). Borrows self.tokens; lifetime tied to self.
     fn token_map(&self) -> std::collections::HashMap<&str, &TokenValue> {
         self.tokens
             .iter()
@@ -165,11 +171,12 @@ impl DesignSystem {
             .collect()
     }
 
-    /// 按主题模式生成 CSS Custom Properties。
-    /// Light 使用 self.tokens，Dark 使用 self.dark_tokens（如无则回退到 tokens）。
+    /// Generate CSS Custom Properties for a theme mode.
+    /// Light uses self.tokens; Dark uses self.dark_tokens (falling back to tokens if absent).
     pub fn to_css_custom_properties_for_theme(&self, theme: Theme) -> String {
-        // E-15：Dark 主题旧实现直接用 dark_tokens（若仅覆写颜色未列 font_size/radius，
-        // 这些 token 丢失 → CSS 变量缺失）。改为以 light tokens 为基底，dark 覆盖 overlay。
+        // E-15: the old Dark-theme implementation used dark_tokens directly (if only colors were
+        // overridden and font_size/radius were not listed, those tokens were lost → missing CSS
+        // variables). Changed to use the light tokens as the base with a dark overlay on top.
         let merged: Vec<Token> = match theme {
             Theme::Light => self.tokens.clone(),
             Theme::Dark => {
@@ -183,7 +190,7 @@ impl DesignSystem {
                         by_name.insert(t.name.clone(), t.clone());
                     }
                 }
-                // 保持 light tokens 的声明顺序，dark 新增的 token 追加到末尾。
+                // Keep the light tokens' declaration order; dark-only tokens are appended at the end.
                 let mut merged: Vec<Token> = self
                     .tokens
                     .iter()
@@ -200,7 +207,7 @@ impl DesignSystem {
             }
         };
         let tokens = &merged;
-        // P-5：map 从 merged 切片构建，复用 inner resolver。
+        // P-5: build the map from the merged slice, reusing the inner resolver.
         let map: std::collections::HashMap<&str, &TokenValue> =
             tokens.iter().map(|t| (t.name.as_str(), &t.value)).collect();
         let mut lines = vec![":root {".to_string()];
@@ -215,10 +222,12 @@ impl DesignSystem {
         lines.join("\n")
     }
 
-    // A-8：用父规范的 token 为基底，self 的 token overlay 覆盖（self 同名 token 胜出）。
-    // 仅用于继承链 resolve，不改变 self 的 extends 字段。
-    // light tokens：父在前 + self 覆盖，保留父声明顺序，self 新增 token 追加末尾。
-    // dark_tokens：各自 dark overlay 后再覆盖（None 视为空 dark 集）。
+    // A-8: use the parent system's tokens as the base, overlaying self's tokens on top
+    // (self wins on name collisions). Only used for inheritance-chain resolution; does not
+    // change self's extends field.
+    // light tokens: parent first + self overrides, keeping the parent's declaration order,
+    // self-only tokens appended at the end.
+    // dark_tokens: each side's dark overlay applied first, then overridden (None = empty dark set).
     pub fn merge_parent(&self, parent: &DesignSystem) -> DesignSystem {
         let merged_tokens = overlay_tokens(&parent.tokens, &self.tokens);
         let merged_dark = match (&parent.dark_tokens, &self.dark_tokens) {
@@ -232,13 +241,15 @@ impl DesignSystem {
             name: self.name.clone(),
             tokens: merged_tokens,
             dark_tokens: merged_dark,
-            // 合并产物已无父依赖，extends 清空（防 resolve 后再被当作可继承规范）。
+            // The merged result has no parent dependency; clear extends (preventing the resolved
+            // product from being treated as inheritable again).
             extends: None,
         }
     }
 }
 
-/// A-8：base 在前，overlay 同名覆盖，overlay 新增 token 追加末尾。保留 base 声明顺序。
+/// A-8: base first, overlay overrides same-name tokens, overlay-only tokens appended at the end.
+/// Preserves the base declaration order.
 fn overlay_tokens(base: &[Token], overlay: &[Token]) -> Vec<Token> {
     let mut by_name: HashMap<String, Token> =
         base.iter().map(|t| (t.name.clone(), t.clone())).collect();
@@ -257,7 +268,7 @@ fn overlay_tokens(base: &[Token], overlay: &[Token]) -> Vec<Token> {
     merged
 }
 
-/// 设计系统注册中心（管理多套规范，支持一键切换）。
+/// Design system registry (manages multiple systems, supports one-click switching).
 #[derive(Debug, Default)]
 pub struct DesignSystemRegistry {
     systems: HashMap<String, DesignSystem>,
@@ -270,7 +281,7 @@ impl DesignSystemRegistry {
         Self::default()
     }
 
-    /// 注册一套设计规范。
+    /// Register a design system.
     pub fn register(&mut self, system: DesignSystem) -> Result<(), DuplicateError> {
         if self.systems.contains_key(&system.id) {
             return Err(DuplicateError(system.id));
@@ -279,7 +290,7 @@ impl DesignSystemRegistry {
         Ok(())
     }
 
-    /// 激活某套规范（切换全局 Token）。
+    /// Activate a system (switches the global tokens).
     pub fn activate(&mut self, id: &str) -> Result<(), NotFoundError> {
         if !self.systems.contains_key(id) {
             return Err(NotFoundError(id.to_string()));
@@ -288,36 +299,37 @@ impl DesignSystemRegistry {
         Ok(())
     }
 
-    /// 切换主题模式（Light/Dark）。
+    /// Switch the theme mode (Light/Dark).
     pub fn activate_theme(&mut self, theme: Theme) {
         self.active_theme = theme;
-        tracing::info!(theme = ?theme, "主题已切换");
+        tracing::info!(theme = ?theme, "theme switched");
     }
 
-    /// 获取当前主题模式。
+    /// Get the current theme mode.
     pub fn current_theme(&self) -> Theme {
         self.active_theme
     }
 
-    /// 获取当前激活的规范。
+    /// Get the currently active system.
     pub fn active(&self) -> Option<&DesignSystem> {
         self.active_id.as_ref().and_then(|id| self.systems.get(id))
     }
 
-    /// 列出全部已注册规范 ID。
+    /// List all registered system IDs.
     pub fn list(&self) -> Vec<&str> {
         self.systems.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 按 ID 获取规范。
+    /// Get a system by ID.
     pub fn get(&self, id: &str) -> Option<&DesignSystem> {
         self.systems.get(id)
     }
 
-    // A-8：递归 resolve 继承链，返回全量 DesignSystem（parent token 为基底，子逐层 overlay）。
-    // 环检测：visited 集合记录已访问 id，重复访问 → Err(ResolveError::Circular)。
-    // 父规范未注册 → Err(ResolveError::ParentNotFound)。
-    // 无 extends → 返回自身 clone（去掉 extends 依赖，产物 extends=None）。
+    // A-8: recursively resolve the inheritance chain, returning a full DesignSystem (parent
+    // tokens as base, child overlaid layer by layer).
+    // Cycle detection: the visited set records visited ids; a repeat visit → Err(ResolveError::Circular).
+    // Parent system not registered → Err(ResolveError::NotFound).
+    // No extends → returns a clone of self (extends dependency removed; result has extends=None).
     pub fn resolve(&self, id: &str) -> Result<DesignSystem, ResolveError> {
         let mut visited: Vec<String> = Vec::new();
         self.resolve_inner(id, &mut visited)
@@ -329,7 +341,7 @@ impl DesignSystemRegistry {
         visited: &mut Vec<String>,
     ) -> Result<DesignSystem, ResolveError> {
         if visited.iter().any(|v| v == id) {
-            tracing::warn!(system_id = %id, chain = ?visited, "检测到继承环");
+            tracing::warn!(system_id = %id, chain = ?visited, "inheritance cycle detected");
             return Err(ResolveError::Circular {
                 id: id.to_string(),
                 chain: visited.clone(),
@@ -346,7 +358,7 @@ impl DesignSystemRegistry {
                 Ok(system.merge_parent(&parent))
             }
             None => {
-                // 叶子规范：clone 并清空 extends（产物自洽，无父依赖）。
+                // Leaf system: clone and clear extends (self-contained result, no parent dependency).
                 let mut out = system.clone();
                 out.extends = None;
                 Ok(out)
@@ -354,8 +366,9 @@ impl DesignSystemRegistry {
         }
     }
 
-    /// 注册内置规范（Apple HIG / 极简后台 / 机器人仿真控制台 / Desigma Aligned）。
-    /// 幂等：已存在的 ID 跳过并告警，不覆盖用户自定义/激活中的规范（E-32/P3）。
+    /// Register the builtin systems (Apple HIG / minimal dashboard / robot-sim console / Desigma Aligned).
+    /// Idempotent: existing IDs are skipped with a warning and never overwrite user-customized or
+    /// currently active systems (E-32/P3).
     pub fn register_builtin(&mut self) {
         let builtins = [
             ("apple-hig".to_string(), builtin_apple_hig()),
@@ -367,7 +380,7 @@ impl DesignSystemRegistry {
         let mut skipped = 0usize;
         for (id, system) in builtins {
             if self.systems.contains_key(&id) {
-                tracing::warn!(system_id = %id, "register_builtin: 规范已存在，跳过不覆盖");
+                tracing::warn!(system_id = %id, "register_builtin: system already exists, skipping without overwrite");
                 skipped += 1;
                 continue;
             }
@@ -377,14 +390,14 @@ impl DesignSystemRegistry {
             tracing::warn!(
                 skipped,
                 total,
-                "register_builtin: 跳过 {skipped}/{total} 个已存在内置规范"
+                "register_builtin: skipped {skipped}/{total} existing builtin systems"
             );
         } else {
-            tracing::info!("register_builtin: 注册 {total} 套内置规范");
+            tracing::info!("register_builtin: registered {total} builtin systems");
         }
     }
 
-    /// 按名称查找 Token 值（当前激活规范内）。
+    /// Look up a token value by name (within the currently active system).
     pub fn lookup(&self, token_name: &str) -> Option<&TokenValue> {
         self.active()?
             .tokens
@@ -393,21 +406,22 @@ impl DesignSystemRegistry {
             .map(|t| &t.value)
     }
 
-    /// 导出为 JSON（团队本地共享设计规范）。
+    /// Export as JSON (for local team sharing of design systems).
     pub fn export_json(&self) -> serde_json::Result<String> {
         let active = self.active();
         serde_json::to_string_pretty(&active)
     }
 
-    /// 从 JSON 导入一套规范。
-    /// P-5：token 数 / 单值长度 / 引用深度受限，防恶意/错误巨输入。
+    /// Import a system from JSON.
+    /// P-5: token count / per-value length / reference depth are capped to guard against
+    /// malicious or erroneous oversized input.
     pub fn import_json(&mut self, json: &str) -> Result<(), ImportError> {
         let system: DesignSystem = serde_json::from_str(json).map_err(ImportError::Parse)?;
         if system.tokens.len() > MAX_IMPORT_TOKENS {
             tracing::warn!(
                 count = system.tokens.len(),
                 cap = MAX_IMPORT_TOKENS,
-                "import_json: token 数超限，拒绝导入"
+                "import_json: token count exceeds the cap, rejecting import"
             );
             return Err(ImportError::TooManyTokens(system.tokens.len()));
         }
@@ -419,7 +433,7 @@ impl DesignSystemRegistry {
                 tracing::warn!(
                     count = dark.len(),
                     cap = MAX_IMPORT_TOKENS,
-                    "import_json: dark token 数超限，拒绝导入"
+                    "import_json: dark token count exceeds the cap, rejecting import"
                 );
                 return Err(ImportError::TooManyTokens(dark.len()));
             }
@@ -432,7 +446,7 @@ impl DesignSystemRegistry {
     }
 }
 
-/// P-5：校验单 token 值的字符串长度（Color/Shadow/String 变体）。
+/// P-5: validate a single token value's string length (Color/Shadow/String variants).
 fn validate_token_value(v: &TokenValue) -> Result<(), ImportError> {
     let s: Option<&str> = match v {
         TokenValue::Color(s) | TokenValue::Shadow(s) | TokenValue::String(s) => Some(s),
@@ -443,7 +457,7 @@ fn validate_token_value(v: &TokenValue) -> Result<(), ImportError> {
             tracing::warn!(
                 len = s.len(),
                 cap = MAX_TOKEN_STR_LEN,
-                "token 字符串值超长，拒绝导入"
+                "token string value too long, rejecting import"
             );
             return Err(ImportError::ValueTooLong(s.len()));
         }
@@ -452,33 +466,33 @@ fn validate_token_value(v: &TokenValue) -> Result<(), ImportError> {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("设计规范 {0} 已注册")]
+#[error("design system {0} already registered")]
 pub struct DuplicateError(pub String);
 
 #[derive(Debug, thiserror::Error)]
-#[error("设计规范 {0} 未找到")]
+#[error("design system {0} not found")]
 pub struct NotFoundError(pub String);
 
-// A-8：继承链 resolve 错误。
+// A-8: inheritance-chain resolution errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
-    #[error("设计规范 {0} 未找到")]
+    #[error("design system {0} not found")]
     NotFound(String),
-    #[error("继承环检测：规范 {id} 重复出现，链路 {chain:?}")]
+    #[error("inheritance cycle detected: system {id} appears repeatedly, chain {chain:?}")]
     Circular { id: String, chain: Vec<String> },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
-    #[error("导入 JSON 解析失败: {0}")]
+    #[error("failed to parse imported JSON: {0}")]
     Parse(#[from] serde_json::Error),
-    #[error("token 数 {0} 超过上限 {MAX_IMPORT_TOKENS}")]
+    #[error("token count {0} exceeds the cap {MAX_IMPORT_TOKENS}")]
     TooManyTokens(usize),
-    #[error("token 字符串值长度 {0} 超过上限 {MAX_TOKEN_STR_LEN}")]
+    #[error("token string value length {0} exceeds the cap {MAX_TOKEN_STR_LEN}")]
     ValueTooLong(usize),
 }
 
-// ── 三套内置规范 ──
+// ── Builtin systems ──
 
 pub fn builtin_apple_hig() -> DesignSystem {
     DesignSystem {
@@ -488,26 +502,31 @@ pub fn builtin_apple_hig() -> DesignSystem {
             Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#F2F2F7".into()),
+                // i18n: user-facing
                 description: "系统背景".into(),
             },
             Token {
                 name: "color.fg".into(),
                 value: TokenValue::Color("#1C1C1E".into()),
+                // i18n: user-facing
                 description: "主前景".into(),
             },
             Token {
                 name: "color.accent".into(),
                 value: TokenValue::Color("#007AFF".into()),
+                // i18n: user-facing
                 description: "系统强调色".into(),
             },
             Token {
                 name: "font.size.body".into(),
                 value: TokenValue::Number(17.0),
+                // i18n: user-facing
                 description: "正文字号".into(),
             },
             Token {
                 name: "radius.card".into(),
                 value: TokenValue::Number(10.0),
+                // i18n: user-facing
                 description: "卡片圆角".into(),
             },
         ],
@@ -516,26 +535,31 @@ pub fn builtin_apple_hig() -> DesignSystem {
             Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#1C1C1E".into()),
+                // i18n: user-facing
                 description: "暗色背景".into(),
             },
             Token {
                 name: "color.fg".into(),
                 value: TokenValue::Color("#F2F2F7".into()),
+                // i18n: user-facing
                 description: "暗色前景".into(),
             },
             Token {
                 name: "color.accent".into(),
                 value: TokenValue::Color("#0A84FF".into()),
+                // i18n: user-facing
                 description: "暗色强调".into(),
             },
             Token {
                 name: "font.size.body".into(),
                 value: TokenValue::Number(17.0),
+                // i18n: user-facing
                 description: "正文字号".into(),
             },
             Token {
                 name: "radius.card".into(),
                 value: TokenValue::Number(10.0),
+                // i18n: user-facing
                 description: "卡片圆角".into(),
             },
         ]),
@@ -545,31 +569,37 @@ pub fn builtin_apple_hig() -> DesignSystem {
 fn builtin_minimal_dashboard() -> DesignSystem {
     DesignSystem {
         id: "minimal-dashboard".into(),
+        // i18n: user-facing
         name: "极简后台".into(),
         tokens: vec![
             Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#FFFFFF".into()),
+                // i18n: user-facing
                 description: "纯白背景".into(),
             },
             Token {
                 name: "color.fg".into(),
                 value: TokenValue::Color("#374151".into()),
+                // i18n: user-facing
                 description: "深灰前景".into(),
             },
             Token {
                 name: "color.accent".into(),
                 value: TokenValue::Color("#10B981".into()),
+                // i18n: user-facing
                 description: "绿色强调".into(),
             },
             Token {
                 name: "font.size.body".into(),
                 value: TokenValue::Number(14.0),
+                // i18n: user-facing
                 description: "正文字号".into(),
             },
             Token {
                 name: "radius.card".into(),
                 value: TokenValue::Number(6.0),
+                // i18n: user-facing
                 description: "卡片圆角".into(),
             },
         ],
@@ -578,81 +608,97 @@ fn builtin_minimal_dashboard() -> DesignSystem {
     }
 }
 
-/// 机器人仿真控制台预设（PRD 模块 3 第三套内置规范）。
-/// 面向 Fusion-Simulation 联动：深色工程界面、状态/告警/遥测语义色、等宽数据字体。
+/// Robot-simulation console preset (PRD module 3, third builtin system).
+/// Aimed at Fusion-Simulation integration: dark engineering UI, status/alert/telemetry
+/// semantic colors, monospace data font.
 pub fn builtin_robot_sim() -> DesignSystem {
     DesignSystem {
         id: "robot-sim".into(),
+        // i18n: user-facing
         name: "机器人仿真控制台".into(),
         tokens: vec![
             Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#0F1115".into()),
+                // i18n: user-facing
                 description: "控制台深色背景".into(),
             },
             Token {
                 name: "color.surface".into(),
                 value: TokenValue::Color("#1A1F26".into()),
+                // i18n: user-facing
                 description: "面板/卡片表面".into(),
             },
             Token {
                 name: "color.fg".into(),
                 value: TokenValue::Color("#E6EDF3".into()),
+                // i18n: user-facing
                 description: "主前景（高对比浅色）".into(),
             },
             Token {
                 name: "color.muted".into(),
                 value: TokenValue::Color("#7D8590".into()),
+                // i18n: user-facing
                 description: "次要文本/标注".into(),
             },
             Token {
                 name: "color.accent".into(),
                 value: TokenValue::Color("#2F81F7".into()),
+                // i18n: user-facing
                 description: "主交互强调（蓝）".into(),
             },
             Token {
                 name: "color.success".into(),
                 value: TokenValue::Color("#3FB950".into()),
+                // i18n: user-facing
                 description: "运行正常/在线".into(),
             },
             Token {
                 name: "color.warning".into(),
                 value: TokenValue::Color("#D29922".into()),
+                // i18n: user-facing
                 description: "告警/阈值临近".into(),
             },
             Token {
                 name: "color.danger".into(),
                 value: TokenValue::Color("#F85149".into()),
+                // i18n: user-facing
                 description: "故障/急停/离线".into(),
             },
             Token {
                 name: "font.size.body".into(),
                 value: TokenValue::Number(13.0),
+                // i18n: user-facing
                 description: "正文字号（紧凑工程界面）".into(),
             },
             Token {
                 name: "font.size.mono".into(),
                 value: TokenValue::Number(12.0),
+                // i18n: user-facing
                 description: "遥测/日志等宽数据字号".into(),
             },
             Token {
                 name: "font.mono".into(),
                 value: TokenValue::String("SF Mono, Menlo, monospace".into()),
+                // i18n: user-facing
                 description: "等宽字体族（遥测/坐标/日志）".into(),
             },
             Token {
                 name: "radius.panel".into(),
                 value: TokenValue::Number(4.0),
+                // i18n: user-facing
                 description: "面板圆角（锐利工程风）".into(),
             },
             Token {
                 name: "spacing.gauge".into(),
                 value: TokenValue::Number(8.0),
+                // i18n: user-facing
                 description: "仪表/控件间距基准".into(),
             },
             Token {
                 name: "shadow.panel".into(),
                 value: TokenValue::Shadow("0 1px 0 rgba(0,0,0,0.4)".into()),
+                // i18n: user-facing
                 description: "面板内阴影（深色浮起）".into(),
             },
         ],
@@ -661,41 +707,49 @@ pub fn builtin_robot_sim() -> DesignSystem {
             Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#010409".into()),
+                // i18n: user-facing
                 description: "夜间极深背景".into(),
             },
             Token {
                 name: "color.surface".into(),
                 value: TokenValue::Color("#0D1117".into()),
+                // i18n: user-facing
                 description: "夜间面板表面".into(),
             },
             Token {
                 name: "color.fg".into(),
                 value: TokenValue::Color("#F0F6FC".into()),
+                // i18n: user-facing
                 description: "夜间高对比前景".into(),
             },
             Token {
                 name: "color.accent".into(),
                 value: TokenValue::Color("#1F6FEB".into()),
+                // i18n: user-facing
                 description: "夜间强调".into(),
             },
             Token {
                 name: "color.success".into(),
                 value: TokenValue::Color("#238636".into()),
+                // i18n: user-facing
                 description: "夜间运行正常".into(),
             },
             Token {
                 name: "color.danger".into(),
                 value: TokenValue::Color("#DA3633".into()),
+                // i18n: user-facing
                 description: "夜间故障".into(),
             },
             Token {
                 name: "font.size.body".into(),
                 value: TokenValue::Number(13.0),
+                // i18n: user-facing
                 description: "正文字号".into(),
             },
             Token {
                 name: "radius.panel".into(),
                 value: TokenValue::Number(4.0),
+                // i18n: user-facing
                 description: "面板圆角".into(),
             },
         ]),
@@ -926,15 +980,15 @@ mod tests {
         reg.activate("robot-sim").unwrap();
         match reg.lookup("color.bg").unwrap() {
             TokenValue::Color(c) => assert_eq!(c, "#0F1115"),
-            _ => panic!("期望 Color"),
+            _ => panic!("expected Color"),
         }
         match reg.lookup("color.danger").unwrap() {
             TokenValue::Color(c) => assert_eq!(c, "#F85149"),
-            _ => panic!("期望 Color"),
+            _ => panic!("expected Color"),
         }
         match reg.lookup("font.mono").unwrap() {
             TokenValue::String(s) => assert!(s.contains("SF Mono")),
-            _ => panic!("期望 String"),
+            _ => panic!("expected String"),
         }
     }
 
@@ -945,7 +999,7 @@ mod tests {
         reg.activate("apple-hig").unwrap();
         match reg.lookup("color.accent").unwrap() {
             TokenValue::Color(c) => assert_eq!(c, "#007AFF"),
-            _ => panic!("期望 Color"),
+            _ => panic!("expected Color"),
         }
     }
 
@@ -988,7 +1042,7 @@ mod tests {
         assert_eq!(v, v2);
     }
 
-    // ── TokenValue::to_css_value 测试 ──
+    // ── TokenValue::to_css_value tests ──
 
     #[test]
     fn token_value_color_to_css() {
@@ -1035,7 +1089,7 @@ mod tests {
         assert_eq!(v2.reference_target(), None);
     }
 
-    // ── DesignSystem::to_css_custom_properties 测试 ──
+    // ── DesignSystem::to_css_custom_properties tests ──
 
     #[test]
     fn design_system_css_custom_properties() {
@@ -1059,11 +1113,13 @@ mod tests {
                 Token {
                     name: "color.primary".into(),
                     value: TokenValue::Color("#007AFF".into()),
+                    // i18n: user-facing
                     description: "主色".into(),
                 },
                 Token {
                     name: "color.button".into(),
                     value: TokenValue::String("token:color.primary".into()),
+                    // i18n: user-facing
                     description: "按钮色引用主色".into(),
                 },
             ],
@@ -1071,7 +1127,7 @@ mod tests {
             dark_tokens: None,
         };
         let css = ds.to_css_custom_properties();
-        // 引用 token 解析为实际值
+        // the reference token resolves to the actual value
         assert!(css.contains("--color-button: #007AFF;"));
     }
 
@@ -1084,11 +1140,13 @@ mod tests {
                 Token {
                     name: "a".into(),
                     value: TokenValue::String("token:b".into()),
+                    // i18n: user-facing
                     description: "循环A".into(),
                 },
                 Token {
                     name: "b".into(),
                     value: TokenValue::String("token:a".into()),
+                    // i18n: user-facing
                     description: "循环B".into(),
                 },
             ],
@@ -1096,11 +1154,11 @@ mod tests {
             dark_tokens: None,
         };
         let css = ds.to_css_custom_properties();
-        // 循环引用不会 panic，回退到原始 CSS var 输出
+        // circular references must not panic; falls back to the original CSS var output
         assert!(css.contains("--a:") || css.contains("--b:"));
     }
 
-    // ── DesignSystem::resolve_reference 测试 ──
+    // ── DesignSystem::resolve_reference tests ──
 
     #[test]
     fn resolve_direct_value() {
@@ -1130,16 +1188,19 @@ mod tests {
                 Token {
                     name: "color.base".into(),
                     value: TokenValue::Color("#007AFF".into()),
+                    // i18n: user-facing
                     description: "基础色".into(),
                 },
                 Token {
                     name: "color.mid".into(),
                     value: TokenValue::String("token:color.base".into()),
+                    // i18n: user-facing
                     description: "中间引用".into(),
                 },
                 Token {
                     name: "color.top".into(),
                     value: TokenValue::String("token:color.mid".into()),
+                    // i18n: user-facing
                     description: "顶层引用".into(),
                 },
             ],
@@ -1159,11 +1220,11 @@ mod tests {
             &TokenValue::String("token:nonexistent".into()),
             &mut visited,
         );
-        // 回退到原始 CSS var 输出
+        // falls back to the original CSS var output
         assert_eq!(val, "var(--nonexistent)");
     }
 
-    // ── P-5：import 限额 + 引用深度封顶 ──
+    // ── P-5: import caps + reference depth cap ──
 
     #[test]
     fn import_json_rejects_too_many_tokens() {
@@ -1185,7 +1246,7 @@ mod tests {
         match reg.import_json(&json) {
             Err(ImportError::TooManyTokens(n)) => assert_eq!(n, MAX_IMPORT_TOKENS + 1),
             other => panic!(
-                "期望 TooManyTokens，得 {:?}",
+                "expected TooManyTokens, got {:?}",
                 other.map_err(|e| e.to_string())
             ),
         }
@@ -1209,7 +1270,7 @@ mod tests {
         match reg.import_json(&json) {
             Err(ImportError::ValueTooLong(n)) => assert_eq!(n, MAX_TOKEN_STR_LEN + 1),
             other => panic!(
-                "期望 ValueTooLong，得 {:?}",
+                "expected ValueTooLong, got {:?}",
                 other.map_err(|e| e.to_string())
             ),
         }
@@ -1217,7 +1278,7 @@ mod tests {
 
     #[test]
     fn resolve_deep_non_cyclic_chain_hits_depth_cap() {
-        // 100 层非环链：a1→a2→…→a100→color。深度 64 应封顶回退 CSS var。
+        // 100-level non-cyclic chain: a1→a2→…→a100→color. Depth 64 should cap and fall back to the CSS var.
         let tokens: Vec<Token> = (1..=100u32)
             .map(|i| Token {
                 name: format!("a{i}"),
@@ -1238,47 +1299,52 @@ mod tests {
         };
         let mut visited = std::collections::HashSet::new();
         let val = ds.resolve_reference(&TokenValue::String("token:a1".into()), &mut visited);
-        // 深度封顶：未解析到末端 #000000，回退到某层 var(--aN)。
+        // Depth cap: the end value #000000 was not reached; falls back to some var(--aN) level.
         assert!(
             val.starts_with("var(--a"),
-            "深度封顶应回退 var(--aN)，得 {val}"
+            "depth cap should fall back to var(--aN), got {val}"
         );
     }
 
     #[test]
     fn register_builtin_idempotent_no_overwrite() {
-        // E-32/P3：重复调用 register_builtin 不应覆盖已注册/用户自定义的规范。
+        // E-32/P3: calling register_builtin repeatedly must not overwrite already-registered or
+        // user-customized systems.
         let mut reg = DesignSystemRegistry::new();
         reg.register_builtin();
         assert_eq!(reg.list().len(), 4);
-        // 二次调用：数量不变，不抛错。
+        // Second call: count unchanged, no error.
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 4, "重复注册不应翻倍或覆盖");
+        assert_eq!(reg.list().len(), 4, "repeated registration must not double or overwrite");
     }
 
     #[test]
     fn register_builtin_preserves_user_customized_system() {
-        // E-32/P3：用户自定义同名规范后调用 register_builtin，用户版本不被内置覆盖。
+        // E-32/P3: after a user customizes a same-name system, register_builtin must not overwrite
+        // the user's version with the builtin.
         let mut reg = DesignSystemRegistry::new();
-        // 用户先注册一个自定义 apple-hig（active 设为自定义值便于验证）。
+        // The user first registers a custom apple-hig (kept as a user-visible system name).
         let mut custom = builtin_apple_hig();
+        // i18n: user-facing
         custom.name = "我的自定义 HIG".into();
         reg.register(custom).unwrap();
-        // 再注册内置：应跳过 apple-hig，补齐其余内置。
+        // Then register builtins: apple-hig should be skipped and the rest filled in.
         reg.register_builtin();
-        assert_eq!(reg.list().len(), 4, "内置补齐其余三套，apple-hig 跳过");
-        // 验证 apple-hig 仍是用户自定义版本。
+        assert_eq!(reg.list().len(), 4, "builtins fill in the other three; apple-hig is skipped");
+        // Verify apple-hig is still the user-customized version.
         reg.activate("apple-hig").unwrap();
         assert_eq!(
             reg.active().unwrap().name,
+            // i18n: user-facing (matches the user-customized system name above)
             "我的自定义 HIG",
-            "用户自定义规范未被内置覆盖"
+            "user-customized system must not be overwritten by builtins"
         );
     }
 
-    // E-15 回归：dark_tokens 仅覆写部分 token 时，未覆写的 light token（font.size.body/radius.card）
-    // 旧实现丢失（dark_tokens 直接替代，缺失 token → CSS 变量缺）。
-    // 修复后以 light 为基底 + dark overlay，全量 token 保留，dark 值覆盖 light 值。
+    // E-15 regression: when dark_tokens only overrides some tokens, the old implementation lost
+    // the non-overridden light tokens (font.size.body/radius.card) because dark_tokens replaced
+    // the set wholesale (missing tokens → missing CSS variables).
+    // After the fix: light as base + dark overlay, all tokens kept, dark values override light values.
     #[test]
     fn dark_theme_css_merges_light_base_with_dark_overlay() {
         let system = DesignSystem {
@@ -1304,19 +1370,19 @@ mod tests {
             }]),
         };
         let css = system.to_css_custom_properties_for_theme(Theme::Dark);
-        // dark 覆盖：color-bg 用 dark 值
+        // dark override: color-bg uses the dark value
         assert!(
             css.contains("--color-bg: #000000;"),
-            "dark 主题 color.bg 应被 dark 值覆盖"
+            "dark theme color.bg should be overridden by the dark value"
         );
-        // 未覆写的 light token 应保留（E-15 修复前丢失）
+        // non-overridden light tokens must be kept (lost before the E-15 fix)
         assert!(
             css.contains("--font-size-body: 16px;"),
-            "dark 主题未覆写的 font.size.body 应从 light 基底保留（E-15）"
+            "dark theme non-overridden font.size.body should be kept from the light base (E-15)"
         );
     }
 
-    // ── A-8：DesignSystem 继承链 resolve ──
+    // ── A-8: DesignSystem inheritance-chain resolve ──
 
     fn make_system(id: &str, extends: Option<&str>, tokens: Vec<Token>) -> DesignSystem {
         DesignSystem {
@@ -1350,35 +1416,36 @@ mod tests {
     #[test]
     fn resolve_extends_overlays_child_tokens() {
         let mut reg = DesignSystemRegistry::new();
-        // 父：apple-hig 基底 token。
+        // Parent: apple-hig base tokens.
         reg.register(builtin_apple_hig()).unwrap();
-        // 子：仅覆写 color.bg，继承其余（color.fg/accent/font.size.body/radius.card）。
+        // Child: overrides only color.bg, inheriting the rest (color.fg/accent/font.size.body/radius.card).
         reg.register(make_system(
             "custom",
             Some("apple-hig"),
             vec![Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#FF0000".into()),
+                // i18n: user-facing
                 description: "自定义红底".into(),
             }],
         ))
         .unwrap();
         let resolved = reg.resolve("custom").unwrap();
-        // 父的 5 个 token + 子覆写 color.bg（同名覆盖不增）= 5 个。
-        assert_eq!(resolved.tokens.len(), 5, "继承父全部 token，子覆写不增数");
-        // color.bg 被子覆写为红。
+        // Parent's 5 tokens + child overrides color.bg (same-name override, no growth) = 5.
+        assert_eq!(resolved.tokens.len(), 5, "inherits all parent tokens; child override does not add");
+        // color.bg is overridden to red by the child.
         let bg = resolved
             .tokens
             .iter()
             .find(|t| t.name == "color.bg")
-            .expect("color.bg 应存在");
+            .expect("color.bg should exist");
         assert_eq!(bg.value, TokenValue::Color("#FF0000".into()));
-        // 父的 color.fg 保留（未覆写）。
+        // Parent's color.fg is kept (not overridden).
         assert!(
             resolved.tokens.iter().any(|t| t.name == "color.fg"),
-            "父 color.fg 应继承保留"
+            "parent color.fg should be inherited"
         );
-        // 产物 extends 清空（自洽，无父依赖）。
+        // Result's extends is cleared (self-contained, no parent dependency).
         assert_eq!(resolved.extends, None);
     }
 
@@ -1423,20 +1490,20 @@ mod tests {
         ))
         .unwrap();
         let resolved = reg.resolve("leaf").unwrap();
-        // a(父) + b(子覆写 20) + c(子新增) = 3。
+        // a(parent) + b(child override 20) + c(child-only) = 3.
         assert_eq!(resolved.tokens.len(), 3);
         let b = resolved
             .tokens
             .iter()
             .find(|t| t.name == "b")
-            .expect("b 应存在");
-        assert_eq!(b.value, TokenValue::Number(20.0), "mid 覆写 b=20 应胜出");
+            .expect("b should exist");
+        assert_eq!(b.value, TokenValue::Number(20.0), "mid's override b=20 should win");
         let a = resolved
             .tokens
             .iter()
             .find(|t| t.name == "a")
-            .expect("a 应存在");
-        assert_eq!(a.value, TokenValue::Number(1.0), "grand 的 a=1 应继承");
+            .expect("a should exist");
+        assert_eq!(a.value, TokenValue::Number(1.0), "grand's a=1 should be inherited");
     }
 
     #[test]
@@ -1464,7 +1531,7 @@ mod tests {
         .unwrap();
         match reg.resolve("x") {
             Err(ResolveError::Circular { id, .. }) => assert_eq!(id, "x"),
-            other => panic!("期望 Circular，得 {:?}", other.map_err(|e| e.to_string())),
+            other => panic!("expected Circular, got {:?}", other.map_err(|e| e.to_string())),
         }
     }
 
@@ -1484,7 +1551,7 @@ mod tests {
         match reg.resolve("orphan") {
             Err(ResolveError::NotFound(name)) => assert_eq!(name, "ghost"),
             other => panic!(
-                "期望 NotFound ghost，得 {:?}",
+                "expected NotFound ghost, got {:?}",
                 other.map_err(|e| e.to_string())
             ),
         }
@@ -1493,7 +1560,7 @@ mod tests {
     #[test]
     fn resolve_extends_inherits_parent_dark_tokens() {
         let mut reg = DesignSystemRegistry::new();
-        // 父有 dark_tokens，子无 dark_tokens → 继承父 dark。
+        // Parent has dark_tokens, child has none → inherits the parent's dark tokens.
         let mut parent = builtin_apple_hig();
         parent.id = "parent-dark".into();
         reg.register(parent).unwrap();
@@ -1508,11 +1575,11 @@ mod tests {
         ))
         .unwrap();
         let resolved = reg.resolve("child-no-dark").unwrap();
-        assert!(resolved.dark_tokens.is_some(), "父 dark_tokens 应被子继承");
+        assert!(resolved.dark_tokens.is_some(), "parent dark_tokens should be inherited by the child");
         let dark = resolved.dark_tokens.as_ref().unwrap();
         assert!(
             dark.iter().any(|t| t.name == "color.bg"),
-            "父 dark color.bg 应存在"
+            "parent dark color.bg should exist"
         );
     }
 
@@ -1526,21 +1593,22 @@ mod tests {
             vec![Token {
                 name: "color.bg".into(),
                 value: TokenValue::Color("#FF0000".into()),
+                // i18n: user-facing
                 description: "品牌红底".into(),
             }],
         ))
         .unwrap();
         let resolved = reg.resolve("branded").unwrap();
         let css = resolved.to_css_custom_properties();
-        // 覆写后的 color-bg 为红。
+        // after override, color-bg is red
         assert!(
             css.contains("--color-bg: #FF0000;"),
-            "继承 resolve 后 color-bg 应为子覆写值，css={css}"
+            "after inheritance resolve, color-bg should be the child's override value, css={css}"
         );
-        // 父的 color-accent 保留。
+        // parent's color-accent is kept
         assert!(
             css.contains("--color-accent: #007AFF;"),
-            "父 color-accent 应继承保留，css={css}"
+            "parent color-accent should be inherited, css={css}"
         );
     }
 }

@@ -1,8 +1,8 @@
-//! fd-skills 测试：迁自 fd-ai-adapter skills_tests（ARCH-11）。
+//! fd-skills tests: migrated from fd-ai-adapter skills_tests (ARCH-11).
 //!
-//! MockSkillContext 替代 FusionMlxClient，验证 skill trait 行为无需真实推理。
-//! 纯 helper 测试（parse_ui_json/repair_model_json/strip_code_fence/parse_*）
-//! 直接调用 pub fn。skill struct 用 ::new(model) 构造（Ruling #16）。
+//! MockSkillContext replaces FusionMlxClient, verifying skill trait behavior without real
+//! inference. Pure helper tests (parse_ui_json/repair_model_json/strip_code_fence/parse_*)
+//! call pub fns directly. Skill structs are constructed with ::new(model) (Ruling #16).
 
 use fd_canvas_core::PenDocument;
 use fd_design_system::DesignSystem;
@@ -14,7 +14,7 @@ use fd_skills::{
 };
 use std::sync::{Arc, Mutex};
 
-// ── MockSkillContext：记录 chat 调用，返回预置响应 ──
+// ── MockSkillContext: records chat calls, returns canned responses ──
 
 struct MockSkillContext {
     responses: Arc<Mutex<Vec<String>>>,
@@ -33,7 +33,7 @@ impl MockSkillContext {
         self.calls.lock().unwrap().push(user.to_string());
         let mut responses = self.responses.lock().unwrap();
         if responses.is_empty() {
-            anyhow::bail!("MockSkillContext: 响应队列耗尽");
+            anyhow::bail!("MockSkillContext: response queue exhausted");
         }
         Ok(responses.remove(0))
     }
@@ -87,12 +87,13 @@ impl SkillContext for MockSkillContext {
     fn token_prompt_fragment(&self, design_system: Option<&DesignSystem>) -> Option<String> {
         design_system.map(|ds| {
             let css = ds.to_css_custom_properties();
+            // i18n: user-facing (LLM prompt fragment; kept in sync with the lib's prompt language)
             format!("当前设计系统 Token（CSS Custom Properties）：\n{css}\n\n生成的 UI 必须使用这些 CSS 变量。")
         })
     }
 }
 
-// ── 纯 helper 测试 ──
+// ── Pure helper tests ──
 
 fn fake_doc_json() -> String {
     let fill_a = String::from("#") + "FFF";
@@ -131,7 +132,7 @@ fn parse_ui_json_naked_nodes() {
 
 #[test]
 fn parse_ui_json_kind_case_insensitive() {
-    // 序列化端输出 PascalCase（"Text"/"Rect"），模型回显原样——解析必须接受。
+    // The serializer emits PascalCase ("Text"/"Rect") and the model echoes it verbatim — parsing must accept it.
     let pascal = r#"{"page":{"nodes":[{"id":"a","kind":"Text","text":"hi","x":0,"y":0,"w":10,"h":10},{"id":"b","kind":"Rect","x":0,"y":0,"w":10,"h":10}]}}"#;
     let doc = parse_ui_json(pascal, "P").unwrap();
     assert_eq!(doc.pages[0].nodes[0].kind, fd_canvas_core::NodeKind::Text);
@@ -190,26 +191,36 @@ fn repair_model_json_completes_truncated_object() {
 
 #[test]
 fn repair_model_json_preserves_cjk_no_mojibake() {
+    // i18n: user-facing (CJK fixture data)
     let broken = "{\"label\":\"登录\" \"w\":400}";
     let repaired = repair_model_json(broken);
-    assert!(repaired.contains("登录"), "CJK 被乱码: {repaired}");
+    // i18n: user-facing (CJK fixture data)
+    assert!(repaired.contains("登录"), "CJK corrupted: {repaired}");
+    // i18n: user-facing (CJK fixture data)
     assert!(
+        // i18n: user-facing (CJK fixture data)
         repaired.contains("\"登录\"")
+            // i18n: user-facing (CJK fixture data)
             || repaired.contains("\"登录\",")
+            // i18n: user-facing (CJK fixture data)
             || repaired.contains("\"登录\", \"w\""),
         "repaired={repaired}"
     );
     let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+    // i18n: user-facing (CJK fixture data)
     assert_eq!(v["label"], "登录");
     assert_eq!(v["w"], 400);
 }
 
 #[test]
 fn repair_model_json_cjk_value_after_space_no_corruption() {
+    // i18n: user-facing (CJK fixture data)
     let broken = "{\"name\":\"按钮\" \"type\":\"rect\"}";
     let repaired = repair_model_json(broken);
-    assert!(repaired.contains("按钮"), "CJK 被乱码: {repaired}");
+    // i18n: user-facing (CJK fixture data)
+    assert!(repaired.contains("按钮"), "CJK corrupted: {repaired}");
     let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
+    // i18n: user-facing (CJK fixture data)
     assert_eq!(v["name"], "按钮");
     assert_eq!(v["type"], "rect");
 }
@@ -226,7 +237,7 @@ fn parse_node_defaults_id_when_absent() {
     assert_eq!(n.id, "n_5");
 }
 
-// ── SkillRegistry 测试（::new(model) 构造）──
+// ── SkillRegistry tests (::new(model) construction) ──
 
 #[test]
 fn skill_registry_register_and_list() {
@@ -244,6 +255,7 @@ fn skill_registry_get_found() {
     reg.register(Box::new(TextToUiSkill::new("qwen3.5")));
     let skill = reg.get("text-to-ui").unwrap();
     assert_eq!(skill.id(), "text-to-ui");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "文生 UI");
 }
 
@@ -268,7 +280,7 @@ fn skill_registry_builtin_registers_seven() {
     assert!(ids.contains(&"page-flow"));
 }
 
-// ── SkillContext trait 测试（MockSkillContext）──
+// ── SkillContext trait tests (MockSkillContext) ──
 
 #[test]
 fn skill_context_token_prompt_without_design_system() {
@@ -285,7 +297,7 @@ fn skill_context_token_prompt_with_design_system() {
     assert!(frag.contains("CSS Custom Properties"));
 }
 
-// ── SkillOutput variant 测试 ──
+// ── SkillOutput variant tests ──
 
 #[test]
 fn skill_output_variant_document() {
@@ -293,7 +305,7 @@ fn skill_output_variant_document() {
     let out = SkillOutput::Document(doc);
     match out {
         SkillOutput::Document(d) => assert_eq!(d.pages.len(), 0),
-        _ => panic!("期望 Document"),
+        _ => panic!("expected Document"),
     }
 }
 
@@ -302,7 +314,7 @@ fn skill_output_variant_partial_edit() {
     let out = SkillOutput::PartialEdit("modified".into());
     match out {
         SkillOutput::PartialEdit(s) => assert_eq!(s, "modified"),
-        _ => panic!("期望 PartialEdit"),
+        _ => panic!("expected PartialEdit"),
     }
 }
 
@@ -310,15 +322,19 @@ fn skill_output_variant_partial_edit() {
 
 #[test]
 fn parse_local_edit_input_with_triple_pipe() {
+    // i18n: user-facing (user instruction input)
     let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]|||改成红色");
     assert_eq!(nodes, "[{\"id\":\"a\"}]");
+    // i18n: user-facing (user instruction input)
     assert_eq!(instr, "改成红色");
 }
 
 #[test]
 fn parse_local_edit_input_with_single_pipe() {
+    // i18n: user-facing (user instruction input)
     let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]|修改样式");
     assert_eq!(nodes, "[{\"id\":\"a\"}]");
+    // i18n: user-facing (user instruction input)
     assert_eq!(instr, "修改样式");
 }
 
@@ -326,15 +342,17 @@ fn parse_local_edit_input_with_single_pipe() {
 fn parse_local_edit_input_no_instruction() {
     let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]");
     assert_eq!(nodes, "[{\"id\":\"a\"}]");
+    // i18n: user-facing (default instruction, matches the lib's prompt-flowing default)
     assert_eq!(instr, "修改为更合适的样式");
 }
 
-// ── skill id/label（::new(model) 构造）──
+// ── skill id/label (::new(model) construction) ──
 
 #[test]
 fn local_edit_skill_id_and_label() {
     let skill = LocalEditSkill::new("qwen3.5");
     assert_eq!(skill.id(), "local-edit");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "本地编辑");
 }
 
@@ -342,6 +360,7 @@ fn local_edit_skill_id_and_label() {
 fn spec_doc_skill_id_and_label() {
     let skill = SpecDocSkill::new("qwen3.5");
     assert_eq!(skill.id(), "spec-doc");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "设计规范文档");
 }
 
@@ -349,6 +368,7 @@ fn spec_doc_skill_id_and_label() {
 fn page_flow_skill_id_and_label() {
     let skill = PageFlowSkill::new("qwen3.5");
     assert_eq!(skill.id(), "page-flow");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "页面流程生成");
 }
 
@@ -356,6 +376,7 @@ fn page_flow_skill_id_and_label() {
 fn text_to_ui_skill_id_and_label() {
     let skill = TextToUiSkill::new("qwen3.5");
     assert_eq!(skill.id(), "text-to-ui");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "文生 UI");
 }
 
@@ -363,6 +384,7 @@ fn text_to_ui_skill_id_and_label() {
 fn image_to_ui_skill_id_and_label() {
     let skill = ImageToUiSkill::new("qwen3.5");
     assert_eq!(skill.id(), "image-to-ui");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "图生 UI");
 }
 
@@ -370,6 +392,7 @@ fn image_to_ui_skill_id_and_label() {
 fn partial_edit_skill_id_and_label() {
     let skill = PartialEditSkill::new("qwen3.5");
     assert_eq!(skill.id(), "partial-edit");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "局部编辑");
 }
 
@@ -377,6 +400,7 @@ fn partial_edit_skill_id_and_label() {
 fn multi_variants_skill_id_and_label() {
     let skill = MultiVariantsSkill::new("qwen3.5");
     assert_eq!(skill.id(), "multi-variants");
+    // i18n: user-facing (skill display label)
     assert_eq!(skill.label(), "多方案对比");
 }
 
@@ -384,8 +408,10 @@ fn multi_variants_skill_id_and_label() {
 
 #[test]
 fn parse_spec_doc_input_with_title() {
+    // i18n: user-facing (user-facing spec title)
     let (doc, title) = parse_spec_doc_input("{\"pages\":[]}|登录页规范");
     assert_eq!(doc, "{\"pages\":[]}");
+    // i18n: user-facing (user-facing spec title)
     assert_eq!(title, "登录页规范");
 }
 
@@ -393,15 +419,19 @@ fn parse_spec_doc_input_with_title() {
 fn parse_spec_doc_input_default_title() {
     let (doc, title) = parse_spec_doc_input("{\"pages\":[]}");
     assert_eq!(doc, "{\"pages\":[]}");
+    // i18n: user-facing (default title, matches the lib's default)
     assert_eq!(title, "设计规范文档");
 }
 
 #[test]
 fn parse_spec_doc_json_full() {
+    // i18n: user-facing (generated spec content)
     let json = r#"{"title":"登录页规范","page_architecture":"单页居中布局","interaction_specs":[{"id":"i1","element":"登录按钮","event":"click","behavior":"提交表单","animation":"fade-in","notes":"防重复点击"}],"component_specs":[{"id":"c1","name":"LoginButton","kind":"button","props":[{"name":"disabled","prop_type":"boolean","default_value":"false","description":"是否禁用"}],"variants":["primary","ghost"],"accessibility":"aria-label=登录"}],"token_summary":"主色蓝 #007AFF，圆角 8px"}"#;
     let spec = parse_spec_doc_json(json, "fallback").unwrap();
+    // i18n: user-facing (generated spec content)
     assert_eq!(spec.title, "登录页规范");
     assert_eq!(spec.interaction_specs.len(), 1);
+    // i18n: user-facing (generated spec content)
     assert_eq!(spec.interaction_specs[0].element, "登录按钮");
     assert_eq!(spec.component_specs.len(), 1);
     assert_eq!(spec.component_specs[0].props.len(), 1);
@@ -411,7 +441,9 @@ fn parse_spec_doc_json_full() {
 #[test]
 fn parse_spec_doc_json_minimal() {
     let json = "{}";
+    // i18n: user-facing (fallback title passed through)
     let spec = parse_spec_doc_json(json, "默认标题").unwrap();
+    // i18n: user-facing (fallback title passed through)
     assert_eq!(spec.title, "默认标题");
     assert!(spec.interaction_specs.is_empty());
     assert!(spec.component_specs.is_empty());
@@ -421,46 +453,57 @@ fn parse_spec_doc_json_minimal() {
 
 #[test]
 fn parse_page_flow_input_with_style() {
+    // i18n: user-facing (user page-flow input)
     let (desc, style) = parse_page_flow_input("电商:首页,列表,详情|Material");
+    // i18n: user-facing (user page-flow input)
     assert_eq!(desc, "电商:首页,列表,详情");
     assert_eq!(style, "Material");
 }
 
 #[test]
 fn parse_page_flow_input_default_style() {
+    // i18n: user-facing (user page-flow input)
     let (desc, style) = parse_page_flow_input("电商:首页,列表,详情");
+    // i18n: user-facing (user page-flow input)
     assert_eq!(desc, "电商:首页,列表,详情");
+    // i18n: user-facing (default style, matches the lib's default)
     assert_eq!(style, "简约");
 }
 
 #[test]
 fn parse_flow_pages_with_colon() {
+    // i18n: user-facing (user page-flow input)
     let pages = parse_flow_pages("电商:首页,商品列表,商品详情,购物车,结算");
     assert_eq!(
         pages,
+        // i18n: user-facing (user page-flow input)
         vec!["首页", "商品列表", "商品详情", "购物车", "结算"]
     );
 }
 
 #[test]
 fn parse_flow_pages_without_colon() {
+    // i18n: user-facing (user page-flow input)
     let pages = parse_flow_pages("首页,列表,详情");
+    // i18n: user-facing (user page-flow input)
     assert_eq!(pages, vec!["首页", "列表", "详情"]);
 }
 
 #[test]
 fn parse_flow_pages_empty() {
     let pages = parse_flow_pages("");
+    // i18n: user-facing (default page name, matches the lib's default)
     assert_eq!(pages, vec!["首页"]);
 }
 
-// ── mock 端到端：TextToUiSkill 用 MockSkillContext 验证 prompt 构造 ──
+// ── mock end-to-end: TextToUiSkill with MockSkillContext verifies prompt construction ──
 
 #[test]
 fn text_to_ui_skill_prompt_constructed() {
     let fake_resp = r#"{"page":{"width":800,"height":600,"nodes":[{"id":"n0","kind":"rect","x":0,"y":0,"w":100,"h":50}]}}"#;
     let ctx = MockSkillContext::new(vec![fake_resp.to_string()]);
     let skill = TextToUiSkill::new("qwen3.5");
+    // i18n: user-facing (user text-to-ui input)
     let out = skill.execute(&ctx, None, "登录页|登录").unwrap();
     match out {
         SkillOutput::Document(doc) => {
@@ -468,25 +511,29 @@ fn text_to_ui_skill_prompt_constructed() {
             assert_eq!(doc.pages[0].nodes.len(), 1);
             assert_eq!(doc.pages[0].nodes[0].id, "n0");
         }
-        _ => panic!("期望 Document"),
+        _ => panic!("expected Document"),
     }
     let calls = ctx.calls.lock().unwrap();
     assert!(
+        // i18n: user-facing (user text-to-ui input echoed into the prompt)
         calls[0].contains("登录页"),
-        "user prompt 应包含 page_name: {}",
+        "user prompt should contain page_name: {}",
         calls[0]
     );
 }
 
 #[test]
 fn repair_model_json_fixes_missing_element_open_brace() {
-    // 4B 模型实测缺陷类：nodes 数组元素漏写 `{`，闭 `}` 仍在。
+    // Defect class observed on 4B models: a nodes-array element missing its opening `{`
+    // while the closing `}` is still present.
+    // i18n: user-facing (model-output fixture with CJK node text)
     let broken = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"g1","kind":"group","x":0,"y":0,"w":100,"h":100},"id":"t1","kind":"text","x":10,"y":10,"w":50,"h":20,"text":"欢迎登录"}]}},"#;
     let repaired = repair_model_json(broken);
     let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
     let nodes = v["page"]["nodes"].as_array().expect("nodes array");
-    assert_eq!(nodes.len(), 2, "两个元素都须保留: {repaired}");
+    assert_eq!(nodes.len(), 2, "both elements must be kept: {repaired}");
     assert_eq!(nodes[1]["id"], "t1");
+    // i18n: user-facing (model-output fixture with CJK node text)
     assert_eq!(nodes[1]["text"], "欢迎登录");
 }
 
@@ -500,9 +547,11 @@ fn repair_model_json_strips_trailing_comma_at_eof() {
 
 #[test]
 fn parse_ui_json_recovers_missing_element_open_brace() {
-    // 端到端：坏输出经修复链后应成功产出 PenDocument（fail visibly 不触发）。
+    // End-to-end: broken output should produce a PenDocument after the repair chain
+    // (fail visibly is not triggered).
+    // i18n: user-facing (model-output fixture with CJK node text)
     let broken = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"g1","kind":"group","x":0,"y":0,"w":100,"h":100},"id":"t1","kind":"text","x":10,"y":10,"w":50,"h":20,"text":"标题"}]}}"#;
-    let doc = parse_ui_json(broken, "page-1").expect("修复链应兜住漏开括号");
+    let doc = parse_ui_json(broken, "page-1").expect("repair chain should recover the missing open brace");
     let page = doc.pages.first().expect("page exists");
     assert_eq!(page.nodes.len(), 2);
     assert!(page.nodes.iter().any(|n| n.id == "t1"));
@@ -510,7 +559,8 @@ fn parse_ui_json_recovers_missing_element_open_brace() {
 
 #[test]
 fn repair_model_json_fixes_vision_value_garbage() {
-    // 视觉模型实测缺陷类：悬空引号 / 重复数字 / 字符串后垃圾段 / 尾逗号。
+    // Defect class observed on vision models: dangling quotes / duplicated digits /
+    // garbage after strings / trailing commas.
     let broken = r##"{
   "page": {
     "width": 1480,
@@ -522,15 +572,16 @@ fn repair_model_json_fixes_vision_value_garbage() {
     let repaired = repair_model_json(broken);
     let v: serde_json::Value = serde_json::from_str(&repaired).expect("repaired parses");
     let n = &v["page"]["nodes"][0];
-    assert_eq!(n["x"], 0, "悬空引号删除后 x=0: {repaired}");
-    assert_eq!(n["y"], 60, "悬空引号删除后 y=60");
-    assert_eq!(n["h"], 60, "重复数字删除后 h=60");
-    assert_eq!(n["fill"], "# ", "垃圾段删除后 fill 可解析");
+    assert_eq!(n["x"], 0, "after dangling-quote removal x=0: {repaired}");
+    assert_eq!(n["y"], 60, "after dangling-quote removal y=60");
+    assert_eq!(n["h"], 60, "after duplicated-digit removal h=60");
+    assert_eq!(n["fill"], "# ", "after garbage-segment removal fill parses");
 }
 
 #[test]
 fn repair_model_json_keeps_multi_digit_tokens() {
-    // 回归护栏：数字 token 内部（100/400/16.5）不可被重复数字规则误删。
+    // Regression guard: the inside of numeric tokens (100/400/16.5) must not be
+    // wrongly trimmed by the duplicated-digit rule.
     let ok = r#"{"page":{"width":1440,"height":900,"nodes":[{"id":"n0","kind":"rect","x":100,"y":400,"w":16.5,"h":900}]}}"#;
     let v: serde_json::Value = serde_json::from_str(&repair_model_json(ok)).expect("parses");
     assert_eq!(v["page"]["nodes"][0]["x"], 100);
@@ -540,12 +591,12 @@ fn repair_model_json_keeps_multi_digit_tokens() {
 
 #[test]
 fn parse_ui_json_recovers_vl7b_output() {
-    // Qwen2.5-VL-7B 实测输出（登录页截图还原）：键位孤儿串/双冒号等缺陷，
-    // 修复链应兜住并产出完整 PenDocument。
+    // Real Qwen2.5-VL-7B output (login-page screenshot restore): orphan key-position strings,
+    // double colons and similar defects; the repair chain should recover a full PenDocument.
     let raw = r##"{"page":{"width":1440,"height":900,"nodes":[{"id":"1","kind":"group","x":280,"y":150,"w":980,"h":600,"text":"","fill":"#f9f9f99","stroke":"#f9f999"},{"id":"2","kind":"text","x":412,"y":189,"w":320,"h":50,"text":"User Login","text-align":"center","font-family":"Arial","font-size":30,"font-weight":"bold"},{"id":"3","kind":"":"text","x":412,"y":229,"w":400,"h":50,"text":"Sign in to continue","text-align":"center","font-family":"Arial","font-size":15,"font-weight":"normal"},{"id":"4","kind":"image","x":412,"y":280,"w":400,"h":50,"text":"","fill":"#f9f9f9","stroke":"#f9f9f9","children":[{"id":"5","kind":"text","x":412,"y":280,"w":320,"h":50,"text":"Email address","text-align":"left","font-family":"Arial","font-size":15,"font-weight":"normal"},{"id":"6","kind":"text","x":412,"y":330,"w":3200,"h":50","text":"Password","text-align":"left","left","font-family-family":"Arial","Arial","font-size":15015,"font-weight":"normal"},{"id":"7","kind":"image","x":41412,"y":380,"w":4000,"h":50,"text":"","fill":"#f9f9f999","stroke":"#f9999","children":[{"id":"8","kind":"text","":"text","x":411412,"y":380,"w400":"0h":5050,"text":"Sign In","text-align":"center","font-family":"Arial","":"Arial","font-size":150,"":"font-weight":"bold"},{"id":"9","kind":"image","x":41412,"y":"0w":"0h50":"50"text":"","fill":"#f99","stroke":"#999","children":[{"id":"10","kind":"text","x412":"y380":"w400":"h50":"50"text":"Forgot password? Create account","text-align":"left","font-family":"Arial","font-size":15,"font-weight":"normal"},{"id":"11","kind":"image","x412y":"380w400":"h500":"50"text":"","fill":"#f99999","stroke":"#99999","children":[{"id":"12","kind":"text","":"text","x412y380w4000h50"text":"Remember me","text-align":"left","font-family-familyArial":"Arialfont-size15":"15font-weight":"normal"}]}]}]}}"##;
-    let doc = parse_ui_json(raw, "restored").expect("VL 输出修复链应兜住");
+    let doc = parse_ui_json(raw, "restored").expect("repair chain should recover VL output");
     let page = doc.pages.first().expect("page exists");
-    assert!(!page.nodes.is_empty(), "节点不可为空");
+    assert!(!page.nodes.is_empty(), "nodes must not be empty");
     assert!(page
         .nodes
         .iter()
