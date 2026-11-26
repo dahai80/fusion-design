@@ -1,6 +1,6 @@
-// ARCH-10 r4：auto-fix 与 Token 映射从 lib.rs 拆出。apply_tokens_to_document 为 pub
-// （fd-cli 消费），fix_detail/FixResult 类型留 lib.rs（公共 API），此处 import。
-// 行为零变更——纯位置迁移。
+// ARCH-10 r4: auto-fix + Token mapping split out of lib.rs. apply_tokens_to_document is pub
+// (consumed by fd-cli); the FixDetail/FixResult types stay in lib.rs (public API), imported here.
+// Zero behavior change — pure positional move.
 
 use std::collections::HashMap;
 
@@ -11,7 +11,7 @@ use tracing::info;
 use crate::{build_numeric_token_map, build_token_map, FixDetail, FixResult, LintRule};
 
 pub fn apply_tokens_to_document(doc: &mut PenDocument, system: &DesignSystem) -> FixResult {
-    info!("apply_tokens_to_document: 开始应用 Token 到 PenDocument");
+    info!("apply_tokens_to_document: starting to apply Tokens to the PenDocument");
     let token_map = build_token_map(system);
     let numeric_map = build_numeric_token_map(system);
     let mut result = FixResult {
@@ -25,7 +25,7 @@ pub fn apply_tokens_to_document(doc: &mut PenDocument, system: &DesignSystem) ->
     }
 
     info!(
-        "apply_tokens_to_document: 完成, applied={}, skipped={}",
+        "apply_tokens_to_document: finished, applied={}, skipped={}",
         result.fixes_applied, result.fixes_skipped
     );
     result
@@ -191,9 +191,9 @@ fn apply_tokens_to_nodes(
                 NodeKind::Image => "image",
                 NodeKind::Group => "group",
             };
-            // E-29：按字符边界取前 8 字符，非字节切片——含 CJK id 字节切片在
-            // 多字节字符中间切断会 panic at non-char boundary。node.id 含中文
-            // （如「登录按钮」）走 lint --fix 即崩。
+            // E-29: take the first 8 characters on char boundaries, not a byte slice — a byte slice on
+            // a CJK id cut mid-multi-byte-character panics with "not a char boundary". A node.id
+            // containing Chinese (e.g. "登录按钮") used to crash lint --fix.
             let id_prefix: String = node.id.chars().take(8).collect();
             let new_name = format!("{}_{}", kind_str, id_prefix);
             let before = node.name.clone();

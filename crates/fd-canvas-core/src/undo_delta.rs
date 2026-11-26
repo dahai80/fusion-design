@@ -1,8 +1,10 @@
-//! FUNC-7：delta undo 数据结构。替代快照式 UndoRedoStack 存整 PenDocument，
-//! 改存节点级 UndoDelta（增/删/改），节省内存。move 按 delete+add 处理（MVP，丢 reorder 语义）。
+//! FUNC-7: delta undo data structures. Replaces the snapshot-style UndoRedoStack that stored a
+//! whole PenDocument; instead stores node-level UndoDelta (add/delete/modify), saving memory.
+//! Moves are handled as delete+add (MVP, reorder semantics dropped).
 //!
-//! 与 lib.rs 既有的 PenDocumentDiff（字段级 JSON 展示 diff，fd-cli diff 子命令用）是不同概念，
-//! 故独立命名 UndoDelta/NodeChange，不复用其名。
+//! This is a different concept from the existing PenDocumentDiff in lib.rs (field-level JSON
+//! display diff used by the fd-cli diff subcommand), hence the distinct names UndoDelta/NodeChange
+//! instead of reusing those.
 
 use crate::{PenDocument, PenNode};
 use serde::{Deserialize, Serialize};
@@ -23,7 +25,7 @@ pub struct NodeChange {
 }
 
 impl UndoDelta {
-    /// 计算 old → new 的节点级 delta。单页 MVP（取首页 nodes 对比）。
+    /// Computes the node-level delta from old to new. Single-page MVP (compares first-page nodes).
     pub fn compute(old: &PenDocument, new: &PenDocument) -> Self {
         let old_nodes = active_nodes(old);
         let new_nodes = active_nodes(new);
@@ -59,12 +61,13 @@ impl UndoDelta {
         }
     }
 
-    /// 正向应用 delta 到 doc（push/redo 用）。增→加节点，删→移节点，改→替换节点。
+    /// Applies the delta forward to doc (used by push/redo). Add → insert node, delete → remove
+    /// node, modify → replace node.
     pub fn apply(&self, doc: &mut PenDocument) {
         let page = match doc.pages.iter_mut().find(|p| p.id == self.page_id) {
             Some(p) => p,
             None => {
-                tracing::warn!(page_id = %self.page_id, "UndoDelta apply 目标页不存在，跳过");
+                tracing::warn!(page_id = %self.page_id, "UndoDelta apply target page not found, skipping");
                 return;
             }
         };
@@ -79,16 +82,17 @@ impl UndoDelta {
         }
     }
 
-    /// 反向应用 delta（undo 用）。增→移，删→加，改→换回 old。
+    /// Applies the delta in reverse (used by undo). Add → remove, delete → insert, modify →
+    /// restore old.
     pub fn apply_reverse(&self, doc: &mut PenDocument) {
         let page = match doc.pages.iter_mut().find(|p| p.id == self.page_id) {
             Some(p) => p,
             None => {
-                tracing::warn!(page_id = %self.page_id, "UndoDelta apply_reverse 目标页不存在，跳过");
+                tracing::warn!(page_id = %self.page_id, "UndoDelta apply_reverse target page not found, skipping");
                 return;
             }
         };
-        // 逆序撤销：先移 added、再换回 modified.old、最后补回 deleted。
+        // Reverse-order undo: remove added first, restore modified.old next, re-add deleted last.
         for n in &self.added {
             remove_node_by_id(&mut page.nodes, &n.id);
         }

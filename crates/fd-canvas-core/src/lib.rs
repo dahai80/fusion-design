@@ -1,44 +1,48 @@
-//! Fusion-Design 画布内核 — 自研轻量矢量画布模型。
+//! Fusion-Design canvas kernel — self-built lightweight vector canvas model.
 //!
-//! 设计决策：OpenPencil 的 4 个核心 crate 强依赖私有底座 `jian-ops-schema`
-//! （`vendor/jian/` 上游未拉取，本地空目录）。fusion-design MVP 不自研
-//! jian 替身（工程量大且偏离目标），改为定义本原生轻量画布模型，
-//! 与已有 `fd-export`/`fd-design-system`/`fd-ecosystem` 直接对接。
+//! Design decision: OpenPencil's 4 core crates hard-depend on the private `jian-ops-schema`
+//! base (`vendor/jian/` was never fetched upstream; the local directory is empty). The
+//! fusion-design MVP does not build a jian stand-in (high effort, off-target); instead it
+//! defines this native lightweight canvas model, wiring directly into the existing
+//! `fd-export`/`fd-design-system`/`fd-ecosystem`.
 //!
-//! 模型覆盖 MVP 必需：PenDocument/PenNode/page/node/style/sizing/variable，
-//! 形状参照 OpenPencil `jian_ops_schema` 的公开引用，但裁剪至 fusion-design 用途。
+//! The model covers the MVP essentials: PenDocument/PenNode/page/node/style/sizing/variable.
+//! Shapes reference OpenPencil's `jian_ops_schema` public schema, trimmed to fusion-design's needs.
 //!
-//! V0.2 扩展：LayoutMode(Flex/Grid) 声明 + ComponentSlot + Token 引用。
+//! V0.2 additions: LayoutMode(Flex/Grid) declarations + ComponentSlot + token references.
 // Callers: fd-host-web (DOM render), fd-codegen (layout-aware CSS gen), fd-export (export)
 // Affected API: NodeStyle (new fields), PenNode (rotation/z_index)
 // Data schemas: LayoutMode/FlexParams/GridParams/TrackSizing/ComponentSlot
-// H-A10：Taffy compute_layout 已移除（死代码）；Flex/Grid 渲染由 codegen 生成 CSS。
+// H-A10: Taffy compute_layout removed (dead code); Flex/Grid rendering is generated as CSS by codegen.
 
 use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-// A-5：CSS 安全工具下沉到 fd-css-utils 叶子 crate，此处 re-export 保持
-// 下游调用方 `fd_canvas_core::parse_hex_color` / `sanitize_css_value` 不变。
+// A-5: CSS safety utilities were sunk into the fd-css-utils leaf crate; re-exporting here keeps
+// the downstream call sites `fd_canvas_core::parse_hex_color` / `sanitize_css_value` unchanged.
 pub use fd_css_utils::{parse_hex_color, sanitize_css_value};
 
-// 反序列化安全护栏：限制恶意/损坏 .fusiondesign 的嵌套深度与节点总数，
-// 防止深度嵌套导致栈溢出或海量节点导致 OOM。
+// Deserialization safety guardrails: cap nesting depth and total node count for a malicious or
+// corrupted .fusiondesign, preventing stack overflow from deep nesting or OOM from huge node sets.
 const MAX_NODE_DEPTH: usize = 64;
 const MAX_NODE_TOTAL: usize = 100_000;
 
-// 文件格式 schema 版本（A1：无版本号无法做向前兼容/迁移）。
-// 当前版本 1。加载时校验：缺失视作 1（兼容旧文件），高于当前视作错误。
+// File-format schema version (A1: without a version number there is no forward compat/migration).
+// Current version 1. Validated on load: missing counts as 1 (old-file compat), higher than
+// current counts as an error.
 pub const SCHEMA_VERSION: u32 = 1;
 
-// ARCH-5：schema 迁移框架。从 `from` 版本迁移到 `from+1`，原地改 `doc`，返回新版本号。
-// 当前仅 v1（无前驱），故 body 为空 match（no-op）。v2 破坏性变更时加 `1 => { ...; Ok(2) }` 分支。
-// 调用方（from_json）循环 `while v < SCHEMA_VERSION { v = migrate_schema(v, &mut value)? }`。
-// 在 serde_json::Value 层操作而非结构体层：迁移逻辑早于反序列化，能改字段名/结构，
-// 而结构体反序列化已按目标版本定型，无法兼容旧字段形态。
+// ARCH-5: schema migration framework. Migrates from version `from` to `from+1`, mutating `doc`
+// in place and returning the new version. Only v1 exists today (no predecessor), so the body is
+// an empty match (no-op). When v2 introduces a breaking change, add a `1 => { ...; Ok(2) }` arm.
+// The caller (from_json) loops `while v < SCHEMA_VERSION { v = migrate_schema(v, &mut value)? }`.
+// Operates at the serde_json::Value layer rather than the struct layer: migration runs before
+// deserialization, so it can rename fields/reshape structures; struct deserialization is already
+// pinned to the target version and cannot accommodate old field shapes.
 pub fn migrate_schema(from: u32, doc: &mut serde_json::Value) -> Result<u32, CanvasError> {
     match from {
-        // v0（无版本号旧文件）→ v1：无结构差异，直接提版本号。
+        // v0 (old files without a version) → v1: no structural difference, just bump the version.
         0 => {
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert(
@@ -46,34 +50,42 @@ pub fn migrate_schema(from: u32, doc: &mut serde_json::Value) -> Result<u32, Can
                     serde_json::json!(SCHEMA_VERSION),
                 );
             }
-            tracing::info!(from = 0, to = 1, "schema 迁移 v0 → v1（no-op，仅补版本号）");
+            tracing::info!(
+                from = 0,
+                to = 1,
+                "schema migration v0 -> v1 (no-op, only stamps the version)"
+            );
             Ok(1)
         }
-        // 已是当前版本：不应被调用，但防御性返回原值。
+        // Already at the current version: should not be called, but defensively return as-is.
         v if v >= SCHEMA_VERSION => Ok(v),
-        // 预留位：未来 1 => Ok(2) 等破坏性迁移分支。
+        // Reserved slot: future breaking-migration arms like 1 => Ok(2).
         other => {
-            tracing::warn!(from = other, "schema 迁移：无对应分支，保持原版本");
+            tracing::warn!(
+                from = other,
+                "schema migration: no matching arm, keeping original version"
+            );
             Ok(other)
         }
     }
 }
 
-// ── 文档/页面/节点 ──
+// ── Document / Page / Node ──
 
-/// 画布文档（顶层工程文件 `.fusiondesign` 的结构体）。
+/// Canvas document (the struct behind the top-level `.fusiondesign` project file).
 ///
-/// A4：安全护栏（深度/总量上限）在反序列化边界强制执行，不经 from_json 走裸
-/// `serde_json::from_str::<PenDocument>` 同样受限——绕过在类型层不可能。
-/// A1：schema_version 字段支撑文件格式向前兼容/迁移。
+/// A4: safety guardrails (depth/total limits) are enforced at the deserialization boundary; a bare
+/// `serde_json::from_str::<PenDocument>` that bypasses from_json is equally constrained —
+/// bypassing them at the type level is impossible.
+/// A1: the schema_version field supports file-format forward compat/migration.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PenDocument {
-    /// 文件格式 schema 版本（A1）。缺失/0 视作 1（兼容旧文件）。
+    /// File-format schema version (A1). Missing/0 counts as 1 (old-file compat).
     #[serde(default)]
     pub schema_version: u32,
     pub pages: Vec<Page>,
     pub variables: Option<HashMap<String, VariableDef>>,
-    /// 当前激活的设计规范 ID（对接 fd-design-system）。
+    /// Currently active design-system ID (integration point with fd-design-system).
     pub active_design_system: Option<String>,
 }
 
@@ -91,7 +103,7 @@ impl<'de> Deserialize<'de> for PenDocument {
             active_design_system: Option<String>,
         }
         let raw = PenDocumentRaw::deserialize(d)?;
-        // 缺失/0 视作 1（兼容 v0.1.x 旧文件）。
+        // Missing/0 counts as 1 (v0.1.x old-file compat).
         let schema_version = if raw.schema_version == 0 {
             SCHEMA_VERSION
         } else {
@@ -99,7 +111,7 @@ impl<'de> Deserialize<'de> for PenDocument {
         };
         if schema_version > SCHEMA_VERSION {
             return Err(serde::de::Error::custom(format!(
-                "文件 schema 版本 {schema_version} 高于当前支持 {SCHEMA_VERSION}，请升级 fusion-design"
+                "file schema version {schema_version} is newer than the supported {SCHEMA_VERSION}, please upgrade fusion-design"
             )));
         }
         let doc = PenDocument {
@@ -108,14 +120,15 @@ impl<'de> Deserialize<'de> for PenDocument {
             variables: raw.variables,
             active_design_system: raw.active_design_system,
         };
-        // A4：反序列化边界强制安全护栏——任何加载路径（含裸 from_str、UndoRedoStack
-        // 反序列化内嵌 PenDocument）都无法绕过深度/总量上限。
+        // A4: safety guardrails enforced at the deserialization boundary — no load path (including
+        // bare from_str, or UndoRedoStack deserialization embedding a PenDocument) can bypass the
+        // depth/total limits.
         doc.validate_limits().map_err(serde::de::Error::custom)?;
         Ok(doc)
     }
 }
 
-/// 页面（一画板）。
+/// Page (one artboard).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     pub id: String,
@@ -125,7 +138,7 @@ pub struct Page {
     pub nodes: Vec<PenNode>,
 }
 
-/// �矢量节点（统一形状，覆盖 rect/circle/text/image/group）。
+/// Vector node (unified shape, covering rect/circle/text/image/group).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PenNode {
     pub id: String,
@@ -156,21 +169,21 @@ pub enum NodeKind {
     Group,
 }
 
-// ── 布局 ──
+// ── Layout ──
 
-/// 节点布局模式。
+/// Node layout mode.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum LayoutMode {
-    /// 自由定位（绝对坐标）。
+    /// Free positioning (absolute coordinates).
     #[default]
     Free,
-    /// Flexbox 布局。
+    /// Flexbox layout.
     Flex(FlexParams),
-    /// CSS Grid 布局。
+    /// CSS Grid layout.
     Grid(GridParams),
 }
 
-/// Flexbox 布局参数。
+/// Flexbox layout parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlexParams {
     pub direction: FlexDirection,
@@ -230,7 +243,7 @@ pub enum FlexWrap {
     Wrap,
 }
 
-/// 四边偏移量（padding/margin）。
+/// Side offsets (padding/margin).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct SideOffsets {
     pub top: f64,
@@ -250,7 +263,7 @@ impl SideOffsets {
     }
 }
 
-/// CSS Grid 布局参数。
+/// CSS Grid layout parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridParams {
     pub columns: Vec<TrackSizing>,
@@ -270,7 +283,7 @@ impl Default for GridParams {
     }
 }
 
-/// Grid 轨道尺寸。
+/// Grid track sizing.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TrackSizing {
     Fixed(f64),
@@ -279,7 +292,7 @@ pub enum TrackSizing {
     Percent(f64),
 }
 
-/// Grid 区域命名。
+/// Grid area naming.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GridArea {
     pub name: String,
@@ -289,9 +302,9 @@ pub struct GridArea {
     pub col_end: u32,
 }
 
-// ── 组件实例 ──
+// ── Component instances ──
 
-/// 组件插槽：引用设计系统中的组件并支持覆写。
+/// Component slot: references a component in the design system and supports overrides.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComponentSlot {
     pub component_id: String,
@@ -300,7 +313,7 @@ pub struct ComponentSlot {
     pub overrides: HashMap<String, serde_json::Value>,
 }
 
-/// 组件定义：可被 ComponentSlot 引用的模板节点树。
+/// Component definition: template node tree referenceable by a ComponentSlot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentDefinition {
     pub id: String,
@@ -308,7 +321,7 @@ pub struct ComponentDefinition {
     pub variants: HashMap<String, PenNode>,
 }
 
-/// 组件注册中心：存储组件定义，支持实例化。
+/// Component registry: stores component definitions and supports instantiation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ComponentRegistry {
     pub components: HashMap<String, ComponentDefinition>,
@@ -327,7 +340,7 @@ impl ComponentRegistry {
         self.components.get(id)
     }
 
-    /// 实例化组件：从 ComponentSlot 创建节点树副本，并应用覆写。
+    /// Instantiates a component: clones the node tree from a ComponentSlot and applies overrides.
     pub fn instantiate(&self, slot: &ComponentSlot) -> Option<PenNode> {
         let def = self.components.get(&slot.component_id)?;
         let template = def.variants.get(&slot.variant)?;
@@ -338,7 +351,7 @@ impl ComponentRegistry {
 }
 
 fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::Value>) {
-    // 按路径覆写，如 "fill" → node.style.fill, "text" → node.text
+    // Override by path, e.g. "fill" → node.style.fill, "text" → node.text
     for (key, val) in overrides {
         match key.as_str() {
             "fill" => {
@@ -372,13 +385,14 @@ fn apply_overrides(node: &mut PenNode, overrides: &HashMap<String, serde_json::V
                 }
             }
             _ => {
-                tracing::debug!(key = %key, "apply_overrides: 未知覆写键，忽略");
+                tracing::debug!(key = %key, "apply_overrides: unknown override key, ignoring");
             }
         }
     }
 }
 
-/// 递归统计节点最大嵌套深度与累计节点数。深度超限即 bail（短路，不继续遍历）。
+/// Recursively computes the max nesting depth and cumulative node count. Bails as soon as a limit
+/// is exceeded (short-circuits, no further traversal).
 fn count_depth(node: &PenNode, depth: usize, total: &mut usize) -> Result<usize, CanvasError> {
     *total += 1;
     if *total > MAX_NODE_TOTAL {
@@ -403,7 +417,7 @@ fn count_depth(node: &PenNode, depth: usize, total: &mut usize) -> Result<usize,
     Ok(max_d)
 }
 
-// ── 样式 ──
+// ── Style ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeStyle {
@@ -456,7 +470,7 @@ impl Default for NodeStyle {
     }
 }
 
-// ── 变量（设计 Token 引用） ──
+// ── Variables (design token references) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableDef {
@@ -469,7 +483,7 @@ pub struct VariableDef {
 #[serde(untagged)]
 pub enum VariableValue {
     Scalar(VariableScalar),
-    /// 主题化值（mode=dark/light 等多套值）。
+    /// Themed values (multiple value sets keyed by mode, e.g. dark/light).
     Themed(Vec<ThemedEntry>),
 }
 
@@ -494,30 +508,30 @@ pub struct ThemedEntry {
     pub theme: Option<HashMap<String, String>>,
 }
 
-// ── 文档操作 API ──
+// ── Document operations API ──
 
 impl PenDocument {
-    /// 创建空文档。
+    /// Creates an empty document.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 添加一个页面。
+    /// Adds a page.
     pub fn add_page(&mut self, page: Page) {
         self.pages.push(page);
     }
 
-    /// 按 ID 查找页面。
+    /// Finds a page by ID.
     pub fn page(&self, id: &str) -> Option<&Page> {
         self.pages.iter().find(|p| p.id == id)
     }
 
-    /// 按 ID 查找页面（可变）。
+    /// Finds a page by ID (mutable).
     pub fn page_mut(&mut self, id: &str) -> Option<&mut Page> {
         self.pages.iter_mut().find(|p| p.id == id)
     }
 
-    /// 按 ID 查找节点（递归，全部页面）。
+    /// Finds a node by ID (recursive, all pages).
     pub fn find_node(&self, node_id: &str) -> Option<&PenNode> {
         self.pages
             .iter()
@@ -525,7 +539,7 @@ impl PenDocument {
             .find_map(|n| n.find(node_id))
     }
 
-    /// 按 ID 查找节点（可变，递归）。
+    /// Finds a node by ID (mutable, recursive).
     pub fn find_node_mut(&mut self, node_id: &str) -> Option<&mut PenNode> {
         self.pages
             .iter_mut()
@@ -533,7 +547,7 @@ impl PenDocument {
             .find_map(|n| n.find_mut(node_id))
     }
 
-    /// 删除节点（返回是否删除成功）。
+    /// Removes a node (returns whether removal succeeded).
     pub fn remove_node(&mut self, node_id: &str) -> bool {
         for page in &mut self.pages {
             if remove_node_from_list(&mut page.nodes, node_id) {
@@ -543,24 +557,28 @@ impl PenDocument {
         false
     }
 
-    /// 序列化为 `.fusiondesign` JSON。
+    /// Serializes to `.fusiondesign` JSON.
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string_pretty(self)
     }
 
-    /// 从 JSON 反序列化（ARCH-13：返 CanvasError 而非 anyhow，下游可 downcast 区分 corrupt vs upgrade）。
-    /// 安全护栏已由 `Deserialize` 实现强制（A4），此方法仅做错误类型转换。
+    /// Deserializes from JSON (ARCH-13: returns CanvasError instead of anyhow so downstream can
+    /// downcast to distinguish corrupt vs upgrade).
+    /// Safety guardrails are already enforced by the `Deserialize` impl (A4); this method only
+    /// converts error types.
     ///
-    /// E-14：截断/损坏检测。`#[serde(default)]` 使被截断的文件"成功"解析成
-    /// 残缺文档（缺失 pages → 空 Vec，缺失 schema_version → 默认 1），用户打开
-    /// 看到空白画布却无任何告警，静默丢数据。此处对"原文非空但解析出全空文档"
-    /// 的可疑情形显式 warn（fail visibly），不报错以免阻断合法的新建空文档。
+    /// E-14: truncation/corruption detection. `#[serde(default)]` lets a truncated file "successfully"
+    /// parse into a partial document (missing pages → empty Vec, missing schema_version → default 1);
+    /// the user opens it, sees a blank canvas with no warning, and data is silently lost. For the
+    /// suspicious case of "non-empty input parsing into an entirely empty document", emit an explicit
+    /// warn (fail visibly) — not an error, to avoid blocking a legitimately new empty document.
     pub fn from_json(json: &str) -> Result<Self, CanvasError> {
         let trimmed = json.trim();
-        // ARCH-5：先解析为 serde_json::Value，跑 schema 迁移循环，再反序列化为结构体。
-        // 迁移在 Value 层进行，能改字段名/结构；结构体 Deserialize 已按目标版本定型。
+        // ARCH-5: parse to serde_json::Value first, run the schema migration loop, then deserialize
+        // into the struct. Migration runs at the Value layer, so it can rename fields/reshape
+        // structures; struct Deserialize is already pinned to the target version.
         let mut value: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| CanvasError::ParseError(format!("解析为 JSON Value 失败: {e}")))?;
+            .map_err(|e| CanvasError::ParseError(format!("failed to parse as JSON Value: {e}")))?;
         let mut v = match &value {
             serde_json::Value::Object(obj) => obj
                 .get("schema_version")
@@ -578,20 +596,24 @@ impl PenDocument {
         while v < SCHEMA_VERSION {
             v = migrate_schema(v, &mut value)?;
         }
-        let doc: PenDocument = serde_json::from_value(value)
-            .map_err(|e| CanvasError::ParseError(format!("含安全护栏校验的反序列化失败: {e}")))?;
-        // 可疑截断：原文非空（非纯空白/空对象）但解析出零页面。提示用户文件可能损坏。
+        let doc: PenDocument = serde_json::from_value(value).map_err(|e| {
+            CanvasError::ParseError(format!(
+                "deserialization with safety guardrails failed: {e}"
+            ))
+        })?;
+        // Suspected truncation: non-empty input (not pure whitespace/empty object) but zero pages
+        // parsed. Warns the user the file may be corrupted.
         if !trimmed.is_empty() && trimmed != "{}" && doc.pages.is_empty() {
             tracing::warn!(
                 input_len = json.len(),
                 pages = doc.pages.len(),
-                "from_json: 输入非空但解析出零页面，文件可能被截断/损坏（serde default 已静默补缺字段）。请检查文件完整性。"
+                "from_json: input is non-empty but parsed to zero pages; file may be truncated/corrupted (serde defaults silently filled in missing fields). Check file integrity."
             );
         }
         Ok(doc)
     }
 
-    /// 校验节点嵌套深度与总数在安全阈值内。
+    /// Validates that node nesting depth and total count stay within safety thresholds.
     pub fn validate_limits(&self) -> Result<(), CanvasError> {
         let mut total: usize = 0;
         for page in &self.pages {
@@ -619,10 +641,11 @@ impl PenDocument {
     }
 }
 
-// H-A10/P1-5：Taffy compute_layout/compute_flex_layout/compute_grid_layout
-// + ComputedLayout 已移除（零生产调用，展示性死代码）。
-// Flex/Grid 渲染现由 layout-aware codegen 生成 flex/grid CSS，浏览器/wasm 执行布局。
-// LayoutMode/FlexParams/GridParams 等 NodeStyle 声明类型保留（codegen/渲染器消费）。
+// H-A10/P1-5: Taffy compute_layout/compute_flex_layout/compute_grid_layout + ComputedLayout were
+// removed (zero production callers, demonstrative dead code).
+// Flex/Grid rendering is now produced as flex/grid CSS by the layout-aware codegen; the
+// browser/wasm executes the layout. The NodeStyle declarative types (LayoutMode/FlexParams/
+// GridParams etc.) are kept (consumed by codegen/renderers).
 
 impl Page {
     pub fn new(id: impl Into<String>, name: impl Into<String>, w: f64, h: f64) -> Self {
@@ -635,14 +658,14 @@ impl Page {
         }
     }
 
-    /// 添加节点。
+    /// Adds a node.
     pub fn add(&mut self, node: PenNode) {
         self.nodes.push(node);
     }
 }
 
 impl PenNode {
-    /// 创建 rect 节点。
+    /// Creates a rect node.
     pub fn rect(id: impl Into<String>, x: f64, y: f64, w: f64, h: f64) -> Self {
         Self {
             id: id.into(),
@@ -660,7 +683,7 @@ impl PenNode {
         }
     }
 
-    /// 创建 text 节点。
+    /// Creates a text node.
     pub fn text(id: impl Into<String>, x: f64, y: f64, content: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -678,7 +701,7 @@ impl PenNode {
         }
     }
 
-    /// 创建 group 节点。
+    /// Creates a group node.
     pub fn group(id: impl Into<String>, x: f64, y: f64, children: Vec<PenNode>) -> Self {
         Self {
             id: id.into(),
@@ -696,7 +719,7 @@ impl PenNode {
         }
     }
 
-    /// 递归查找自身或子孙节点。
+    /// Recursively finds self or a descendant node.
     pub fn find(&self, id: &str) -> Option<&PenNode> {
         if self.id == id {
             return Some(self);
@@ -704,7 +727,7 @@ impl PenNode {
         self.children.iter().find_map(|c| c.find(id))
     }
 
-    /// 递归查找（可变）。
+    /// Recursive find (mutable).
     pub fn find_mut(&mut self, id: &str) -> Option<&mut PenNode> {
         if self.id == id {
             return Some(self);
@@ -712,7 +735,7 @@ impl PenNode {
         self.children.iter_mut().find_map(|c| c.find_mut(id))
     }
 
-    /// 全部子孙节点 ID（含自身）。
+    /// All descendant node IDs (including self).
     pub fn descendant_ids(&self) -> Vec<String> {
         let mut ids = vec![self.id.clone()];
         for c in &self.children {
@@ -733,34 +756,36 @@ fn remove_node_from_list(nodes: &mut Vec<PenNode>, id: &str) -> bool {
         .any(|n| remove_node_from_list(&mut n.children, id))
 }
 
-// ── 错误 ──
+// ── Errors ──
 
 #[derive(Debug, thiserror::Error)]
 pub enum CanvasError {
-    #[error("节点 {0} 未找到")]
+    #[error("node {0} not found")]
     NodeNotFound(String),
-    #[error("页面 {0} 未找到")]
+    #[error("page {0} not found")]
     PageNotFound(String),
-    // A-4：库 crate 错误细化（替 anyhow 字符串），fd-cli report_error 按 downcast 变体 match。
-    #[error("文档解析失败: {0}")]
+    // A-4: fine-grained library-crate errors (replacing anyhow strings); fd-cli report_error
+    // matches downcast variants.
+    #[error("document parse failed: {0}")]
     ParseError(String),
-    #[error("节点嵌套深度 {depth} 超过安全上限 {limit}")]
+    #[error("node nesting depth {depth} exceeds safety limit {limit}")]
     DepthExceeded { depth: usize, limit: usize },
-    #[error("节点总数 {total} 超过安全上限 {limit}")]
+    #[error("total node count {total} exceeds safety limit {limit}")]
     NodeTotalExceeded { total: usize, limit: usize },
-    // A-7：schema 迁移框架——文件版本高于当前 SCHEMA_VERSION 时上报。
-    #[error("文档 schema 版本 {0} 不支持")]
+    // A-7: schema migration framework — reported when the file version exceeds the current
+    // SCHEMA_VERSION.
+    #[error("document schema version {0} not supported")]
     SchemaVersion(u32),
 }
 
-// ── 撤销/重做栈 ──
+// ── Undo/redo stack ──
 
 mod undo_delta;
 pub use undo_delta::{NodeChange, UndoDelta};
 
 const UNDO_REDO_MAX_DEPTH: usize = 50;
 
-// FUNC-7：delta 栈替代快照栈。存 UndoDelta + 当前态 current，省内存。
+// FUNC-7: delta stack replaces the snapshot stack. Stores UndoDelta plus the current state, saving memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoRedoStack {
     undo_stack: VecDeque<UndoDelta>,
@@ -819,7 +844,7 @@ impl Default for UndoRedoStack {
     }
 }
 
-// ── 文档差异对比 ──
+// ── Document diffing ──
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffChangeType {
@@ -837,8 +862,9 @@ pub struct DiffEntry {
     pub old_value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<serde_json::Value>,
-    /// 新增节点所属页面 ID（仅 Added 有意义）；diff 据此标注节点所在页，
-    /// 供 fd-cli diff 子命令展示。避免恒定落入 pages.first() 导致多页文档节点错位。
+    /// Page ID the added node belongs to (meaningful only for Added); the diff uses it to annotate
+    /// which page a node lives on for the fd-cli diff subcommand. Avoids always falling into
+    /// pages.first(), which misplaced nodes in multi-page documents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_id: Option<String>,
 }
@@ -855,7 +881,7 @@ impl PenDocumentDiff {
 }
 
 impl PenDocument {
-    /// 计算两个 PenDocument 之间的节点级差异。
+    /// Computes the node-level diff between two PenDocuments.
     pub fn diff(&self, other: &PenDocument) -> PenDocumentDiff {
         let mut entries = Vec::new();
         let self_nodes = self.all_nodes();
@@ -919,7 +945,7 @@ impl PenDocument {
         PenDocumentDiff { entries }
     }
 
-    /// 收集文档中所有节点，返回 id → node 的映射。
+    /// Collects all nodes in the document into an id → node map.
     fn all_nodes(&self) -> HashMap<String, &PenNode> {
         let mut map = HashMap::new();
         for page in &self.pages {
@@ -928,7 +954,7 @@ impl PenDocument {
         map
     }
 
-    /// 收集文档中所有节点，返回 id → 所在页面 ID 的映射。
+    /// Collects all nodes in the document into an id → owning-page-ID map.
     fn all_nodes_by_page(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for page in &self.pages {
@@ -937,9 +963,10 @@ impl PenDocument {
         map
     }
 
-    // H-A13/P1-7：apply_patch 已移除（零生产调用，展示性死代码）。
-    // diff 计算（diff_versions/diff_adjacent）保留——fd-cli diff 子命令用于展示。
-    // 协同编辑的 apply 路径如需恢复，见 git 历史；当前 PRD 未承诺协同编辑。
+    // H-A13/P1-7: apply_patch removed (zero production callers, demonstrative dead code).
+    // Diff computation (diff_versions/diff_adjacent) kept — used for display by the fd-cli diff
+    // subcommand. If the collaborative-editing apply path ever needs restoring, see git history;
+    // the current PRD does not commit to collaborative editing.
 }
 
 fn collect_nodes<'a>(nodes: &'a [PenNode], map: &mut HashMap<String, &'a PenNode>) {
@@ -1116,7 +1143,7 @@ mod tests {
         assert_eq!(n.z_index, 0);
     }
 
-    // ── V0.2 布局测试 ──
+    // ── V0.2 layout tests ──
 
     #[test]
     fn layout_mode_free_default() {
@@ -1237,7 +1264,7 @@ mod tests {
         ));
     }
 
-    // ── ComponentSlot 实例化测试 ──
+    // ── ComponentSlot instantiation tests ──
 
     #[test]
     fn component_registry_instantiate_with_overrides() {
@@ -1267,7 +1294,7 @@ mod tests {
         let instance = reg.instantiate(&slot).unwrap();
         assert_eq!(instance.style.fill.as_deref(), Some("#FF0000"));
         assert_eq!(instance.w, 200.0);
-        assert_eq!(instance.h, 40.0); // 不变
+        assert_eq!(instance.h, 40.0); // unchanged
     }
 
     #[test]
@@ -1328,7 +1355,7 @@ mod tests {
         };
 
         let _instance = reg.instantiate(&slot).unwrap();
-        // 原模板未被修改
+        // The original template was not modified.
         let tmpl = reg.get("button").unwrap().variants.get("default").unwrap();
         assert!(tmpl.style.fill.is_none());
     }
@@ -1419,11 +1446,11 @@ mod tests {
                 .push(PenNode::rect(format!("n{i}"), 0.0, 0.0, 10.0, 10.0));
             stack.push(UndoDelta::compute(stack.current(), &next));
         }
-        // 60 节点累积，MAX_DEPTH=50 丢最早 10 delta，current 现 60 节点
+        // 60 nodes accumulated; MAX_DEPTH=50 drops the 10 earliest deltas, current now has 60 nodes
         assert_eq!(stack.current().pages[0].nodes.len(), 60);
         assert!(stack.can_undo());
         let undone = stack.undo().unwrap();
-        // undo 撤销最近 add-node delta（n59）→ 59 节点
+        // undo reverses the most recent add-node delta (n59) → 59 nodes
         assert_eq!(undone.pages[0].nodes.len(), 59);
     }
 
@@ -1503,8 +1530,9 @@ mod tests {
             .any(|e| e.node_id == "n1" && e.change_type == DiffChangeType::Removed));
     }
 
-    // H-A13：apply_patch 已移除（零生产调用，展示性死代码）。
-    // 保留 diff 的 page_id 归属回归——fd-cli diff 子命令依赖该语义展示节点所在页。
+    // H-A13: apply_patch removed (zero production callers, demonstrative dead code).
+    // Keeps the diff page_id attribution regression — the fd-cli diff subcommand relies on that
+    // semantic to display which page a node lives on.
     #[test]
     fn diff_added_node_carries_page_id() {
         let mut doc_v1 = PenDocument::new();
@@ -1533,22 +1561,24 @@ mod tests {
             .entries
             .iter()
             .find(|e| e.node_id == "n2" && e.change_type == DiffChangeType::Added)
-            .expect("应有 n2 Added 条目");
+            .expect("n2 Added entry expected");
         assert_eq!(added.page_id.as_deref(), Some("p2"));
     }
 }
 
-// ── 命名版本管理（已移除）──
-// H-A14/P2-4：VersionedDocument/NamedVersion 全段已移除（死代码）。
-// 审计自判「260 行死代码占体积」：命名版本 API（save_version/switch_to/
-// diff_versions 等）跨 crate 零生产消费者——.fusiondesign 实存裸 PenDocument，
-// CLI undo/redo 走独立 UndoRedoStack（不经此类型）。save_version 同时入
-// versions Vec + undo 栈致进程内双份深拷贝，落盘虽已修（undo 栈 #[serde(skip)]），
-// 但类型本身零消费者，建 delta-COW 基础设施为空壳投入收益为零（Rule 2）。
-// 撤销/重做能力由 UndoRedoStack 独立提供（fd-cli 直用，保留）。如未来需命名
-// 版本，重新接入时按 delta-COW 设计，勿复活整快照方案。
-// 随同移除：uuid_v4/now_iso/civil_from_days/VERSION_SEQ/MAX_VERSIONED_FILE_BYTES
-//（仅 VersionedDocument + 其测试使用，无其他消费者）。
+// ── Named version management (removed) ──
+// H-A14/P2-4: the VersionedDocument/NamedVersion section was fully removed (dead code).
+// The audit flagged "260 lines of dead code carrying weight": the named-version API
+// (save_version/switch_to/diff_versions etc.) had zero production consumers across crates —
+// .fusiondesign actually stores a bare PenDocument, and CLI undo/redo goes through the separate
+// UndoRedoStack (not this type). save_version pushed into both the versions Vec and the undo
+// stack, causing duplicate in-process deep copies; persistence was fixed (undo stack
+// #[serde(skip)]), but the type itself had zero consumers, so building delta-COW infrastructure
+// as an empty shell was zero return on investment (Rule 2). Undo/redo capability is provided
+// independently by UndoRedoStack (used directly by fd-cli, kept). If named versions are needed
+// in the future, re-integrate with a delta-COW design; do not resurrect the full-snapshot approach.
+// Removed along with it: uuid_v4/now_iso/civil_from_days/VERSION_SEQ/MAX_VERSIONED_FILE_BYTES
+// (used only by VersionedDocument and its tests, no other consumers).
 
 #[cfg(test)]
 mod security_tests {
@@ -1566,7 +1596,7 @@ mod security_tests {
         doc
     }
 
-    /// ARCH-13 测试辅助：构造深度超限的 PenDocument（直调 validate_limits 路径）。
+    /// ARCH-13 test helper: builds a PenDocument exceeding the depth limit (direct validate_limits path).
     fn build_deep_doc() -> PenDocument {
         let mut doc = PenDocument::new();
         let mut node = PenNode::rect("leaf", 0.0, 0.0, 1.0, 1.0);
@@ -1585,7 +1615,7 @@ mod security_tests {
         doc
     }
 
-    /// ARCH-13 测试辅助：构造总数超限的 PenDocument（直调 validate_limits 路径）。
+    /// ARCH-13 test helper: builds a PenDocument exceeding the total-count limit (direct validate_limits path).
     fn build_many_nodes_doc() -> PenDocument {
         let mut doc = PenDocument::new();
         let nodes: Vec<PenNode> = (0..(MAX_NODE_TOTAL + 5))
@@ -1603,7 +1633,7 @@ mod security_tests {
 
     #[test]
     fn from_json_rejects_deeply_nested() {
-        // 恶意 .fusiondesign：深度嵌套 children 超过 MAX_NODE_DEPTH → 拒绝
+        // Malicious .fusiondesign: deeply nested children exceed MAX_NODE_DEPTH → rejected
         let mut json =
             String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
         let mut node = String::from(
@@ -1619,11 +1649,14 @@ mod security_tests {
         }
         json.push_str(&node);
         json.push_str("]}],\"variables\":null,\"active_design_system\":null}");
-        assert!(PenDocument::from_json(&json).is_err(), "深度超限应被拒绝");
+        assert!(
+            PenDocument::from_json(&json).is_err(),
+            "depth over limit should be rejected"
+        );
     }
 
-    /// A4：裸 `serde_json::from_str::<PenDocument>`（绕过 from_json 的路径）
-    /// 必须同样被自定义 Deserialize 拦截——CLI/undo/redo 旧绕过点修复的根。
+    /// A4: a bare `serde_json::from_str::<PenDocument>` (the path bypassing from_json) must be
+    /// intercepted by the custom Deserialize too — the root fix for the old CLI/undo/redo bypass.
     #[test]
     fn raw_deserialize_rejects_deeply_nested() {
         let mut json =
@@ -1644,11 +1677,11 @@ mod security_tests {
         let result: Result<PenDocument, _> = serde_json::from_str(&json);
         assert!(
             result.is_err(),
-            "裸 from_str 必须被自定义 Deserialize 拦截（A4）"
+            "bare from_str must be intercepted by the custom Deserialize (A4)"
         );
     }
 
-    /// A4：超量节点（> MAX_NODE_TOTAL）裸 from_str 同样拒绝。
+    /// A4: too many nodes (> MAX_NODE_TOTAL) via bare from_str is rejected as well.
     #[test]
     fn raw_deserialize_rejects_too_many_nodes() {
         let mut nodes = String::new();
@@ -1664,37 +1697,41 @@ mod security_tests {
             r#"{{"pages":[{{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":[{nodes}]}}]}}"#
         );
         let result: Result<PenDocument, _> = serde_json::from_str(&json);
-        assert!(result.is_err(), "超量节点裸 from_str 必须拒绝（A4）");
+        assert!(
+            result.is_err(),
+            "bare from_str with too many nodes must be rejected (A4)"
+        );
     }
 
-    /// A1：schema_version 缺失（旧文件）视作 1，正常加载。
+    /// A1: missing schema_version (old file) counts as 1 and loads normally.
     #[test]
     fn schema_version_missing_defaults_to_one() {
         let json = r#"{"pages":[],"variables":null,"active_design_system":null}"#;
         let doc: PenDocument = serde_json::from_str(json).unwrap();
         assert_eq!(
             doc.schema_version, SCHEMA_VERSION,
-            "缺失 schema_version 默认 1"
+            "missing schema_version defaults to 1"
         );
     }
 
-    /// A1：schema_version 高于当前 → 拒绝（防未来版本静默丢字段）。
+    /// A1: schema_version higher than current → rejected (prevents future versions silently
+    /// dropping fields).
     #[test]
     fn schema_version_ahead_rejected() {
         let json =
             r#"{"schema_version":999,"pages":[],"variables":null,"active_design_system":null}"#;
         let result: Result<PenDocument, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "超前 schema_version 应拒绝");
+        assert!(result.is_err(), "future schema_version should be rejected");
     }
 
-    /// A1：schema_version=1 正常加载并回写。
+    /// A1: schema_version=1 loads normally and is written back.
     #[test]
     fn schema_version_roundtrip() {
         let doc = PenDocument::new();
         let json = serde_json::to_string(&doc).unwrap();
         assert!(
             json.contains("\"schema_version\""),
-            "序列化应含 schema_version"
+            "serialization should contain schema_version"
         );
         let back: PenDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(back.schema_version, SCHEMA_VERSION);
@@ -1703,12 +1740,16 @@ mod security_tests {
     #[test]
     fn validate_limits_accepts_normal_doc() {
         let doc = sample_doc("ok");
-        assert!(doc.validate_limits().is_ok(), "正常文档应通过校验");
+        assert!(
+            doc.validate_limits().is_ok(),
+            "normal document should pass validation"
+        );
     }
 
-    /// 性能基线：1000 节点文档的序列化/反序列化/布局计算耗时。
-    /// `#[ignore]`：不进常规 CI，经 `cargo test --release -- --ignored perf_baseline` 运行。
-    /// 阈值：各操作 < 500ms（release，Apple Silicon），超阈打印但不断言失败（基线参考）。
+    /// Performance baseline: serialize/deserialize/layout timings for a 1000-node document.
+    /// `#[ignore]`: not in regular CI; run via `cargo test --release -- --ignored perf_baseline`.
+    /// Threshold: each operation < 500ms (release, Apple Silicon); over-threshold prints but does
+    /// not assert-fail (baseline reference).
     #[test]
     #[ignore]
     fn perf_baseline_1000_nodes() {
@@ -1741,7 +1782,10 @@ mod security_tests {
         let doc2 = PenDocument::from_json(&json).unwrap();
         let de_ms = t.elapsed().as_millis();
         eprintln!("perf deserialize(1000): {de_ms}ms");
-        assert!(doc2.pages[0].nodes.len() >= 1000, "反序列化节点数应 ≥1000");
+        assert!(
+            doc2.pages[0].nodes.len() >= 1000,
+            "deserialized node count should be >=1000"
+        );
 
         assert!(
             ser_ms < THRESHOLD_MS,
@@ -1753,36 +1797,39 @@ mod security_tests {
         );
     }
 
-    // E-14：截断/损坏文件不应静默丢数据。
+    // E-14: truncated/corrupted files must not silently lose data.
     #[test]
     fn from_json_warns_on_suspected_truncated_file() {
-        // 非空输入但 pages 字段缺失 → serde default 补空 Vec，解析"成功"但疑似截断。
-        // from_json 不应报错（避免阻断合法空文档），但应识别可疑情形（此处通过返回 Ok
-        // + 内部 warn 体现；行为断言：不 panic、返回空 pages 文档）。
+        // Non-empty input but missing pages field → serde default fills an empty Vec; parsing
+        // "succeeds" but truncation is suspected. from_json should not error (to avoid blocking a
+        // legitimate empty document) but should recognize the suspicious case (here reflected by
+        // returning Ok + an internal warn; behavioral assertions: no panic, empty-pages document).
         let truncated = r#"{"schema_version":1,"variables":null}"#;
-        let doc = PenDocument::from_json(truncated).expect("截断文件应解析成功不报错");
-        assert!(doc.pages.is_empty(), "截断文件 pages 应为空");
+        let doc =
+            PenDocument::from_json(truncated).expect("truncated file should parse without error");
+        assert!(doc.pages.is_empty(), "truncated file pages should be empty");
         assert_eq!(doc.schema_version, 1);
     }
 
     #[test]
     fn from_json_silent_on_legit_empty_object() {
-        // 合法空文档 "{}"：serde 全 default，不应触发截断告警分支（trim == "{}" 排除）。
-        let doc = PenDocument::from_json("{}").expect("空对象应解析成功");
+        // Legitimate empty document "{}": all serde defaults, should not trigger the truncation
+        // warning branch (trim == "{}" exclusion).
+        let doc = PenDocument::from_json("{}").expect("empty object should parse successfully");
         assert!(doc.pages.is_empty());
         assert_eq!(doc.schema_version, 1);
     }
 
     #[test]
     fn from_json_silent_on_normal_doc() {
-        // 正常文档不应触发截断告警。
+        // A normal document should not trigger the truncation warning.
         let doc = sample_doc("normal");
         let json = doc.to_json().unwrap();
         let back = PenDocument::from_json(&json).unwrap();
         assert_eq!(back.pages.len(), 1);
     }
 
-    // ARCH-5：schema 迁移框架回归。
+    // ARCH-5: schema migration framework regression.
     #[test]
     fn migrate_schema_v0_to_v1_noop_but_stamps_version() {
         let mut val = serde_json::json!({"pages": [], "schema_version": 0});
@@ -1812,22 +1859,23 @@ mod security_tests {
             SCHEMA_VERSION + 1
         );
         let err = PenDocument::from_json(&json).unwrap_err();
-        // ARCH-13：返 CanvasError::SchemaVersion 变体，下游可 downcast 区分 upgrade-needed
+        // ARCH-13: returns the CanvasError::SchemaVersion variant so downstream can downcast to
+        // distinguish upgrade-needed
         assert!(matches!(err, CanvasError::SchemaVersion(_)), "got: {err:?}");
     }
 
-    /// ARCH-13：from_json 返 CanvasError 变体，下游可按变体 match 区分
-    /// corrupt-file vs upgrade-needed，不再 anyhow opaque 字符串匹配。
+    /// ARCH-13: from_json returns CanvasError variants so downstream can match by variant to
+    /// distinguish corrupt-file vs upgrade-needed, instead of opaque anyhow string matching.
     #[test]
     fn from_json_returns_canvas_error_variants() {
-        // 坏 JSON → ParseError
+        // Bad JSON → ParseError
         let err = PenDocument::from_json("{not valid json").unwrap_err();
         assert!(
             matches!(err, CanvasError::ParseError(_)),
-            "坏 JSON 应返 ParseError, got: {err:?}"
+            "bad JSON should return ParseError, got: {err:?}"
         );
 
-        // schema 版本过高 → SchemaVersion
+        // Schema version too high → SchemaVersion
         let json = format!(
             "{{\"schema_version\": {}, \"pages\": []}}",
             SCHEMA_VERSION + 1
@@ -1835,11 +1883,12 @@ mod security_tests {
         let err = PenDocument::from_json(&json).unwrap_err();
         assert!(
             matches!(err, CanvasError::SchemaVersion(v) if v == SCHEMA_VERSION + 1),
-            "未来版本应返 SchemaVersion, got: {err:?}"
+            "future version should return SchemaVersion, got: {err:?}"
         );
 
-        // 深度超限：from_json 经 custom Deserialize 折叠为 ParseError（validate_limits
-        // 经 serde::de::Error::custom）；变体区分需直调 validate_limits。
+        // Depth over limit: via from_json it collapses into ParseError (custom Deserialize wraps
+        // validate_limits through serde::de::Error::custom); distinguishing the variant requires
+        // calling validate_limits directly.
         let mut deep =
             String::from(r#"{"pages":[{"id":"p","name":"p","width":1.0,"height":1.0,"nodes":["#);
         let mut node = String::from(
@@ -1855,54 +1904,57 @@ mod security_tests {
         }
         deep.push_str(&node);
         deep.push_str("]}],\"variables\":null,\"active_design_system\":null}");
-        // from_json 路径：ParseError（描述含校验失败信息）
+        // from_json path: ParseError (description includes the validation failure)
         let err = PenDocument::from_json(&deep).unwrap_err();
         assert!(
             matches!(err, CanvasError::ParseError(_)),
-            "from_json 深度超限折叠为 ParseError, got: {err:?}"
+            "from_json depth over limit collapses into ParseError, got: {err:?}"
         );
-        // validate_limits 直调：保留 DepthExceeded 变体（ARCH-13 下游 downcast 面）
+        // validate_limits direct call: keeps the DepthExceeded variant (ARCH-13 downstream downcast surface)
         let deep_doc = build_deep_doc();
         let err = deep_doc.validate_limits().unwrap_err();
         assert!(
             matches!(err, CanvasError::DepthExceeded { depth, limit } if depth > limit && limit == MAX_NODE_DEPTH),
-            "validate_limits 深度超限应返 DepthExceeded, got: {err:?}"
+            "validate_limits depth over limit should return DepthExceeded, got: {err:?}"
         );
 
-        // 总数超限：同上，from_json 折叠 ParseError，validate_limits 保留变体
+        // Total count over limit: same as above, from_json collapses to ParseError, validate_limits
+        // keeps the variant
         let many_doc = build_many_nodes_doc();
         let err = many_doc.validate_limits().unwrap_err();
         assert!(
             matches!(err, CanvasError::NodeTotalExceeded { total, limit } if total > limit && limit == MAX_NODE_TOTAL),
-            "validate_limits 总数超限应返 NodeTotalExceeded, got: {err:?}"
+            "validate_limits total over limit should return NodeTotalExceeded, got: {err:?}"
         );
     }
 
-    /// ARCH-13：NodeNotFound / PageNotFound 无生产 Err 站（find_node / page 返 Option
-    /// 非 Result），仅 fd-cli report_error downcast 消费。直构造断言变体存在 + Display
-    /// 文案，闭合变体覆盖盲区（其余 4 变体已由 from_json_returns_canvas_error_variants 覆盖）。
-    /// 不验 downcast：fd-canvas-core 已移除 anyhow 依赖（库 crate 不暴露 anyhow），
-    /// downcast 消费面在 fd-cli（report_error 已覆盖），此 crate 侧无 downcast 路径可验。
+    /// ARCH-13: NodeNotFound / PageNotFound have no production Err site (find_node / page return
+    /// Option, not Result) and are consumed only by fd-cli report_error downcast. Constructing
+    /// them directly asserts the variants exist plus their Display text, closing the variant
+    /// coverage gap (the other 4 variants are covered by from_json_returns_canvas_error_variants).
+    /// No downcast verification: fd-canvas-core has dropped its anyhow dependency (a library crate
+    /// does not expose anyhow); the downcast consumer is in fd-cli (report_error already covers
+    /// it), and this crate has no downcast path to exercise.
     #[test]
     fn canvas_error_dead_variants_display() {
         let e1 = CanvasError::NodeNotFound(String::from("node-42"));
         assert!(
             matches!(e1, CanvasError::NodeNotFound(_)),
-            "NodeNotFound 变体应可构造, got: {e1:?}"
+            "NodeNotFound variant should be constructible, got: {e1:?}"
         );
         assert!(
             format!("{e1}").contains("node-42"),
-            "NodeNotFound Display 应含 id: {e1}"
+            "NodeNotFound Display should include the id: {e1}"
         );
 
         let e2 = CanvasError::PageNotFound(String::from("page-7"));
         assert!(
             matches!(e2, CanvasError::PageNotFound(_)),
-            "PageNotFound 变体应可构造, got: {e2:?}"
+            "PageNotFound variant should be constructible, got: {e2:?}"
         );
         assert!(
             format!("{e2}").contains("page-7"),
-            "PageNotFound Display 应含 id: {e2}"
+            "PageNotFound Display should include the id: {e2}"
         );
     }
 }

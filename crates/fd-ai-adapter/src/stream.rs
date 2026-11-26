@@ -66,6 +66,7 @@ mod tests {
 
     #[test]
     fn cjk_content_preserved() {
+        // i18n: user-facing
         let body = r#"data: {"choices":[{"delta":{"content":"登录页"}}]}"#;
         let d = parse_sse_line(body).expect("cjk -> Some");
         assert_eq!(d.token, "登录页");

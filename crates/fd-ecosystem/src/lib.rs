@@ -1,11 +1,12 @@
-//! Fusion-Design 生态联动 — 对接 Fusion Code/Simulation/KB/CLI。
+//! Fusion-Design ecosystem integration — connects Fusion Code/Simulation/KB/CLI.
 //!
-//! 对应 PRD 模块 6「生态联动能力」。通过本地文件 IPC（约定目录下的
-//! JSON 消息文件）打通全系生态：send/list/consume、sync_to_code、模板检索/预置。
+//! Corresponds to PRD module 6 "Ecosystem integration". Uses local file IPC (JSON
+//! message files in agreed directories) to connect the whole ecosystem:
+//! send/list/consume, sync_to_code, template search/presets.
 //!
-//! 【H-A3/P2-2】自建 MCP 协议层 + watch_async 已移除（零外部调用，死代码）。
+//! [H-A3/P2-2] The self-built MCP protocol layer + watch_async have been removed (zero external calls, dead code).
 //!
-//! 【离线硬约束】所有联动走本地文件系统或 127.0.0.1，无公网调用。
+//! [Offline hard constraint] All integration goes through the local filesystem or 127.0.0.1; no public-network calls.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,24 +14,25 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-// 进程级 IPC 消息序号，配合 pid + nanos 保证文件名全局唯一，避免同纳秒碰撞（审计 C7）。
+// Process-level IPC message sequence number; combined with pid + nanos it keeps filenames globally
+// unique, avoiding same-nanosecond collisions (audit C7).
 static IPC_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 生态联动目标。
+/// Ecosystem integration target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EcosystemTarget {
-    /// Fusion Code（正向导出代码、反向同步样式）
+    /// Fusion Code (forward code export, reverse style sync)
     FusionCode,
-    /// Fusion-KB（保存/检索设计模板）
+    /// Fusion-KB (save/retrieve design templates)
     FusionKB,
-    /// Fusion CLI（命令行批量生成/导出）
+    /// Fusion CLI (command-line batch generation/export)
     FusionCLI,
-    /// 扩展目标（插件/垂直领域通过此变体接入，不硬编码具体行业）
+    /// Extension target (plugins/vertical domains plug in via this variant; no hardcoded industries)
     Custom(String),
 }
 
 impl EcosystemTarget {
-    /// 约定的 IPC 目录名。
+    /// Agreed IPC directory name.
     pub fn ipc_dir(&self) -> String {
         match self {
             Self::FusionCode => "fusion-code".to_string(),
@@ -41,45 +43,48 @@ impl EcosystemTarget {
     }
 }
 
-// 将 base + sub 解析为安全子路径：拒绝 `..` 组件与绝对路径，并校验结果仍在 base 之内。
-// 用于 send() 防 EcosystemTarget::Custom 携带 `../` 实施路径穿越写（审计 C6）。
+// Resolve base + sub into a safe subpath: reject `..` components and absolute paths, and verify the
+// result stays within base.
+// Used by send() to prevent EcosystemTarget::Custom from carrying `../` for path-traversal writes (audit C6).
 fn sanitize_ipc_subpath(base: &Path, sub: &str) -> anyhow::Result<PathBuf> {
     if sub.is_empty() {
-        anyhow::bail!("IPC 子路径为空");
+        anyhow::bail!("IPC subpath is empty");
     }
     let sub_path = Path::new(sub);
     if sub_path.is_absolute() {
-        tracing::warn!(sub = %sub, "IPC 子路径为绝对路径，拒绝");
-        anyhow::bail!("IPC 子路径不允许绝对路径: {sub}");
+        tracing::warn!(sub = %sub, "IPC subpath is absolute, rejecting");
+        anyhow::bail!("IPC subpath must not be absolute: {sub}");
     }
     for comp in sub_path.components() {
         use std::path::Component;
         match comp {
             Component::Normal(_) | Component::CurDir => {}
             Component::ParentDir => {
-                tracing::warn!(sub = %sub, "IPC 子路径含 `..` 组件，拒绝");
-                anyhow::bail!("IPC 子路径不允许 `..` 组件: {sub}");
+                tracing::warn!(sub = %sub, "IPC subpath contains a `..` component, rejecting");
+                anyhow::bail!("IPC subpath must not contain `..` components: {sub}");
             }
             Component::RootDir | Component::Prefix(_) => {
-                tracing::warn!(sub = %sub, "IPC 子路径含根/前缀组件，拒绝");
-                anyhow::bail!("IPC 子路径不允许根或前缀组件: {sub}");
+                tracing::warn!(sub = %sub, "IPC subpath contains a root/prefix component, rejecting");
+                anyhow::bail!("IPC subpath must not contain root or prefix components: {sub}");
             }
         }
     }
     let joined = base.join(sub_path);
-    // 二次校验：若 base/joined 均可规范化（已存在），比较规范化路径以防符号链接绕过；
-    // 否则退化校验——组件已过滤掉 `..`/绝对路径，但**词法 starts_with 不足以防符号链接**
-    // （joined 路径上某组件可能是指向 base 外的符号链接）。退化时仅检测 **base 之下**
-    // 的新增组件是否为符号链接（不含 base 自身及其系统祖先，如 macOS /var→/private/var
-    // 是合法系统软链，不应误拒）。任一 base 内新增组件为符号链接一律拒（R-9）。
-    // 不返回规范化路径，保持与 list()/调用方一致的路径形态。
+    // Secondary check: if both base/joined can be canonicalized (already exist), compare canonical
+    // paths to guard against symlink bypass; otherwise fall back — components already filter out
+    // `..`/absolute paths, but **lexical starts_with is not sufficient against symlinks**
+    // (some component of the joined path may be a symlink pointing outside base). The fallback only
+    // checks whether new components below **base** are symlinks (excluding base itself and its
+    // system ancestors, e.g. macOS /var→/private/var is a legitimate system symlink and must not
+    // be wrongly rejected). Any new component below base that is a symlink is rejected (R-9).
+    // The canonical path is not returned, keeping the path shape consistent with list()/callers.
     let canonical_base = base.canonicalize();
     let canonical_joined = joined.canonicalize();
     let within = match (canonical_base, canonical_joined) {
         (Ok(cb), Ok(cj)) => cj.starts_with(&cb),
         _ => {
-            // 退化分支：canonicalize 失败（路径尚不存在或权限不足）。
-            // 仅检测 base 之下的新增组件，跳过 base 自身及系统前缀。
+            // Fallback branch: canonicalize failed (path does not exist yet, or insufficient permissions).
+            // Only check new components below base, skipping base itself and system prefixes.
             reject_symlink_below_base(base, &joined)?;
             joined.starts_with(base)
         }
@@ -88,22 +93,23 @@ fn sanitize_ipc_subpath(base: &Path, sub: &str) -> anyhow::Result<PathBuf> {
         tracing::warn!(
             base = %base.display(),
             resolved = %joined.display(),
-            "IPC 子路径解析后逃出 base，拒绝"
+            "IPC subpath escapes base after resolution, rejecting"
         );
-        anyhow::bail!("IPC 子路径逃出基目录: {sub}");
+        anyhow::bail!("IPC subpath escapes base directory: {sub}");
     }
     Ok(joined)
 }
 
-/// R-9：检测 base 之下的新增路径组件是否为符号链接。跳过 base 自身及其系统祖先
-/// （如 macOS /var→/private/var 是合法系统软链），仅扫 base 之后到 joined 之间的组件。
+/// R-9: detect whether new path components below base are symlinks. Skips base itself and its
+/// system ancestors (e.g. macOS /var→/private/var is a legitimate system symlink); only scans
+/// the components between base and joined.
 fn reject_symlink_below_base(base: &Path, joined: &Path) -> anyhow::Result<()> {
-    // joined = base + sub_path 组件。从 base 之后逐级构建前缀检测。
+    // joined = base + sub_path components. Build prefixes step by step starting after base.
     let mut acc = base.to_path_buf();
     let base_components = base.components().count();
     for (i, comp) in joined.components().enumerate() {
         if i < base_components {
-            // base 自身及祖先组件，跳过（系统软链合法）。
+            // base itself and ancestor components, skip (system symlinks are legitimate).
             continue;
         }
         acc.push(comp);
@@ -111,23 +117,26 @@ fn reject_symlink_below_base(base: &Path, joined: &Path) -> anyhow::Result<()> {
             if meta.file_type().is_symlink() {
                 tracing::warn!(
                     component = %acc.display(),
-                    "IPC 子路径含符号链接组件（base 之下），退化校验下拒绝以防穿越"
+                    "IPC subpath contains a symlink component below base, rejecting under fallback check to prevent traversal"
                 );
-                anyhow::bail!("IPC 子路径含符号链接组件: {}", acc.display());
+                anyhow::bail!(
+                    "IPC subpath contains a symlink component: {}",
+                    acc.display()
+                );
             }
         }
     }
     Ok(())
 }
 
-/// R-8：判定路径是否为合法 IPC 消息文件——仅放行 `.json` 扩展名。
-/// 排除 sync_to_code 写入的代码产物（`.html`/`.tsx`）与 `.tmp*` 残留（E-22）。
+/// R-8: decide whether a path is a valid IPC message file — only the `.json` extension is allowed.
+/// Excludes code artifacts written by sync_to_code (`.html`/`.tsx`) and `.tmp*` leftovers (E-22).
 fn is_ipc_message(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("json")
 }
 
-/// E-22：清理目录下 `.tmp*` 残留文件（上次 send 在 rename 前崩溃遗留）。
-/// 失败仅 warn 不阻断主流程（清理是尽力而为）。
+/// E-22: clean up `.tmp*` leftover files in the directory (left by a previous send that crashed
+/// before rename). Failures only warn and do not block the main flow (cleanup is best-effort).
 fn cleanup_stale_tmp(dir: &Path) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -141,16 +150,16 @@ fn cleanup_stale_tmp(dir: &Path) {
         };
         if name.contains(".tmp") {
             if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(file = %path.display(), error = %e, "cleanup_stale_tmp: 删除残留 .tmp 失败");
+                tracing::warn!(file = %path.display(), error = %e, "cleanup_stale_tmp: failed to remove leftover .tmp file");
             } else {
-                tracing::debug!(file = %path.display(), "cleanup_stale_tmp: 清理残留 .tmp");
+                tracing::debug!(file = %path.display(), "cleanup_stale_tmp: cleaned leftover .tmp file");
             }
         }
     }
 }
 
-/// E-20：在 PATH 上查找可执行文件（which 语义，无外部依赖）。
-/// 拆分 PATH 环境变量逐目录拼接候选名，存在且为文件即返回。
+/// E-20: find an executable on PATH (which semantics, no external dependencies).
+/// Splits the PATH env var and joins the candidate name per directory; returns it if it exists and is a file.
 fn which_trainer(name: &str) -> Result<PathBuf, ()> {
     let path_env = std::env::var_os("PATH").ok_or(())?;
     for dir in std::env::split_paths(&path_env) {
@@ -162,14 +171,15 @@ fn which_trainer(name: &str) -> Result<PathBuf, ()> {
     Err(())
 }
 
-/// E-20：定位 Fusion 单仓共享 .venv/bin 目录。
-/// 优先 FUSION_VENV_ROOT env；否则从当前可执行所在目录向上查找含 `.venv/bin` 的祖先。
-/// 避免硬编码 `/Users/dahai/fusion/.venv`，跨机器/部署可移植。
+/// E-20: locate the Fusion monorepo shared .venv/bin directory.
+/// Prefers the FUSION_VENV_ROOT env; otherwise walks up from the current executable's directory
+/// to find an ancestor containing `.venv/bin`. Avoids hardcoding `/Users/dahai/fusion/.venv`,
+/// keeping it portable across machines/deployments.
 fn fusion_venv_bin_dir() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("FUSION_VENV_ROOT") {
         return Some(PathBuf::from(root).join("bin"));
     }
-    // 从当前可执行路径向上找 .venv/bin（cargo run 时是 target/debug，仓库根在祖先）。
+    // Walk up from the current executable path to find .venv/bin (target/debug under cargo run; the repo root is an ancestor).
     let exe = std::env::current_exe().ok()?;
     let mut cur = exe.parent()?.to_path_buf();
     for _ in 0..10 {
@@ -184,7 +194,7 @@ fn fusion_venv_bin_dir() -> Option<PathBuf> {
     None
 }
 
-/// 联动消息体。
+/// Link message body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkMessage {
     pub target: EcosystemTarget,
@@ -192,33 +202,34 @@ pub struct LinkMessage {
     pub payload: serde_json::Value,
 }
 
-/// fusion-trainer CLI 子进程封装（离线硬约束：仅调用本地 .venv 的 fusion-trainer）。
+/// fusion-trainer CLI subprocess wrapper (offline hard constraint: only calls the local .venv fusion-trainer).
 #[derive(Debug, Clone)]
 pub struct TrainerClient {
     bin: PathBuf,
 }
 
 impl TrainerClient {
-    /// 解析 fusion-trainer 可执行路径：优先 FUSION_TRAINER_BIN env，否则 PATH 查找
-    /// `fusion-trainer`，再回退共享 .venv 默认值（仍含用户家目录，仅作 last-resort）。
-    /// E-20：删 `/Users/dahai/...` 硬编码为唯一来源，改为可发现优先。
+    /// Resolve the fusion-trainer executable path: prefer the FUSION_TRAINER_BIN env, then a PATH
+    /// lookup for `fusion-trainer`, then fall back to the shared .venv default (still contains the
+    /// user home dir, last resort only).
+    /// E-20: removed the `/Users/dahai/...` hardcoded sole source in favor of discovery-first.
     pub fn resolve_bin() -> PathBuf {
         if let Ok(b) = std::env::var("FUSION_TRAINER_BIN") {
             return PathBuf::from(b);
         }
-        // 优先 PATH 上的 fusion-trainer（which 语义，可移植）。
+        // Prefer a fusion-trainer on PATH (which semantics, portable).
         if let Ok(p) = which_trainer("fusion-trainer") {
             return p;
         }
-        // 回退：当前 fusion-design 工程同级 .venv（Fusion 单仓约定）。
-        // 由 FUSION_VENV_ROOT 或向上查找 fusion/.venv 推导，避免绝对路径硬编码。
+        // Fallback: the .venv sibling of the current fusion-design project (Fusion monorepo convention).
+        // Derived from FUSION_VENV_ROOT or by walking up to fusion/.venv, avoiding absolute path hardcoding.
         if let Some(venv) = fusion_venv_bin_dir() {
             let candidate = venv.join("fusion-trainer");
             if candidate.exists() {
                 return candidate;
             }
         }
-        // 最终回退：依赖 PATH（spawn 时若不存在会显式报错并提示 FUSION_TRAINER_BIN）。
+        // Final fallback: rely on PATH (spawn errors explicitly and hints at FUSION_TRAINER_BIN if missing).
         PathBuf::from("fusion-trainer")
     }
 
@@ -235,7 +246,7 @@ impl TrainerClient {
     fn spawn(&self, args: Vec<String>) -> anyhow::Result<std::process::ExitStatus> {
         if !self.bin.exists() {
             anyhow::bail!(
-                "fusion-trainer CLI 未找到: {} (请安装 fusion-trainer 或设置 FUSION_TRAINER_BIN)",
+                "fusion-trainer CLI not found: {} (install fusion-trainer or set FUSION_TRAINER_BIN)",
                 self.bin.display()
             );
         }
@@ -249,7 +260,7 @@ impl TrainerClient {
         Ok(status)
     }
 
-    /// 调用 fusion-trainer sft --dataset <jsonl> --model <id>
+    /// Invoke fusion-trainer sft --dataset <jsonl> --model <id>
     pub fn run_sft(
         &self,
         dataset: &Path,
@@ -270,7 +281,7 @@ impl TrainerClient {
         self.spawn(args)
     }
 
-    /// 调用 fusion-trainer rlsl --method <m> --dataset <jsonl> --model <id>
+    /// Invoke fusion-trainer rlsl --method <m> --dataset <jsonl> --model <id>
     pub fn run_rlsl(
         &self,
         method: &str,
@@ -301,28 +312,29 @@ impl Default for TrainerClient {
     }
 }
 
-/// E-16/P2-6：模板检索缓存。按模板目录 mtime 失效——save_template 写文件后
-/// 目录 mtime 变化，下次检索重新扫盘；未变则复用内存解析结果，零磁盘 IO。
-/// 旧实现每次检索 read_dir + 逐文件 read_to_string + from_str，N 模板线性退化。
+/// E-16/P2-6: template search cache. Invalidated by the template directory mtime — after
+/// save_template writes a file the directory mtime changes, so the next search rescans; if
+/// unchanged, the in-memory parsed result is reused with zero disk IO. The old implementation
+/// did read_dir + per-file read_to_string + from_str on every search, degrading linearly with N templates.
 #[derive(Debug, Clone, Default)]
 struct TemplateCache {
-    /// 缓存对应的模板目录 mtime（秒级，跨秒变化即失效）。
+    /// Template directory mtime the cache corresponds to (second-level; any cross-second change invalidates it).
     dir_mtime_secs: u64,
-    /// 已解析的全部模板（按 created_at 降序）。
+    /// All parsed templates (descending by created_at).
     templates: Vec<DesignTemplate>,
 }
 
-/// 生态联动客户端（基于本地文件 IPC）。
-// E-16/P2-6：含 Mutex 缓存，不再 derive Clone（Mutex 非 Clone；全仓无 EcosystemLink::clone 调用）。
+/// Ecosystem integration client (based on local file IPC).
+// E-16/P2-6: contains a Mutex cache, so Clone is no longer derived (Mutex is not Clone; no EcosystemLink::clone callers in the repo).
 #[derive(Debug)]
 pub struct EcosystemLink {
     base_dir: PathBuf,
-    // E-16/P2-6：模板检索缓存，Mutex 包裹供多线程安全复用。
+    // E-16/P2-6: template search cache, Mutex-wrapped for thread-safe reuse.
     template_cache: Mutex<TemplateCache>,
 }
 
 impl EcosystemLink {
-    /// 用指定基目录构造（所有 IPC 文件落在 `<base>/<target>/`）。
+    /// Construct with a specific base directory (all IPC files land in `<base>/<target>/`).
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
@@ -330,12 +342,13 @@ impl EcosystemLink {
         }
     }
 
-    /// 发送一条联动消息（写入目标目录的 JSON 文件）。
+    /// Send one link message (writes a JSON file into the target directory).
     pub fn send(&self, msg: &LinkMessage) -> anyhow::Result<PathBuf> {
         let dir = sanitize_ipc_subpath(&self.base_dir, &msg.target.ipc_dir())?;
         std::fs::create_dir_all(&dir)?;
-        // E-22：清理上次 send 崩溃遗留的 .tmp* 文件，防被后续 list 误消费
-        // （is_ipc_message 已过滤，但残留文件污染目录、占 inode，主动清）。
+        // E-22: clean up .tmp* files left by a previous crashed send, preventing later list from
+        // consuming them by mistake (is_ipc_message already filters, but leftovers pollute the
+        // directory and waste inodes; clean proactively).
         cleanup_stale_tmp(&dir);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -344,23 +357,23 @@ impl EcosystemLink {
         let seq = IPC_SEQ.fetch_add(1, Ordering::SeqCst);
         let file = dir.join(format!("{stamp}_{pid}_{seq}.json"));
         let json = serde_json::to_string_pretty(msg)?;
-        // 原子写：先写 tmp 再 rename，避免崩溃留下半截 JSON（审计 C7）。
+        // Atomic write: write tmp then rename, avoiding a half-written JSON after a crash (audit C7).
         let tmp = dir.join(format!("{stamp}_{pid}_{seq}.json.tmp.{pid}.{seq}"));
         std::fs::write(&tmp, &json)?;
         if let Err(e) = std::fs::rename(&tmp, &file) {
             let _ = std::fs::remove_file(&tmp);
-            tracing::warn!(?tmp, error = %e, "send: rename 失败，清理 tmp");
+            tracing::warn!(?tmp, error = %e, "send: rename failed, cleaning tmp");
             return Err(anyhow::Error::from(e));
         }
-        tracing::info!(?file, target = msg.target.ipc_dir(), "联动消息已发送");
+        tracing::info!(?file, target = msg.target.ipc_dir(), "link message sent");
         Ok(file)
     }
 
-    /// 列出某目标的全部待处理消息文件。
+    /// List all pending message files for a target.
     ///
-    /// R-8：仅返回 `.json` 文件，忽略代码产物（`.html`/`.tsx`/`.tmp*`）。
-    /// sync_to_code 会把生成的 HTML/React 写入同一 `fusion-code/` 目录，
-    /// 无过滤则 `list(FusionCode)` 会把 `.tsx`/`.html` 当消息消费，解析失败报错。
+    /// R-8: only `.json` files are returned; code artifacts (`.html`/`.tsx`/`.tmp*`) are ignored.
+    /// sync_to_code writes generated HTML/React into the same `fusion-code/` directory;
+    /// without filtering, `list(FusionCode)` would consume `.tsx`/`.html` as messages and fail to parse.
     pub fn list(&self, target: EcosystemTarget) -> anyhow::Result<Vec<PathBuf>> {
         let dir = self.base_dir.join(target.ipc_dir());
         if !dir.exists() {
@@ -375,83 +388,111 @@ impl EcosystemLink {
         Ok(files)
     }
 
-    /// 读取并删除一条消息（消费式）。含大小护栏，防恶意大文件 OOM。
+    /// Read and delete one message (consuming). Includes a size guard against OOM from malicious large files.
     ///
-    /// R-7：原子抢占——先 `rename(file, .processing/<name>)` 抢占，rename 在同一文件系统
-    /// 原子，成功者独占消费，失败者（已被抢，文件不存在）跳过。修复旧实现「读后即删」
-    /// 在多消费者下互相吞消息且无报错的缺陷。当前单消费者下行为不变（rename 总成功）。
-    /// R-A2：解析失败时**不删处理中文件**（保留供诊断），返回 Err 含文件路径。
-    /// 调用方须显式处理 Err（见 watch_code_changes）。
+    /// R-7: atomic claim — first `rename(file, .processing/<name>)` to claim; rename is atomic within
+    /// the same filesystem, so the winner consumes exclusively and losers (already claimed, file
+    /// gone) skip. Fixes the old "read then delete" flaw where multiple consumers silently swallowed
+    /// each other's messages. Behavior is unchanged with a single consumer (rename always succeeds).
+    /// R-A2: on parse failure the processing file is **not deleted** (kept for diagnostics); returns
+    /// Err with the file path. Callers must handle Err explicitly (see watch_code_changes).
     pub fn consume(&self, file: &Path) -> anyhow::Result<LinkMessage> {
-        // R-7：原子抢占。.processing/ 与消息目录同父，同文件系统 rename 原子。
+        // R-7: atomic claim. .processing/ shares the parent with the message directory; same-filesystem rename is atomic.
         let proc_dir = file
             .parent()
-            .ok_or_else(|| anyhow::anyhow!("IPC 消息文件无父目录: {}", file.display()))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "IPC message file has no parent directory: {}",
+                    file.display()
+                )
+            })?
             .join(".processing");
         std::fs::create_dir_all(&proc_dir)?;
-        let proc_name = file
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("IPC 消息文件无文件名: {}", file.display()))?;
+        let proc_name = file.file_name().ok_or_else(|| {
+            anyhow::anyhow!("IPC message file has no file name: {}", file.display())
+        })?;
         let proc_file = proc_dir.join(proc_name);
         match std::fs::rename(file, &proc_file) {
             Ok(()) => {
                 tracing::debug!(
                     from = %file.display(),
                     to = %proc_file.display(),
-                    "consume: rename 抢占成功，独占消费"
+                    "consume: rename claim succeeded, consuming exclusively"
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // 已被其他消费者抢走，跳过（非错误）。
+                // Already claimed by another consumer, skip (not an error).
                 tracing::debug!(
                     file = %file.display(),
-                    "consume: 文件已被其他消费者抢占，跳过"
+                    "consume: file already claimed by another consumer, skipping"
                 );
-                anyhow::bail!("IPC 消息已被其他消费者消费: {}", file.display());
+                anyhow::bail!(
+                    "IPC message already consumed by another consumer: {}",
+                    file.display()
+                );
             }
             Err(e) => {
-                tracing::warn!(file = %file.display(), error = %e, "consume: rename 抢占失败");
-                anyhow::bail!("抢占 IPC 消息失败 {}: {e}", file.display());
+                tracing::warn!(file = %file.display(), error = %e, "consume: rename claim failed");
+                anyhow::bail!("failed to claim IPC message {}: {e}", file.display());
             }
         }
-        // L-6：TOCTOU 修复——单 fd 闭环，不做 metadata() 预检（meta 与 read 间文件可变）。
-        // open 后 take(cap) 限读，按实际读取字节数校验上限。
+        // L-6: TOCTOU fix — single-fd closed loop, no metadata() precheck (the file can change between meta and read).
+        // After open, take(cap) limits reads; the upper bound is validated by the actual bytes read.
         const MAX_IPC_FILE: u64 = 8 * 1024 * 1024;
-        let f = std::fs::File::open(&proc_file)
-            .map_err(|e| anyhow::anyhow!("打开 IPC 消息文件失败 {}: {e}", proc_file.display()))?;
+        let f = std::fs::File::open(&proc_file).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to open IPC message file {}: {e}",
+                proc_file.display()
+            )
+        })?;
         use std::io::Read;
         let mut buf = Vec::new();
         f.take(MAX_IPC_FILE + 1)
             .read_to_end(&mut buf)
-            .map_err(|e| anyhow::anyhow!("读取 IPC 消息文件失败 {}: {e}", proc_file.display()))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to read IPC message file {}: {e}",
+                    proc_file.display()
+                )
+            })?;
         if buf.len() as u64 > MAX_IPC_FILE {
-            tracing::warn!(size = buf.len(), "IPC 消息文件超过 8MB 上限，拒绝读取");
-            anyhow::bail!("IPC 消息文件 {} 超过 8MB 安全上限", proc_file.display());
+            tracing::warn!(
+                size = buf.len(),
+                "IPC message file exceeds the 8MB limit, rejecting read"
+            );
+            anyhow::bail!(
+                "IPC message file {} exceeds the 8MB safety limit",
+                proc_file.display()
+            );
         }
-        let json = String::from_utf8(buf)
-            .map_err(|e| anyhow::anyhow!("IPC 消息文件非 UTF-8 {}: {e}", proc_file.display()))?;
+        let json = String::from_utf8(buf).map_err(|e| {
+            anyhow::anyhow!("IPC message file is not UTF-8 {}: {e}", proc_file.display())
+        })?;
         let msg: LinkMessage = serde_json::from_str(&json).map_err(|e| {
-            // R-A2：解析失败不删处理中文件，保留供诊断，显式报错路径。
+            // R-A2: on parse failure do not delete the processing file, keep it for diagnostics, report the path explicitly.
             anyhow::anyhow!(
-                "解析 IPC 消息失败 {}（文件保留未删）: {e}",
+                "failed to parse IPC message {} (file kept, not deleted): {e}",
                 proc_file.display()
             )
         })?;
         std::fs::remove_file(&proc_file).map_err(|e| {
-            anyhow::anyhow!("消费后删除 IPC 消息文件失败 {}: {e}", proc_file.display())
+            anyhow::anyhow!(
+                "failed to delete IPC message file after consumption {}: {e}",
+                proc_file.display()
+            )
         })?;
         Ok(msg)
     }
 
-    /// 异步发送（供任务队列调用）。
+    /// Async send (for task queues).
     pub async fn send_async(&self, msg: LinkMessage) -> anyhow::Result<PathBuf> {
         let base = self.base_dir.clone();
         tokio::task::spawn_blocking(move || EcosystemLink::new(base).send(&msg)).await?
     }
 
-    /// 正向同步：PenDocument → fd-codegen 生成代码 → 写入 Fusion Code 工程目录。
+    /// Forward sync: PenDocument → fd-codegen generates code → writes into the Fusion Code project directory.
     ///
-    /// 生成 HTML 和 React+Tailwind 两种格式，写入 `<base>/fusion-code/` 目录。
+    /// Generates both HTML and React+Tailwind formats, written into the `<base>/fusion-code/` directory.
     pub fn sync_to_code(
         &self,
         doc: &fd_canvas_core::PenDocument,
@@ -462,25 +503,25 @@ impl EcosystemLink {
 
         let mut written = vec![];
 
-        // 生成 HTML
+        // Generate HTML
         let html_gen = fd_codegen::HtmlCodegen;
         let html = fd_codegen::Codegen::generate(&html_gen, doc);
         let html_path = code_dir.join(format!("{component_name}.html"));
         std::fs::write(&html_path, &html)?;
-        tracing::info!(?html_path, "sync_to_code: HTML 写入完成");
+        tracing::info!(?html_path, "sync_to_code: HTML written");
         written.push(html_path);
 
-        // 生成 React + Tailwind
+        // Generate React + Tailwind
         let react_gen = fd_codegen::ReactTailwindCodegen {
             component_name: component_name.to_string(),
         };
         let react = fd_codegen::Codegen::generate(&react_gen, doc);
         let react_path = code_dir.join(format!("{component_name}.tsx"));
         std::fs::write(&react_path, &react)?;
-        tracing::info!(?react_path, "sync_to_code: React+Tailwind 写入完成");
+        tracing::info!(?react_path, "sync_to_code: React+Tailwind written");
         written.push(react_path);
 
-        // 同时发送 IPC 消息通知 Fusion Code
+        // Also send an IPC message to notify Fusion Code
         let msg = LinkMessage {
             target: EcosystemTarget::FusionCode,
             action: "sync-to-code".into(),
@@ -494,7 +535,7 @@ impl EcosystemLink {
         Ok(written)
     }
 
-    /// 异步正向同步。
+    /// Async forward sync.
     pub async fn sync_to_code_async(
         &self,
         doc: fd_canvas_core::PenDocument,
@@ -507,23 +548,25 @@ impl EcosystemLink {
         .await?
     }
 
-    /// 反向监听：扫描 Fusion Code 目录的 IPC 消息，提取样式变更。
+    /// Reverse watch: scan the Fusion Code directory's IPC messages and extract style changes.
     ///
-    /// 消费所有待处理消息，过滤 action="style-change"，返回 MutateNodes 指令列表。
-    /// 调用方负责将 MutateNodes 发往画布。
+    /// Consumes all pending messages, filters action="style-change", and returns a list of
+    /// MutateNodes commands. The caller is responsible for sending MutateNodes to the canvas.
     pub fn watch_code_changes(&self) -> anyhow::Result<Vec<MutateNodeCommand>> {
         let messages = self.list(EcosystemTarget::FusionCode)?;
         let mut commands = vec![];
         for file in &messages {
-            // R-A2/P2-3：旧实现 `if let Ok` 静默吞所有 consume Err——损坏文件既不 log
-            // 也不清理，永久滞留目录反复失败（僵尸消息），违反 fail visibly。改为
-            // 显式 match，Err 时 warn 文件路径（consume 已保留损坏文件供诊断）。
+            // R-A2/P2-3: the old implementation's `if let Ok` silently swallowed all consume Errs —
+            // corrupt files were neither logged nor cleaned, staying in the directory and failing
+            // forever (zombie messages), violating fail visibly. Changed to an explicit match; on
+            // Err, warn with the file path (consume already keeps corrupt files for diagnostics).
             match self.consume(file) {
                 Ok(msg) => {
                     if msg.action == "style-change" {
                         if let Some(arr) = msg.payload.get("mutations").and_then(|v| v.as_array()) {
-                            // E-18/P3：旧实现对 parse_mutate_command 返回 None 静默丢弃，
-                            // 解析失败的 mutation 项无任何告警，调试无从定位。统计并显式告警。
+                            // E-18/P3: the old implementation silently dropped None from parse_mutate_command;
+                            // failed mutation items raised no alert at all, making debugging impossible.
+                            // Count and warn explicitly.
                             let total = arr.len();
                             let mut dropped = 0usize;
                             for item in arr {
@@ -533,7 +576,7 @@ impl EcosystemLink {
                                         dropped += 1;
                                         tracing::warn!(
                                             item = %item,
-                                            "watch_code_changes: mutation 解析失败被丢弃（非对象或缺 node_id）"
+                                            "watch_code_changes: mutation parse failed and was dropped (non-object or missing node_id)"
                                         );
                                     }
                                 }
@@ -542,7 +585,7 @@ impl EcosystemLink {
                                 tracing::warn!(
                                     total,
                                     dropped,
-                                    "watch_code_changes: 本消息丢弃 {dropped}/{total} 个 mutation"
+                                    "watch_code_changes: dropped {dropped}/{total} mutations in this message"
                                 );
                             }
                         }
@@ -552,21 +595,24 @@ impl EcosystemLink {
                     tracing::warn!(
                         file = %file.display(),
                         error = %e,
-                        "watch_code_changes: 消费消息失败（文件保留未删，可能损坏/超大/并发竞争）"
+                        "watch_code_changes: failed to consume message (file kept, not deleted; may be corrupt/oversized/race)"
                     );
                 }
             }
         }
         if !commands.is_empty() {
-            tracing::info!(count = commands.len(), "watch_code_changes: 发现样式变更");
+            tracing::info!(
+                count = commands.len(),
+                "watch_code_changes: found style changes"
+            );
         } else {
-            tracing::debug!("watch_code_changes: 无有效样式变更指令");
+            tracing::debug!("watch_code_changes: no valid style-change commands");
         }
         Ok(commands)
     }
 }
 
-/// MutateNode 指令（从 Fusion Code 反向同步的样式变更）。
+/// MutateNode command (style changes reverse-synced from Fusion Code).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutateNodeCommand {
     pub node_id: String,
@@ -607,9 +653,9 @@ fn parse_mutate_command(v: &serde_json::Value) -> Option<MutateNodeCommand> {
     })
 }
 
-// ── KB 模板系统 ──
+// ── KB template system ──
 
-/// 设计模板元数据。
+/// Design template metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesignTemplate {
     pub id: String,
@@ -629,7 +675,7 @@ fn default_timestamp() -> u64 {
 }
 
 impl EcosystemLink {
-    /// 保存设计模板到 Fusion-KB 目录。
+    /// Save a design template into the Fusion-KB directory.
     pub fn save_template(&self, tmpl: &DesignTemplate) -> anyhow::Result<PathBuf> {
         let kb_dir = self
             .base_dir
@@ -639,12 +685,13 @@ impl EcosystemLink {
         let file = kb_dir.join(format!("{}.json", tmpl.id));
         let json = serde_json::to_string_pretty(tmpl)?;
         std::fs::write(&file, json)?;
-        tracing::info!(?file, id = %tmpl.id, "save_template: 模板已保存");
-        // E-16/P2-6：写入即失效缓存（mtime 秒级精度，同秒连续写可能漏判，显式清空更稳）。
+        tracing::info!(?file, id = %tmpl.id, "save_template: template saved");
+        // E-16/P2-6: invalidate the cache on write (mtime has second-level precision; consecutive
+        // writes within the same second may be missed, so explicit clearing is safer).
         if let Ok(mut c) = self.template_cache.lock() {
             *c = TemplateCache::default();
         }
-        // 同时发 IPC 消息通知
+        // Also send an IPC message to notify
         let msg = LinkMessage {
             target: EcosystemTarget::FusionKB,
             action: "template-saved".into(),
@@ -658,22 +705,23 @@ impl EcosystemLink {
         Ok(file)
     }
 
-    /// E-16/P2-6：返回（降序）全部模板，命中缓存则零磁盘 IO。
-    /// 缓存按模板目录 mtime（秒级）失效：save_template 写文件 → mtime 变 → 重扫。
-    /// 旧实现每次检索都 read_dir + 逐文件 read_to_string + from_str，N 模板线性退化。
+    /// E-16/P2-6: return all templates (descending); on cache hit, zero disk IO.
+    /// Cache invalidated by the template directory mtime (second-level): save_template writes a
+    /// file → mtime changes → rescan. The old implementation did read_dir + per-file
+    /// read_to_string + from_str on every search, degrading linearly with N templates.
     fn load_all_templates_cached(&self) -> anyhow::Result<Vec<DesignTemplate>> {
         let kb_dir = self
             .base_dir
             .join(EcosystemTarget::FusionKB.ipc_dir())
             .join("templates");
         if !kb_dir.exists() {
-            // 目录不存在：清缓存，返回空。
+            // Directory missing: clear the cache and return empty.
             if let Ok(mut c) = self.template_cache.lock() {
                 *c = TemplateCache::default();
             }
             return Ok(vec![]);
         }
-        // 目录 mtime（秒级）作缓存键。失败（权限等）则强制重扫，不信任旧缓存。
+        // Directory mtime (second-level) as the cache key. On failure (permissions etc.), force a rescan; do not trust the old cache.
         let mtime_secs = std::fs::metadata(&kb_dir)
             .and_then(|m| m.modified())
             .ok()
@@ -685,12 +733,12 @@ impl EcosystemLink {
                 tracing::debug!(
                     dir_mtime = mtime_secs,
                     count = c.templates.len(),
-                    "load_all_templates_cached: 缓存命中（零磁盘 IO）"
+                    "load_all_templates_cached: cache hit (zero disk IO)"
                 );
                 return Ok(c.templates.clone());
             }
         }
-        // 未命中：扫盘解析。
+        // Miss: scan disk and parse.
         let mut templates = vec![];
         for entry in std::fs::read_dir(&kb_dir)? {
             let entry = entry?;
@@ -708,7 +756,7 @@ impl EcosystemLink {
         tracing::info!(
             dir_mtime = mtime_secs,
             count = templates.len(),
-            "load_all_templates_cached: 缓存未命中，已扫盘填充"
+            "load_all_templates_cached: cache miss, rescanned and filled"
         );
         if let Ok(mut c) = self.template_cache.lock() {
             c.dir_mtime_secs = mtime_secs;
@@ -717,11 +765,11 @@ impl EcosystemLink {
         Ok(templates)
     }
 
-    /// 检索模板：按关键词匹配 name/tags/category。
+    /// Search templates: match name/tags/category by keyword.
     pub fn search_templates(&self, query: &str) -> anyhow::Result<Vec<DesignTemplate>> {
         let all = self.load_all_templates_cached()?;
         let q = query.to_lowercase();
-        // E-16/P2-6：内存过滤，无磁盘 IO（all 已降序，保序过滤即可）。
+        // E-16/P2-6: in-memory filtering, no disk IO (all is already descending; an order-preserving filter suffices).
         let results: Vec<DesignTemplate> = all
             .iter()
             .filter(|tmpl| {
@@ -735,15 +783,15 @@ impl EcosystemLink {
             })
             .cloned()
             .collect();
-        tracing::info!(query = %query, count = results.len(), "search_templates: 检索完成");
+        tracing::info!(query = %query, count = results.len(), "search_templates: search done");
         Ok(results)
     }
 
-    /// 按 tag 精确匹配检索模板（多 tag 取交集）。
+    /// Search templates by exact tag match (multiple tags intersect).
     pub fn search_templates_by_tags(&self, tags: &[String]) -> anyhow::Result<Vec<DesignTemplate>> {
         let all = self.load_all_templates_cached()?;
         let lower_tags: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
-        // E-16/P2-6：内存过滤，无磁盘 IO。
+        // E-16/P2-6: in-memory filtering, no disk IO.
         let results: Vec<DesignTemplate> = all
             .iter()
             .filter(|tmpl| {
@@ -755,18 +803,19 @@ impl EcosystemLink {
             })
             .cloned()
             .collect();
-        tracing::info!(tags = ?tags, count = results.len(), "search_templates_by_tags: 检索完成");
+        tracing::info!(tags = ?tags, count = results.len(), "search_templates_by_tags: search done");
         Ok(results)
     }
 }
 
-// H-A3/P2-2：watch_async（异步文件监听，notify）+ 自建 MCP 协议层（McpServer/
-// McpTool/ListTargetsTool/SearchTemplatesTool/SendMessageTool + WatchEvent/Kind）
-// 已移除——零外部调用，展示性死代码。
-// MCP 层不合规（仅 initialize/tools 列表/call 三方法，缺握手/resources/progress，
-// 无法被标准 MCP client 接入，见审计 H-A4）；watch_async 无消费方。
-// EcosystemLink IPC 核心（send/list/consume/sync_to_code/search_templates/templates）保留。
-// 如需恢复，见 git 历史。
+// H-A3/P2-2: watch_async (async file watching, notify) + the self-built MCP protocol layer (McpServer/
+// McpTool/ListTargetsTool/SearchTemplatesTool/SendMessageTool + WatchEvent/Kind)
+// have been removed — zero external calls, presentational dead code.
+// The MCP layer was non-compliant (only the initialize/tools-list/call three methods, missing
+// handshake/resources/progress; cannot be consumed by standard MCP clients, see audit H-A4);
+// watch_async had no consumers.
+// The EcosystemLink IPC core (send/list/consume/sync_to_code/search_templates/templates) is kept.
+// To restore, see git history.
 
 #[cfg(test)]
 mod tests {
@@ -787,12 +836,12 @@ mod tests {
         assert_eq!(listed, vec![file.clone()]);
         let consumed = link.consume(&file).unwrap();
         assert_eq!(consumed.action, "export-code");
-        // consume 后文件删除
+        // file deleted after consume
         assert!(link.list(EcosystemTarget::FusionCode).unwrap().is_empty());
     }
 
-    // R-A2 + R-7：损坏文件 consume 应失败。R-7 先 rename 到 .processing/ 抢占，
-    // 解析失败后文件保留在 .processing/ 供诊断（不再静默丢数据）。
+    // R-A2 + R-7: consuming a corrupt file should fail. R-7 first renames into .processing/ to claim,
+    // and after parse failure the file is kept in .processing/ for diagnostics (no longer silently dropping data).
     #[test]
     fn consume_corrupt_file_preserves_and_errors() {
         let tmp = tempdir().unwrap();
@@ -800,22 +849,31 @@ mod tests {
         let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
         std::fs::create_dir_all(&dir).unwrap();
         let corrupt = dir.join("corrupt.json");
-        // 半截非法 JSON（模拟 rename 被打断/磁盘满）
+        // Half-written invalid JSON (simulating an interrupted rename / full disk)
         std::fs::write(&corrupt, "{ not valid json").unwrap();
         let result = link.consume(&corrupt);
-        assert!(result.is_err(), "损坏文件应解析失败返回 Err");
-        // R-7：原路径已 rename 抢占移走，文件保留在 .processing/ 供诊断（非静默丢弃）。
-        assert!(!corrupt.exists(), "原文件应已被 rename 抢占移走");
+        assert!(
+            result.is_err(),
+            "corrupt file should fail to parse and return Err"
+        );
+        // R-7: the original path was renamed away by the claim; the file is kept in .processing/ for diagnostics (not silently dropped).
+        assert!(
+            !corrupt.exists(),
+            "original file should have been renamed away by the claim"
+        );
         let proc_file = dir.join(".processing").join("corrupt.json");
         assert!(
             proc_file.exists(),
-            "损坏文件应保留在 .processing/ 供诊断，不应被 consume 删除"
+            "corrupt file should be kept in .processing/ for diagnostics, not deleted by consume"
         );
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("保留未删"), "Err 文案应明示文件保留");
+        assert!(
+            err_msg.contains("not deleted"),
+            "Err message should state the file is kept"
+        );
     }
 
-    // R-A2 + R-7：超大文件 consume 应拒绝，文件保留在 .processing/ 供诊断。
+    // R-A2 + R-7: consuming an oversized file should be rejected; the file is kept in .processing/ for diagnostics.
     #[test]
     fn consume_oversize_file_rejects_preserves() {
         let tmp = tempdir().unwrap();
@@ -823,16 +881,20 @@ mod tests {
         let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
         std::fs::create_dir_all(&dir).unwrap();
         let big = dir.join("big.json");
-        // 写 9MB 超过 8MB 上限
+        // Write 9MB, exceeding the 8MB limit
         std::fs::write(&big, "x".repeat(9 * 1024 * 1024)).unwrap();
         let result = link.consume(&big);
-        assert!(result.is_err(), "超大文件应被拒绝");
+        assert!(result.is_err(), "oversized file should be rejected");
         let proc_file = dir.join(".processing").join("big.json");
-        assert!(proc_file.exists(), "超大文件应保留在 .processing/ 未删");
+        assert!(
+            proc_file.exists(),
+            "oversized file should be kept in .processing/, not deleted"
+        );
     }
 
-    // R-A2/P2-3 + R-7：watch_code_changes 遇损坏文件不应 panic、不应静默——返回空指令，
-    // 损坏文件被 rename 抢占到 .processing/ 保留（fail visibly，由调用方日志可见）。
+    // R-A2/P2-3 + R-7: watch_code_changes must neither panic nor stay silent on corrupt files — it
+    // returns empty commands, and the corrupt file is claimed via rename into .processing/ and kept
+    // (fail visibly, visible in caller logs).
     #[test]
     fn watch_code_changes_corrupt_file_does_not_silently_swallow() {
         let tmp = tempdir().unwrap();
@@ -840,12 +902,14 @@ mod tests {
         let dir = tmp.path().join(EcosystemTarget::FusionCode.ipc_dir());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.json"), "{ broken").unwrap();
-        // 应返回 Ok（空指令），不 panic；损坏文件抢占移到 .processing/ 保留供诊断。
-        let cmds = link.watch_code_changes().expect("损坏文件不应致整体失败");
+        // Should return Ok (empty commands) without panic; the corrupt file is claimed into .processing/ and kept for diagnostics.
+        let cmds = link
+            .watch_code_changes()
+            .expect("corrupt file should not cause overall failure");
         assert!(cmds.is_empty());
         assert!(
             dir.join(".processing").join("bad.json").exists(),
-            "损坏文件应保留在 .processing/"
+            "corrupt file should be kept in .processing/"
         );
     }
 
@@ -868,7 +932,7 @@ mod tests {
 
     #[test]
     fn send_rejects_path_traversal_custom_target() {
-        // 审计 C6：Custom("../evil") 必须被拒绝，不得逃出 base 目录。
+        // Audit C6: Custom("../evil") must be rejected and must not escape the base directory.
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
         let msg = LinkMessage {
@@ -879,16 +943,16 @@ mod tests {
         let err = link.send(&msg).unwrap_err();
         assert!(
             format!("{}", err).contains(".."),
-            "错误信息应提及 `..` 组件，实际: {err}"
+            "error message should mention the `..` component, actual: {err}"
         );
-        // 确认没有文件被写到 base 之外
+        // Confirm no file was written outside base
         assert!(std::fs::read_dir(tmp.path()).unwrap().count() == 0);
     }
 
     #[test]
     fn send_filename_contains_pid_and_seq() {
-        // 审计 C7：文件名应含 pid + seq，避免同纳秒碰撞。
-        // 静态计数器是进程级，不假定具体 seq 值，只校验 <stamp>_<pid>_<seq>.json 形态。
+        // Audit C7: the filename should contain pid + seq, avoiding same-nanosecond collisions.
+        // The static counter is process-level; do not assume a specific seq value, only verify the <stamp>_<pid>_<seq>.json shape.
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
         let msg = LinkMessage {
@@ -899,22 +963,38 @@ mod tests {
         let file = link.send(&msg).unwrap();
         let fname = file.file_name().unwrap().to_string_lossy().to_string();
         let pid = std::process::id().to_string();
-        assert!(fname.contains(&pid), "文件名应含 pid={pid}，实际: {fname}");
-        // 形态：<数字纳秒>_<pid>_<数字seq>.json
+        assert!(
+            fname.contains(&pid),
+            "filename should contain pid={pid}, actual: {fname}"
+        );
+        // Shape: <numeric nanoseconds>_<pid>_<numeric seq>.json
         let stem = fname
             .strip_suffix(".json")
-            .unwrap_or_else(|| panic!("文件名应以 .json 结尾: {fname}"));
+            .unwrap_or_else(|| panic!("filename should end with .json: {fname}"));
         let parts: Vec<&str> = stem.rsplitn(3, '_').collect();
-        // rsplitn 产出顺序：seq, pid, stamp（从右往左切 3 段）
-        assert_eq!(parts.len(), 3, "文件名应有 stamp_pid_seq 三段: {fname}");
-        assert!(parts[0].parse::<u64>().is_ok(), "seq 应为数字: {fname}");
-        assert_eq!(parts[1], pid, "pid 段应匹配当前进程: {fname}");
-        assert!(parts[2].parse::<u128>().is_ok(), "stamp 应为数字: {fname}");
+        // rsplitn output order: seq, pid, stamp (3 segments split right-to-left)
+        assert_eq!(
+            parts.len(),
+            3,
+            "filename should have stamp_pid_seq segments: {fname}"
+        );
+        assert!(
+            parts[0].parse::<u64>().is_ok(),
+            "seq should be numeric: {fname}"
+        );
+        assert_eq!(
+            parts[1], pid,
+            "pid segment should match the current process: {fname}"
+        );
+        assert!(
+            parts[2].parse::<u128>().is_ok(),
+            "stamp should be numeric: {fname}"
+        );
     }
 
     #[test]
     fn send_concurrent_does_not_collide() {
-        // 审计 C7：连续两次 send 应产生不同文件名（seq 递增）。
+        // Audit C7: two consecutive sends should produce different filenames (seq increments).
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
         let mk = || LinkMessage {
@@ -924,7 +1004,7 @@ mod tests {
         };
         let f1 = link.send(&mk()).unwrap();
         let f2 = link.send(&mk()).unwrap();
-        assert_ne!(f1, f2, "两次 send 不应碰撞到同一文件名");
+        assert_ne!(f1, f2, "two sends should not collide on the same filename");
         assert!(f1.exists());
         assert!(f2.exists());
     }
@@ -976,7 +1056,7 @@ mod tests {
     fn watch_code_changes_extracts_mutations() {
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
-        // 放一条 style-change 消息
+        // Place one style-change message
         let msg = LinkMessage {
             target: EcosystemTarget::FusionCode,
             action: "style-change".into(),
@@ -988,7 +1068,7 @@ mod tests {
             }),
         };
         link.send(&msg).unwrap();
-        // 放一条无关消息
+        // Place one unrelated message
         let noise = LinkMessage {
             target: EcosystemTarget::FusionCode,
             action: "other-action".into(),
@@ -1016,8 +1096,9 @@ mod tests {
 
     #[test]
     fn watch_code_changes_drops_invalid_mutations_keeps_valid() {
-        // E-18/P3：混合有效/无效 mutation 项。旧实现静默丢全部无效项；
-        // 修复后须保留有效项、丢弃无效项（非对象/缺 node_id/非数组元素），不 panic。
+        // E-18/P3: mix of valid/invalid mutation items. The old implementation silently dropped all
+        // invalid ones; after the fix, valid items must be kept and invalid ones dropped
+        // (non-object/missing node_id/non-array element), without panic.
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
         let msg = LinkMessage {
@@ -1040,7 +1121,7 @@ mod tests {
         assert_eq!(
             ids,
             vec!["good1", "good2"],
-            "仅保留有 node_id 的有效项: {ids:?}"
+            "only items with node_id are kept: {ids:?}"
         );
     }
 
@@ -1050,8 +1131,10 @@ mod tests {
         let link = EcosystemLink::new(tmp.path());
         let tmpl = DesignTemplate {
             id: "login-v1".into(),
+            // i18n: user-facing
             name: "登录页面".into(),
             tags: vec!["login".into(), "auth".into()],
+            // i18n: user-facing
             category: "表单".into(),
             document_json: "{}".into(),
             created_at: 1000,
@@ -1059,24 +1142,26 @@ mod tests {
         let path = link.save_template(&tmpl).unwrap();
         assert!(path.exists());
 
-        // 按名称检索
+        // Search by name
+        // i18n: user-facing (query matches user-facing template data)
         let results = link.search_templates("登录").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "login-v1");
 
-        // 按 tag 检索
+        // Search by tag
         let results = link.search_templates("auth").unwrap();
         assert_eq!(results.len(), 1);
 
-        // 按分类检索
+        // Search by category
+        // i18n: user-facing (query matches user-facing template data)
         let results = link.search_templates("表单").unwrap();
         assert_eq!(results.len(), 1);
 
-        // 空查询返回全部
+        // Empty query returns all
         let results = link.search_templates("").unwrap();
         assert_eq!(results.len(), 1);
 
-        // 不匹配返回空
+        // No match returns empty
         let results = link.search_templates("dashboard").unwrap();
         assert!(results.is_empty());
     }
@@ -1098,6 +1183,7 @@ mod tests {
             id: "t1".into(),
             name: "Login".into(),
             tags: vec!["auth".into(), "form".into()],
+            // i18n: user-facing
             category: "表单".into(),
             document_json: "{}".into(),
             created_at: 1000,
@@ -1106,6 +1192,7 @@ mod tests {
             id: "t2".into(),
             name: "Signup".into(),
             tags: vec!["auth".into(), "register".into()],
+            // i18n: user-facing
             category: "表单".into(),
             document_json: "{}".into(),
             created_at: 2000,
@@ -1113,29 +1200,29 @@ mod tests {
         link.save_template(&tmpl1).unwrap();
         link.save_template(&tmpl2).unwrap();
 
-        // 单 tag 匹配两个
+        // Single tag matches both
         let results = link.search_templates_by_tags(&["auth".into()]).unwrap();
         assert_eq!(results.len(), 2);
 
-        // 双 tag 交集只匹配 tmpl1
+        // Two-tag intersection matches only tmpl1
         let results = link
             .search_templates_by_tags(&["auth".into(), "form".into()])
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "t1");
 
-        // 不存在的 tag
+        // Nonexistent tag
         let results = link
             .search_templates_by_tags(&["nonexistent".into()])
             .unwrap();
         assert!(results.is_empty());
 
-        // 空 tags 返回全部
+        // Empty tags returns all
         let results = link.search_templates_by_tags(&[]).unwrap();
         assert_eq!(results.len(), 2);
     }
 
-    // E-16/P2-6 回归：缓存命中——重复检索返回一致结果（缓存生效，无重扫）。
+    // E-16/P2-6 regression: cache hit — repeated searches return consistent results (cache effective, no rescan).
     #[test]
     fn template_search_cache_repeated_query_consistent() {
         let tmp = tempdir().unwrap();
@@ -1149,19 +1236,20 @@ mod tests {
             created_at: 1000,
         })
         .unwrap();
-        // 多次检索，缓存填充后应命中（结果一致）。
+        // Multiple searches; after the cache is filled it should hit (consistent results).
         let r1 = link.search_templates("Cache").unwrap();
         let r2 = link.search_templates("Cache").unwrap();
         let r3 = link.search_templates_by_tags(&["x".into()]).unwrap();
         assert_eq!(r1.len(), 1);
-        assert_eq!(r2.len(), 1, "缓存命中应返回一致结果");
-        assert_eq!(r3.len(), 1, "by_tags 同样走缓存");
+        assert_eq!(r2.len(), 1, "cache hit should return consistent results");
+        assert_eq!(r3.len(), 1, "by_tags also goes through the cache");
         assert_eq!(r1[0].id, "c1");
         assert_eq!(r2[0].id, "c1");
     }
 
-    // E-16/P2-6 回归：save_template 后缓存即时失效——
-    // 同秒连续写也必须让下次检索看到新模板（mtime 秒级精度漏洞的兜底）。
+    // E-16/P2-6 regression: the cache is invalidated immediately after save_template —
+    // consecutive writes within the same second must still let the next search see the new
+    // template (backstop for the mtime second-level precision gap).
     #[test]
     fn template_cache_invalidated_on_save_same_second() {
         let tmp = tempdir().unwrap();
@@ -1175,9 +1263,9 @@ mod tests {
             created_at: 1000,
         })
         .unwrap();
-        // 填充缓存。
+        // Fill the cache.
         assert_eq!(link.search_templates("").unwrap().len(), 1);
-        // 同秒再存一个（save_template 显式清缓存）。
+        // Save another within the same second (save_template clears the cache explicitly).
         link.save_template(&DesignTemplate {
             id: "s2".into(),
             name: "Second".into(),
@@ -1187,21 +1275,21 @@ mod tests {
             created_at: 2000,
         })
         .unwrap();
-        // 若缓存未失效，此处仍返回 1（旧缓存）——必须返回 2。
+        // If the cache were not invalidated, this would still return 1 (old cache) — it must return 2.
         let results = link.search_templates("").unwrap();
         assert_eq!(
             results.len(),
             2,
-            "save 后缓存应失效，检索须见新模板（同秒写兜底）"
+            "cache should be invalidated after save; the search must see the new template (same-second write backstop)"
         );
     }
 
-    // E-16/P2-6 回归：目录不存在时缓存被清空，不返回陈旧结果。
+    // E-16/P2-6 regression: when the directory is missing, the cache is cleared and no stale results are returned.
     #[test]
     fn template_cache_cleared_when_dir_absent() {
         let tmp = tempdir().unwrap();
         let link = EcosystemLink::new(tmp.path());
-        // 先存模板填充缓存。
+        // First save a template to fill the cache.
         link.save_template(&DesignTemplate {
             id: "d1".into(),
             name: "D".into(),
@@ -1212,37 +1300,40 @@ mod tests {
         })
         .unwrap();
         assert_eq!(link.search_templates("").unwrap().len(), 1);
-        // 删除整个模板目录。
+        // Delete the entire template directory.
         let kb_dir = tmp
             .path()
             .join(EcosystemTarget::FusionKB.ipc_dir())
             .join("templates");
         std::fs::remove_dir_all(&kb_dir).unwrap();
-        // 缓存应被清空，检索返回空而非陈旧的 1。
+        // The cache should be cleared; the search returns empty rather than a stale 1.
         assert_eq!(
             link.search_templates("").unwrap().len(),
             0,
-            "目录删除后缓存应清空，不返回陈旧结果"
+            "cache should be cleared after the directory is deleted; no stale results returned"
         );
     }
 }
 
-// ── 内置场景模板预置 ──
+// ── Built-in scene template presets ──
 
-/// 返回 4 类内置场景模板：移动端应用、B 端后台、营销网站、小程序。
+/// Returns the 4 built-in scene templates: mobile app, B-side admin, marketing site, mini program.
 pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
     let templates = vec![
-        // 1. 移动端应用
+        // 1. Mobile app
         DesignTemplate {
             id: "builtin-mobile-app".into(),
+            // i18n: user-facing
             name: "移动端应用".into(),
             tags: vec!["mobile".into(), "app".into(), "iOS".into(), "Android".into()],
             category: "mobile".into(),
             document_json: serde_json::json!({
                 "pages": [{
+                    // i18n: user-facing
                     "id": "home", "name": "首页", "width": 390.0, "height": 844.0,
                     "nodes": [
                         {"id":"nav","kind":"rect","x":0.0,"y":0.0,"w":390.0,"h":88.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
+                        // i18n: user-facing
                         {"id":"title","kind":"text","x":16.0,"y":44.0,"w":200.0,"h":32.0,"text":"首页","fill":"#000000"},
                         {"id":"banner","kind":"rect","x":16.0,"y":104.0,"w":358.0,"h":180.0,"fill":"#F5F5F5","stroke":"#E0E0E0"},
                         {"id":"card1","kind":"rect","x":16.0,"y":300.0,"w":358.0,"h":100.0,"fill":"#FFFFFF","stroke":"#EEEEEE"},
@@ -1253,20 +1344,26 @@ pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
             }).to_string(),
             created_at: default_timestamp(),
         },
-        // 2. B 端后台
+        // 2. B-side admin dashboard
         DesignTemplate {
             id: "builtin-admin-dashboard".into(),
+            // i18n: user-facing
             name: "B端后台".into(),
+            // i18n: user-facing
             tags: vec!["admin".into(), "dashboard".into(), "B端".into(), "后台".into()],
             category: "admin".into(),
             document_json: serde_json::json!({
                 "pages": [{
+                    // i18n: user-facing
                     "id": "dashboard", "name": "仪表盘", "width": 1440.0, "height": 900.0,
                     "nodes": [
                         {"id":"sidebar","kind":"rect","x":0.0,"y":0.0,"w":240.0,"h":900.0,"fill":"#1A1A2E"},
                         {"id":"logo","kind":"text","x":24.0,"y":24.0,"w":180.0,"h":32.0,"text":"Admin","fill":"#FFFFFF"},
+                        // i18n: user-facing
                         {"id":"nav-1","kind":"text","x":24.0,"y":80.0,"w":180.0,"h":24.0,"text":"仪表盘","fill":"#A0A0C0"},
+                        // i18n: user-facing
                         {"id":"nav-2","kind":"text","x":24.0,"y":120.0,"w":180.0,"h":24.0,"text":"用户管理","fill":"#A0A0C0"},
+                        // i18n: user-facing
                         {"id":"nav-3","kind":"text","x":24.0,"y":160.0,"w":180.0,"h":24.0,"text":"数据分析","fill":"#A0A0C0"},
                         {"id":"header","kind":"rect","x":240.0,"y":0.0,"w":1200.0,"h":64.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
                         {"id":"stat-card-1","kind":"rect","x":272.0,"y":96.0,"w":260.0,"h":120.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
@@ -1280,22 +1377,28 @@ pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
             }).to_string(),
             created_at: default_timestamp(),
         },
-        // 3. 营销网站
+        // 3. Marketing site
         DesignTemplate {
             id: "builtin-marketing-site".into(),
+            // i18n: user-facing
             name: "营销网站".into(),
+            // i18n: user-facing
             tags: vec!["website".into(), "marketing".into(), "landing".into(), "营销".into()],
             category: "website".into(),
             document_json: serde_json::json!({
                 "pages": [{
+                    // i18n: user-facing
                     "id": "landing", "name": "落地页", "width": 1440.0, "height": 900.0,
                     "nodes": [
                         {"id":"navbar","kind":"rect","x":0.0,"y":0.0,"w":1440.0,"h":72.0,"fill":"#FFFFFF","stroke":"#E5E5E5"},
                         {"id":"brand","kind":"text","x":64.0,"y":20.0,"w":160.0,"h":32.0,"text":"Brand","fill":"#000000"},
                         {"id":"hero-section","kind":"rect","x":0.0,"y":72.0,"w":1440.0,"h":480.0,"fill":"#F8F9FA"},
+                        // i18n: user-facing
                         {"id":"hero-title","kind":"text","x":200.0,"y":200.0,"w":600.0,"h":48.0,"text":"让设计更简单","fill":"#1A1A2E"},
+                        // i18n: user-facing
                         {"id":"hero-subtitle","kind":"text","x":200.0,"y":264.0,"w":500.0,"h":32.0,"text":"AI 驱动的本地设计工具","fill":"#666666"},
                         {"id":"cta-button","kind":"rect","x":200.0,"y":320.0,"w":160.0,"h":48.0,"fill":"#007AFF"},
+                        // i18n: user-facing
                         {"id":"cta-text","kind":"text","x":216.0,"y":328.0,"w":128.0,"h":32.0,"text":"立即开始","fill":"#FFFFFF"},
                         {"id":"features-section","kind":"rect","x":0.0,"y":552.0,"w":1440.0,"h":348.0,"fill":"#FFFFFF"},
                         {"id":"feature-1","kind":"rect","x":64.0,"y":592.0,"w":400.0,"h":240.0,"fill":"#F5F5F7","stroke":"#E5E5E5"},
@@ -1306,14 +1409,17 @@ pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
             }).to_string(),
             created_at: default_timestamp(),
         },
-        // 4. 小程序
+        // 4. Mini program
         DesignTemplate {
             id: "builtin-mini-program".into(),
+            // i18n: user-facing
             name: "小程序".into(),
+            // i18n: user-facing
             tags: vec!["mini-program".into(), "wechat".into(), "小程序".into(), "微信".into()],
             category: "mini-program".into(),
             document_json: serde_json::json!({
                 "pages": [{
+                    // i18n: user-facing
                     "id": "index", "name": "首页", "width": 375.0, "height": 812.0,
                     "nodes": [
                         {"id":"status-bar","kind":"rect","x":0.0,"y":0.0,"w":375.0,"h":44.0,"fill":"#FFFFFF"},
@@ -1333,13 +1439,13 @@ pub fn builtin_scene_templates() -> Vec<DesignTemplate> {
     ];
     tracing::info!(
         count = templates.len(),
-        "builtin_scene_templates: 返回内置模板"
+        "builtin_scene_templates: returning builtin templates"
     );
     templates
 }
 
 impl EcosystemLink {
-    /// 将内置场景模板保存到 KB 目录（幂等，已存在则跳过）。
+    /// Save the built-in scene templates into the KB directory (idempotent; skip if already present).
     pub fn install_builtin_templates(&self) -> anyhow::Result<usize> {
         let mut installed = 0usize;
         for tmpl in builtin_scene_templates() {
@@ -1350,30 +1456,31 @@ impl EcosystemLink {
             std::fs::create_dir_all(&kb_dir)?;
             let file = kb_dir.join(format!("{}.json", tmpl.id));
             if file.exists() {
-                // E-17/P3：旧实现仅判 file.exists() 跳过，损坏/空文件永久不可用。
-                // 先校验可解析，corrupt 则覆盖重装；有效才跳过。
+                // E-17/P3: the old implementation only checked file.exists() and skipped, leaving
+                // corrupt/empty files unusable forever. Validate parseability first; overwrite and
+                // reinstall if corrupt; skip only if valid.
                 let need_overwrite = match std::fs::read_to_string(&file) {
                     Ok(content) => match serde_json::from_str::<DesignTemplate>(&content) {
                         Ok(existing) => existing.id != tmpl.id,
                         Err(e) => {
-                            tracing::warn!(id = %tmpl.id, error = %e, "install_builtin_templates: 已存在文件损坏，覆盖重装");
+                            tracing::warn!(id = %tmpl.id, error = %e, "install_builtin_templates: existing file corrupt, overwriting and reinstalling");
                             true
                         }
                     },
                     Err(e) => {
-                        tracing::warn!(id = %tmpl.id, error = %e, "install_builtin_templates: 已存在文件不可读，覆盖重装");
+                        tracing::warn!(id = %tmpl.id, error = %e, "install_builtin_templates: existing file unreadable, overwriting and reinstalling");
                         true
                     }
                 };
                 if !need_overwrite {
-                    tracing::debug!(id = %tmpl.id, "install_builtin_templates: 模板已存在且有效，跳过");
+                    tracing::debug!(id = %tmpl.id, "install_builtin_templates: template already exists and is valid, skipping");
                     continue;
                 }
             }
             let json = serde_json::to_string_pretty(&tmpl)?;
             std::fs::write(&file, json)?;
             installed += 1;
-            tracing::info!(id = %tmpl.id, name = %tmpl.name, "install_builtin_templates: 模板已安装");
+            tracing::info!(id = %tmpl.id, name = %tmpl.name, "install_builtin_templates: template installed");
         }
         Ok(installed)
     }
@@ -1403,7 +1510,11 @@ mod builtin_template_tests {
     fn builtin_templates_valid_json() {
         for tmpl in builtin_scene_templates() {
             let v: serde_json::Value = serde_json::from_str(&tmpl.document_json).unwrap();
-            assert!(v.get("pages").is_some(), "模板 {} 缺少 pages", tmpl.id);
+            assert!(
+                v.get("pages").is_some(),
+                "template {} is missing pages",
+                tmpl.id
+            );
         }
     }
 
@@ -1419,8 +1530,9 @@ mod builtin_template_tests {
 
     #[test]
     fn install_builtin_templates_reinstalls_corrupt_file() {
-        // E-17/P3：旧实现仅判 exists 跳过，损坏文件永久阻塞重装。
-        // 先正常安装，再写空/损坏内容到首个模板文件，重装须覆盖且 count > 0。
+        // E-17/P3: the old implementation only checked existence and skipped, so a corrupt file
+        // blocked reinstall forever. Install normally first, then write empty/corrupt content to
+        // the first template file; reinstall must overwrite it with count > 0.
         let dir = tempfile::tempdir().unwrap();
         let link = EcosystemLink::new(dir.path());
         link.install_builtin_templates().unwrap();
@@ -1432,10 +1544,16 @@ mod builtin_template_tests {
         let corrupt_file = templates_dir.join(format!("{first_id}.json"));
         std::fs::write(&corrupt_file, "{ corrupted not json").unwrap();
         let reinstalled = link.install_builtin_templates().unwrap();
-        assert_eq!(reinstalled, 1, "损坏文件须覆盖重装 1 个");
+        assert_eq!(
+            reinstalled, 1,
+            "corrupt file must be overwritten and reinstalled (1 template)"
+        );
         let restored = std::fs::read_to_string(&corrupt_file).unwrap();
         let parsed: DesignTemplate = serde_json::from_str(&restored).unwrap();
-        assert_eq!(parsed.id, *first_id, "重装内容为有效内置模板");
+        assert_eq!(
+            parsed.id, *first_id,
+            "reinstalled content is a valid builtin template"
+        );
     }
 
     #[test]
@@ -1449,7 +1567,7 @@ mod builtin_template_tests {
 
     #[test]
     fn trainer_resolve_bin_honors_env() {
-        // 环境变量优先于默认 .venv 路径
+        // Environment variable takes precedence over the default .venv path
         let prev = std::env::var("FUSION_TRAINER_BIN").ok();
         std::env::set_var("FUSION_TRAINER_BIN", "/tmp/ft-test-bin");
         let bin = TrainerClient::resolve_bin();
@@ -1463,7 +1581,7 @@ mod builtin_template_tests {
     #[test]
     fn trainer_with_bin_stores_path() {
         let client = TrainerClient::with_bin("/nonexistent/fusion-trainer");
-        // bin 不存在时应失败可见（fail-visible），不真正 spawn 子进程
+        // A missing bin should fail visibly (fail-visible), without actually spawning the subprocess
         let err = client
             .run_sft(
                 std::path::Path::new("/tmp/ds.jsonl"),
@@ -1471,7 +1589,7 @@ mod builtin_template_tests {
                 None,
             )
             .unwrap_err();
-        assert!(format!("{}", err).contains("fusion-trainer CLI 未找到"));
+        assert!(format!("{}", err).contains("fusion-trainer CLI not found"));
     }
 
     #[test]
@@ -1485,6 +1603,6 @@ mod builtin_template_tests {
                 None,
             )
             .unwrap_err();
-        assert!(format!("{}", err).contains("fusion-trainer CLI 未找到"));
+        assert!(format!("{}", err).contains("fusion-trainer CLI not found"));
     }
 }

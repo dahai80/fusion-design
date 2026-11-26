@@ -1,10 +1,10 @@
-//! ARCH-10：host-web Canvas 渲染管线。从 lib.rs 2246-2599 迁出，零逻辑改。
+//! ARCH-10: host-web Canvas rendering pipeline. Moved out of lib.rs lines 2246-2599 with zero logic changes.
 
 use wasm_bindgen::JsCast;
 
 use crate::{fd_log_error, shell_lock, PenDocument, MAX_CHILDREN_PER_NODE};
 
-/// 重置画布视图（缩放=1.0，平移=0,0）。
+/// Reset the canvas view (zoom=1.0, pan=0,0).
 pub(crate) fn reset_canvas_view() {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -18,7 +18,7 @@ pub(crate) fn reset_canvas_view() {
         container.set_attribute("data-fd-zoom", "1.0").ok();
         container.set_attribute("data-fd-pan-x", "0.0").ok();
         container.set_attribute("data-fd-pan-y", "0.0").ok();
-        // L-14：仅重置 transform，不整体覆盖 style。
+        // L-14: reset only the transform, not a whole-style override.
         if let Ok(el) = container.dyn_into::<web_sys::HtmlElement>() {
             let _ = el
                 .style()
@@ -29,7 +29,7 @@ pub(crate) fn reset_canvas_view() {
     web_sys::console::log_1(&"fd-host-web: canvas view reset".into());
 }
 
-/// 清空画布（Canvas + DOM）。
+/// Clear the canvas (Canvas + DOM).
 pub(crate) fn clear_canvas() {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -40,7 +40,7 @@ pub(crate) fn clear_canvas() {
         None => return,
     };
 
-    // 清空 Canvas
+    // Clear the Canvas
     let guard = shell_lock();
     if let Some(inner) = guard.as_ref() {
         if let Some(canvas) = get_canvas(&inner.canvas_id) {
@@ -52,18 +52,18 @@ pub(crate) fn clear_canvas() {
         }
     }
 
-    // 清空 DOM 容器
+    // Clear the DOM container
     if let Some(container) = document.get_element_by_id("fusion-dom-root") {
         container.set_inner_html("");
     }
 }
 
-/// Plan 预览：将 PenDocument 节点渲染为虚线叠加层。
+/// Plan preview: render PenDocument nodes as a dashed overlay layer.
 pub(crate) fn render_plan_preview(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            fd_log_error(&format!("fd-host-web: PlanPreview 解析失败: {e}"));
+            fd_log_error(&format!("fd-host-web: PlanPreview parse failed: {e}"));
             return;
         }
     };
@@ -86,7 +86,9 @@ pub(crate) fn render_plan_preview(doc_json: &str) {
     let overlay = match document.create_element("div") {
         Ok(el) => el,
         Err(_) => {
-            web_sys::console::warn_1(&"fd-host-web: render_plan_preview 创建 overlay 失败".into());
+            web_sys::console::warn_1(
+                &"fd-host-web: render_plan_preview failed to create overlay".into(),
+            );
             return;
         }
     };
@@ -98,7 +100,7 @@ pub(crate) fn render_plan_preview(doc_json: &str) {
         )
         .is_err()
     {
-        web_sys::console::warn_1(&"fd-host-web: render_plan_preview overlay set_attribute 失败".into());
+        web_sys::console::warn_1(&"fd-host-web: render_plan_preview overlay set_attribute failed".into());
     }
 
     for page in &doc.pages {
@@ -107,7 +109,7 @@ pub(crate) fn render_plan_preview(doc_json: &str) {
                 Ok(e) => e,
                 Err(_) => {
                     web_sys::console::warn_1(
-                        &"fd-host-web: render_plan_preview 创建节点失败".into(),
+                        &"fd-host-web: render_plan_preview failed to create node".into(),
                     );
                     continue;
                 }
@@ -121,10 +123,10 @@ pub(crate) fn render_plan_preview(doc_json: &str) {
                 node.h as i32,
                 node.style.radius.map(|r| r as i32).unwrap_or(0)
             );
-            // C12：set_attribute 失败不 panic，warn 后跳过该节点样式注入。
+            // C12: set_attribute failure must not panic; warn and skip this node's style injection.
             if el.set_attribute("style", &style).is_err() {
                 web_sys::console::warn_1(
-                    &"fd-host-web: render_plan_preview 节点 set_attribute 失败".into(),
+                    &"fd-host-web: render_plan_preview node set_attribute failed".into(),
                 );
             }
             if let Some(text) = &node.text {
@@ -138,7 +140,7 @@ pub(crate) fn render_plan_preview(doc_json: &str) {
     web_sys::console::log_1(&"fd-host-web: Plan preview rendered".into());
 }
 
-/// 移除 Plan 预览叠加层。
+/// Remove the Plan preview overlay layer.
 pub(crate) fn remove_plan_preview() {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -154,37 +156,38 @@ pub(crate) fn remove_plan_preview() {
     }
 }
 
-/// 渲染 PenDocument JSON 到 Canvas。
+/// Render PenDocument JSON onto the Canvas.
 pub(crate) fn render_page(doc_json: &str) {
     let doc = match PenDocument::from_json(doc_json) {
         Ok(d) => d,
         Err(e) => {
-            fd_log_error(&format!("fd-host-web: PenDocument 解析失败: {e}"));
+            fd_log_error(&format!("fd-host-web: PenDocument parse failed: {e}"));
             return;
         }
     };
 
-    // L-18：canvas 渲染路径也写 cached_doc_json，
-    // 使 viewport_cull_update 两路径（DOM/canvas）都有最新文档，避免陈旧/None。
+    // L-18: the canvas rendering path also writes cached_doc_json,
+    // so viewport_cull_update has the latest document on both paths (DOM/canvas), avoiding stale/None.
     {
         let mut guard = shell_lock();
         if let Some(inner) = guard.as_mut() {
             inner.cached_doc_json = Some(doc_json.to_string());
-            // PERF-2：canvas 路径同步缓存已解析 PenDocument，与 DOM 路径对齐。
+            // PERF-2: the canvas path caches the parsed PenDocument in sync, aligned with the DOM path.
             inner.cached_doc = Some(doc.clone());
-            // P-7/R-17：canvas 重渲同 DOM 重渲，清空选中记录。
+            // P-7/R-17: a canvas re-render behaves like a DOM re-render; clear the selection records.
             inner.selected_id = None;
             inner.selected_ids.clear();
         }
     }
 
-    // 仅持锁取 canvas_id 后立即释放，避免大文档重绘期间阻塞消息处理（P1-2）。
+    // Hold the lock only to fetch canvas_id, releasing immediately, avoiding blocking message
+    // processing during large-document redraws (P1-2).
     let canvas_id = {
         let guard = shell_lock();
         match guard.as_ref() {
             Some(i) => i.canvas_id.clone(),
             None => {
-                fd_log_error("fd-host-web: WebShell 未初始化");
+                fd_log_error("fd-host-web: WebShell not initialized");
                 return;
             }
         }
@@ -202,17 +205,17 @@ pub(crate) fn render_page(doc_json: &str) {
     let ctx = match ctx {
         Some(c) => c,
         None => {
-            fd_log_error("fd-host-web: 无法获取 2D 上下文");
+            fd_log_error("fd-host-web: failed to acquire 2D context");
             return;
         }
     };
 
-    // 清空画布
+    // Clear the canvas
     ctx.clear_rect(0.0, 0.0, canvas.width() as f64, canvas.height() as f64);
 
-    // A-11：canvas 路径清空 DOM 容器，消除 render_dom 残留的 DOM 重影。
-    // 双轨不一致：若先 render_dom（DOM 节点）再 render_page（canvas），
-    // 旧 DOM 节点仍叠在 canvas 上方，与 canvas 画面重影。与 render_dom 清空对齐。
+    // A-11: the canvas path also clears the DOM container, removing DOM ghosts left by render_dom.
+    // Dual-track inconsistency: if render_dom (DOM nodes) ran first and then render_page (canvas),
+    // the old DOM nodes would still sit above the canvas, ghosting against the canvas picture. Aligned with render_dom's clearing.
     if let Some(container) = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("fusion-dom-root"))
@@ -220,34 +223,34 @@ pub(crate) fn render_page(doc_json: &str) {
         container.set_inner_html("");
     }
 
-    // 渲染每个页面
+    // Render each page
     for page in &doc.pages {
         render_page_to_canvas(page, &ctx);
     }
 }
 
-/// 递归渲染深度上限，防止恶意/异常深层嵌套文档栈溢出（P2-1）。
+/// Recursion depth cap for rendering, preventing stack overflow on malicious/abnormally deeply nested documents (P2-1).
 pub(crate) const MAX_RENDER_DEPTH: u32 = 64;
 
-/// 渲染单页到 Canvas 2D。
+/// Render a single page onto Canvas 2D.
 fn render_page_to_canvas(page: &fd_canvas_core::Page, ctx: &web_sys::CanvasRenderingContext2d) {
     for node in &page.nodes {
         render_node(node, ctx, 0);
     }
 }
 
-/// 递归渲染节点。depth 限制嵌套深度，超过 MAX_RENDER_DEPTH 跳过子树防栈溢出（P2-1）。
+/// Render a node recursively. depth limits nesting depth; beyond MAX_RENDER_DEPTH the subtree is skipped to prevent stack overflow (P2-1).
 fn render_node(
     node: &fd_canvas_core::PenNode,
     ctx: &web_sys::CanvasRenderingContext2d,
     depth: u32,
 ) {
-    // 设置填充色
+    // Set the fill color
     if let Some(fill) = &node.style.fill {
         ctx.set_fill_style_str(fill);
     }
 
-    // 设置描边
+    // Set the stroke
     if let Some(stroke) = &node.style.stroke {
         ctx.set_stroke_style_str(stroke);
         ctx.set_line_width(node.style.stroke_width.unwrap_or(1.0));
@@ -293,14 +296,17 @@ fn render_node(
         fd_canvas_core::NodeKind::Group => {
             if depth >= MAX_RENDER_DEPTH {
                 web_sys::console::warn_1(
-                    &format!("render_node: 嵌套深度超限 {MAX_RENDER_DEPTH}，跳过子树").into(),
+                    &format!(
+                        "render_node: nesting depth beyond {MAX_RENDER_DEPTH}, skipping subtree"
+                    )
+                    .into(),
                 );
                 return;
             }
             if node.children.len() > MAX_CHILDREN_PER_NODE {
                 web_sys::console::warn_1(
                     &format!(
-                        "render_node: 子节点数 {} 超 {} 上限，仅渲染前 {} 个",
+                        "render_node: {} children exceeds the {} cap, rendering only the first {}",
                         node.children.len(),
                         MAX_CHILDREN_PER_NODE,
                         MAX_CHILDREN_PER_NODE
@@ -315,7 +321,7 @@ fn render_node(
     }
 }
 
-/// 绘制圆角矩形。
+/// Draw a rounded rectangle.
 fn round_rect(ctx: &web_sys::CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w / 2.0).min(h / 2.0);
     ctx.begin_path();
@@ -349,7 +355,7 @@ fn round_rect(ctx: &web_sys::CanvasRenderingContext2d, x: f64, y: f64, w: f64, h
     ctx.stroke();
 }
 
-/// 获取 canvas 元素。
+/// Get the canvas element.
 fn get_canvas(canvas_id: &str) -> Option<web_sys::HtmlCanvasElement> {
     let window = web_sys::window()?;
     let document = window.document()?;

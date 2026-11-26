@@ -1,19 +1,20 @@
 // Callers: fd-cli (export/export-batch), DesignBridge (Swift Process)
 // Affected API: Exporter::from_pen_document(), CanvasPage::from_page(), CanvasElement new fields
 // Data schemas: PenDocument→CanvasPage bridge, enhanced SVG with NodeStyle (stroke_width/radius/opacity/font/rotation)
-// User instruction: "现在开始实施" — Task #16 P3-5 fd-export PNG/SVG/HTML 批量导出
+// User instruction: "start implementing now" — Task #16 P3-5 fd-export PNG/SVG/HTML batch export
 //
-// ARCH-10 r4：god-file 拆分。lib.rs 仅留公共类型（ExportError/ExportFormat/CanvasPage/
-// CanvasElement）+ Exporter 实现 + 常量。渲染逻辑按格式拆 svg/html/png/pdf 模块，
-// 共享工具（文件名清洗/xml 转义/token 解析/元素收集）入 util。纯位置迁移，零行为变更。
+// ARCH-10 r4: god-file split. lib.rs keeps only public types (ExportError/ExportFormat/CanvasPage/
+// CanvasElement) + Exporter impl + constants. Rendering logic split into svg/html/png/pdf modules,
+// shared utilities (filename sanitizing/xml escaping/token parsing/element collection) into util.
+// Pure positional move, zero behavior change.
 
-//! Fusion-Design 导出 — PNG/SVG/PDF/HTML 批量导出。
+//! Fusion-Design export — PNG/SVG/PDF/HTML batch export.
 //!
-//! 对应 PRD 模块 5「原型交互与交付」的导出能力。
-//! 支持格式：HTML（静态）、SVG（矢量）、PNG（tiny-skia 光栅化）、PDF（结构化）、JSON（工程文件）。
+//! Covers the export capability of PRD module 5 "Prototype Interaction & Delivery".
+//! Supported formats: HTML (static), SVG (vector), PNG (tiny-skia rasterization), PDF (structured), JSON (project file).
 //!
-//! V0.2: 支持 PenDocument 直接导出（无需手动转 CanvasPage），
-//! 增强渲染：NodeStyle（fill/stroke/radius/opacity/font）→ SVG 属性。
+//! V0.2: supports exporting PenDocument directly (no manual CanvasPage conversion),
+//! enhanced rendering: NodeStyle (fill/stroke/radius/opacity/font) -> SVG attributes.
 
 use std::path::{Path, PathBuf};
 
@@ -25,31 +26,33 @@ mod png;
 mod svg;
 mod util;
 
-// A-4：库 crate 显式错误枚举，替代 anyhow bail。下游（fd-cli report_error）
-// 可 downcast 按变体 match 做差异化提示（修 E-9）。io/serde 是直接依赖类型用 #[from]；
-// usvg/png/printpdf 错误经 RenderFailed(String) 收口，避免把这俩错误类型暴露到公共 API
-// （png/printpdf 非本 crate 直接依赖，跨 crate 暴露会增加下游耦合）。
+// A-4: explicit error enum for the library crate, replacing anyhow bail. Downstream
+// (fd-cli report_error) can downcast and match on variants for differentiated messages
+// (fixes E-9). io/serde are direct dependency types, so use #[from];
+// usvg/png/printpdf errors are funneled through RenderFailed(String) to avoid exposing
+// those error types in the public API (png/printpdf are not direct deps of this crate;
+// cross-crate exposure would increase downstream coupling).
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("序列化错误: {0}")]
+    #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
-    #[error("渲染失败: {0}")]
+    #[error("render failed: {0}")]
     RenderFailed(String),
-    #[error("不支持的导出格式: {0:?}")]
+    #[error("unsupported export format: {0:?}")]
     UnsupportedFormat(ExportFormat),
-    #[error("批量导出存在 {count} 项失败:\n{detail}")]
+    #[error("batch export had {count} failure(s):\n{detail}")]
     BatchPartial { count: usize, detail: String },
 }
 
-// 渲染光栅图（PNG）时画布单边像素上限，防止恶意 .fusiondesign 触发 OOM。
+// Max canvas edge in pixels when rasterizing (PNG), to prevent malicious .fusiondesign files from triggering OOM.
 const MAX_CANVAS_DIM: u32 = 16384;
-// 渲染光栅图（PNG）时画布总像素上限（RGBA4 = 64M px × 4 B = 256 MB）。
-// 单边限制不够：16384²×4 = 1 GB 仍会 OOM。R-A16。
+// Max total canvas pixels when rasterizing (PNG) (RGBA4 = 64M px x 4 B = 256 MB).
+// An edge-only limit is not enough: 16384^2 x 4 = 1 GB would still OOM. R-A16.
 const MAX_CANVAS_PIXELS: u64 = 64_000_000;
 
-/// 导出格式。
+/// Export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
     Html,
@@ -81,7 +84,7 @@ impl ExportFormat {
     }
 }
 
-/// 画布页面数据（最小子集，供导出渲染）。
+/// Canvas page data (minimal subset, used for export rendering).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasPage {
     pub id: String,
@@ -91,7 +94,7 @@ pub struct CanvasPage {
     pub elements: Vec<CanvasElement>,
 }
 
-/// 矢量元素（V0.2 扩展：NodeStyle 全字段）。
+/// Vector element (V0.2 extension: full NodeStyle fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasElement {
     pub kind: String,
@@ -120,7 +123,7 @@ pub struct CanvasElement {
 }
 
 impl CanvasPage {
-    /// 从 fd-canvas-core Page 转换。
+    /// Convert from an fd-canvas-core Page.
     pub fn from_page(page: &fd_canvas_core::Page) -> Self {
         let mut elements = Vec::new();
         for node in &page.nodes {
@@ -136,61 +139,33 @@ impl CanvasPage {
     }
 }
 
-/// 导出器。
+/// Exporter.
 pub struct Exporter;
 
 impl Exporter {
-    /// 从 PenDocument 直接导出所有页面。
+    /// Export all pages directly from a PenDocument.
     pub fn from_pen_document(
         doc: &fd_canvas_core::PenDocument,
         format: ExportFormat,
         out_dir: &Path,
     ) -> Result<Vec<PathBuf>, ExportError> {
-        // PERF-4：逐页转换+导出+释放，避免一次性 collect 全部 CanvasPage 占峰值内存。
-        // 大文档（validate_limits 上限 100k 节点）多页时，旧 collect 把所有页同时驻留。
+        // PERF-4: per-page convert+export+drop, to avoid collecting all CanvasPages at once
+        // and inflating peak memory. For large multi-page documents (validate_limits caps
+        // at 100k nodes), the old collect kept every page resident simultaneously.
         let mut files = Vec::with_capacity(doc.pages.len());
         let mut errors: Vec<String> = Vec::new();
         for page in &doc.pages {
             let canvas_page = CanvasPage::from_page(page);
             match Self::export_page(&canvas_page, format, out_dir) {
                 Ok(f) => files.push(f),
-                Err(e) => errors.push(format!("页面 '{}' 导出失败: {e}", canvas_page.name)),
+                Err(e) => errors.push(format!("page '{}' export failed: {e}", canvas_page.name)),
             }
-            // canvas_page 循环末释放，下一页不叠加上一页内存。
-        }
-        if !errors.is_empty() {
-            tracing::error!(count = errors.len(), "from_pen_document: 部分页面导出失败");
-            return Err(ExportError::BatchPartial {
-                count: errors.len(),
-                detail: errors.join("\n"),
-            });
-        }
-        Ok(files)
-    }
-
-    /// 从 PenDocument 导出，导出前用当前激活设计规范解析 `var(--token)` / `token:` 颜色引用。
-    /// usvg 不支持 CSS Custom Property，未解析会在光栅化阶段回退黑色（#8）。
-    pub fn from_pen_document_with_tokens(
-        doc: &fd_canvas_core::PenDocument,
-        format: ExportFormat,
-        out_dir: &Path,
-        reg: &fd_design_system::DesignSystemRegistry,
-    ) -> Result<Vec<PathBuf>, ExportError> {
-        // PERF-4：逐页转换+token 解析+导出+释放，避免一次性 collect 全部 CanvasPage 占峰值内存。
-        let mut files = Vec::with_capacity(doc.pages.len());
-        let mut errors: Vec<String> = Vec::new();
-        for page in &doc.pages {
-            let mut canvas_page = CanvasPage::from_page(page);
-            util::resolve_page_token_vars(&mut canvas_page, reg);
-            match Self::export_page(&canvas_page, format, out_dir) {
-                Ok(f) => files.push(f),
-                Err(e) => errors.push(format!("页面 '{}' 导出失败: {e}", canvas_page.name)),
-            }
+            // canvas_page is dropped at the end of each iteration, so the next page does not stack on the previous page's memory.
         }
         if !errors.is_empty() {
             tracing::error!(
                 count = errors.len(),
-                "from_pen_document_with_tokens: 部分页面导出失败"
+                "from_pen_document: some pages failed to export"
             );
             return Err(ExportError::BatchPartial {
                 count: errors.len(),
@@ -200,7 +175,40 @@ impl Exporter {
         Ok(files)
     }
 
-    /// 导出单页到指定格式。
+    /// Export from a PenDocument, resolving `var(--token)` / `token:` color references against
+    /// the currently active design system first.
+    /// usvg does not support CSS Custom Properties; unresolved vars fall back to black at rasterization (#8).
+    pub fn from_pen_document_with_tokens(
+        doc: &fd_canvas_core::PenDocument,
+        format: ExportFormat,
+        out_dir: &Path,
+        reg: &fd_design_system::DesignSystemRegistry,
+    ) -> Result<Vec<PathBuf>, ExportError> {
+        // PERF-4: per-page convert+token-resolve+export+drop, to avoid collecting all CanvasPages at once and inflating peak memory.
+        let mut files = Vec::with_capacity(doc.pages.len());
+        let mut errors: Vec<String> = Vec::new();
+        for page in &doc.pages {
+            let mut canvas_page = CanvasPage::from_page(page);
+            util::resolve_page_token_vars(&mut canvas_page, reg);
+            match Self::export_page(&canvas_page, format, out_dir) {
+                Ok(f) => files.push(f),
+                Err(e) => errors.push(format!("page '{}' export failed: {e}", canvas_page.name)),
+            }
+        }
+        if !errors.is_empty() {
+            tracing::error!(
+                count = errors.len(),
+                "from_pen_document_with_tokens: some pages failed to export"
+            );
+            return Err(ExportError::BatchPartial {
+                count: errors.len(),
+                detail: errors.join("\n"),
+            });
+        }
+        Ok(files)
+    }
+
+    /// Export a single page in the given format.
     pub fn export_page(
         page: &CanvasPage,
         format: ExportFormat,
@@ -222,36 +230,40 @@ impl Exporter {
                     ExportFormat::Svg => svg::render_svg(page),
                     ExportFormat::Json => serde_json::to_string_pretty(page)?,
                     other => {
-                        tracing::error!(format = ?other, "export_page 不支持的导出格式");
+                        tracing::error!(format = ?other, "export_page: unsupported export format");
                         return Err(ExportError::UnsupportedFormat(other));
                     }
                 };
                 std::fs::write(&file, content)?;
             }
         }
-        tracing::info!(?file, format = format.extension(), "页面已导出");
+        tracing::info!(?file, format = format.extension(), "page exported");
         Ok(file)
     }
 
-    /// 批量导出多页。
+    /// Batch export multiple pages.
     pub fn export_batch(
         pages: &[CanvasPage],
         format: ExportFormat,
         out_dir: &Path,
     ) -> Result<Vec<PathBuf>, ExportError> {
-        // L-12：批导出非原子——旧实现逐页 `?`，中途失败已导出部分页且无汇总。
-        // 改为全部尝试，收集错误，任一失败则 fail visibly 汇总（已导出文件保留，
-        // 调用方据 errors 决定重试/清理）。
+        // L-12: batch export is not atomic — the old impl used per-page `?`, so a mid-way
+        // failure left some pages exported with no summary. Now attempt all pages, collect
+        // errors, and fail visibly with a summary if any fail (already-exported files stay;
+        // the caller decides retry/cleanup based on errors).
         let mut files = Vec::with_capacity(pages.len());
         let mut errors: Vec<String> = Vec::new();
         for page in pages {
             match Self::export_page(page, format, out_dir) {
                 Ok(f) => files.push(f),
-                Err(e) => errors.push(format!("页面 '{}' 导出失败: {e}", page.name)),
+                Err(e) => errors.push(format!("page '{}' export failed: {e}", page.name)),
             }
         }
         if !errors.is_empty() {
-            tracing::error!(count = errors.len(), "export_batch: 部分页面导出失败");
+            tracing::error!(
+                count = errors.len(),
+                "export_batch: some pages failed to export"
+            );
             return Err(ExportError::BatchPartial {
                 count: errors.len(),
                 detail: errors.join("\n"),
@@ -260,7 +272,7 @@ impl Exporter {
         Ok(files)
     }
 
-    /// 异步批量导出（供任务队列调用）。
+    /// Async batch export (for task queue callers).
     pub async fn export_batch_async(
         pages: Vec<CanvasPage>,
         format: ExportFormat,
@@ -268,10 +280,10 @@ impl Exporter {
     ) -> Result<Vec<PathBuf>, ExportError> {
         tokio::task::spawn_blocking(move || Exporter::export_batch(&pages, format, &out_dir))
             .await
-            .map_err(|e| ExportError::RenderFailed(format!("阻塞任务失败: {e}")))?
+            .map_err(|e| ExportError::RenderFailed(format!("blocking task failed: {e}")))?
     }
 
-    /// 异步从 PenDocument 导出。
+    /// Async export from a PenDocument.
     pub async fn from_pen_document_async(
         doc: fd_canvas_core::PenDocument,
         format: ExportFormat,
@@ -279,7 +291,7 @@ impl Exporter {
     ) -> Result<Vec<PathBuf>, ExportError> {
         tokio::task::spawn_blocking(move || Self::from_pen_document(&doc, format, &out_dir))
             .await
-            .map_err(|e| ExportError::RenderFailed(format!("阻塞任务失败: {e}")))?
+            .map_err(|e| ExportError::RenderFailed(format!("blocking task failed: {e}")))?
     }
 }
 
@@ -342,7 +354,7 @@ mod tests {
         assert!(content.contains("font-size"));
     }
 
-    // E-21 回归：<title> 中 page.name 含 </title><script> 应被转义，不得执行脚本。
+    // E-21 regression: a page.name containing </title><script> inside <title> must be escaped, not executed.
     #[test]
     fn export_html_escapes_title_xss() {
         let tmp = tempdir().unwrap();
@@ -357,10 +369,16 @@ mod tests {
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(
             !content.contains("<script>alert(1)</script>"),
-            "原始 <script> 不得残留"
+            "raw <script> must not survive"
         );
-        assert!(content.contains("&lt;script&gt;"), "应被转义为实体");
-        assert!(content.contains("&lt;/title&gt;"), "</title> 应被转义");
+        assert!(
+            content.contains("&lt;script&gt;"),
+            "must be escaped to entities"
+        );
+        assert!(
+            content.contains("&lt;/title&gt;"),
+            "</title> must be escaped"
+        );
     }
 
     #[test]
@@ -405,7 +423,7 @@ mod tests {
         assert!(data.starts_with(b"%PDF"), "PDF magic bytes");
     }
 
-    // R-A15 回归：rect/circle 必须真正画入 PDF，不能只输出文字导致白纸。
+    // R-A15 regression: rect/circle must actually be drawn into the PDF, not emit text only and produce a blank page.
     fn pdf_content(page: &CanvasPage, dir: &Path) -> String {
         let file = Exporter::export_page(page, ExportFormat::Pdf, dir).unwrap();
         let data = std::fs::read(&file).unwrap();
@@ -446,14 +464,17 @@ mod tests {
         };
         let with_rect = pdf_content(&rect_page, tmp.path());
         let empty_pdf = pdf_content(&empty, tmp.path());
-        assert!(with_rect.contains(" re"), "rect 应生成 PDF re 矩形算子");
+        assert!(
+            with_rect.contains(" re"),
+            "rect must emit the PDF re rectangle operator"
+        );
         assert!(
             with_rect.contains(" rg"),
-            "fill #ff0000 应生成 rg 填充色算子"
+            "fill #ff0000 must emit the rg fill color operator"
         );
         assert!(
             !empty_pdf.contains(" re"),
-            "空页面不应含 re 矩形算子（对照基线）"
+            "empty page must not contain the re rectangle operator (control baseline)"
         );
     }
 
@@ -485,11 +506,11 @@ mod tests {
         let with_circle = pdf_content(&circle_page, tmp.path());
         assert!(
             with_circle.contains(" rg"),
-            "circle fill 应生成 rg 填充色算子"
+            "circle fill must emit the rg fill color operator"
         );
         assert!(
             with_circle.contains(" RG"),
-            "circle stroke 应生成 RG 描边色算子"
+            "circle stroke must emit the RG stroke color operator"
         );
     }
 
@@ -521,11 +542,11 @@ mod tests {
         let content = pdf_content(&page, tmp.path());
         assert!(
             content.starts_with("%PDF"),
-            "非法颜色不应 panic，仍输出有效 PDF"
+            "invalid color must not panic, still produce a valid PDF"
         );
     }
 
-    // R-10：CJK 文本检测。
+    // R-10: CJK text detection.
     #[test]
     fn text_has_cjk_detects_chinese() {
         assert!(pdf::text_has_cjk("登录页面"));
@@ -536,7 +557,7 @@ mod tests {
         assert!(!pdf::text_has_cjk("café résumé"));
     }
 
-    // R-10：含 CJK 文本页面需内嵌字体；纯 Latin 不嵌入（避免无谓开销）。
+    // R-10: pages containing CJK text need an embedded font; pure Latin skips embedding (avoiding needless overhead).
     #[test]
     fn page_has_cjk_text_detection() {
         let cjk_page = CanvasPage {
@@ -588,8 +609,8 @@ mod tests {
         assert!(!pdf::page_has_cjk_text(&latin_only));
     }
 
-    // R-10：CJK 文本 PDF 仍有效（真机有 PingFang 时嵌入，无时降级但不 panic）。
-    // 不强断言字形可见（依赖真机字体），只验证不崩且产出合法 PDF。
+    // R-10: PDF with CJK text stays valid (embeds PingFang when present on the machine, degrades without it but never panics).
+    // Deliberately not asserting visible glyphs (depends on real machine fonts), only that it does not crash and yields a valid PDF.
     #[test]
     fn render_pdf_cjk_text_produces_valid_pdf() {
         let tmp = tempdir().unwrap();
@@ -616,14 +637,19 @@ mod tests {
             }],
         };
         let content = pdf_content(&page, tmp.path());
-        assert!(content.starts_with("%PDF"), "CJK 文本应产出合法 PDF");
+        assert!(
+            content.starts_with("%PDF"),
+            "CJK text must produce a valid PDF"
+        );
     }
 
-    // FUNC-9：旋转 shape 导出 PDF 不应丢旋转。当前实现用 printpdf CTM
-    // (SetTransformationMatrix/TranslateRotate) 在 SaveGraphicsState 域内旋转。
-    // printpdf 0.12 serialize.rs 中 cm 算子未压缩（doc.compress() 被注释），
-    // 故可直接在 PDF 字节中检 " cm" 算子验证旋转矩阵已写入。
-    // pivot 取 shape 中心（与 SVG 路径 transform="rotate(r cx cy)" 对齐保视觉一致）。
+    // FUNC-9: rotating a shape must not lose the rotation on PDF export. The current impl
+    // rotates with printpdf CTM (SetTransformationMatrix/TranslateRotate) inside the
+    // SaveGraphicsState scope.
+    // In printpdf 0.12 serialize.rs the cm operator is uncompressed (doc.compress() is
+    // commented out), so we can check for the " cm" operator directly in the PDF bytes to
+    // verify the rotation matrix was written.
+    // The pivot is the shape center (aligned with the SVG path transform="rotate(r cx cy)" for visual consistency).
     #[test]
     fn pdf_export_rotated_shape_not_skipped() {
         let tmp = tempdir().unwrap();
@@ -650,28 +676,31 @@ mod tests {
             }],
         };
         let file = Exporter::export_page(&page, ExportFormat::Pdf, tmp.path()).unwrap();
-        assert!(file.exists(), "PDF 文件应已生成");
+        assert!(file.exists(), "PDF file should have been generated");
         let data = std::fs::read(&file).unwrap();
         assert!(data.starts_with(b"%PDF"), "PDF magic bytes");
         assert!(
             data.len() > 1000,
-            "旋转 rect PDF 应非平凡大小（>1000B），实际 {}B",
+            "rotated rect PDF should be non-trivial in size (>1000B), got {}B",
             data.len()
         );
         let content = String::from_utf8_lossy(&data);
         assert!(
             content.contains(" re"),
-            "旋转 rect 仍应生成 re 矩形算子（未被跳过）"
+            "rotated rect must still emit the re rectangle operator (not skipped)"
         );
         assert!(
             content.contains(" cm"),
-            "旋转 shape 应生成 cm CTM 算子（FUNC-9 旋转矩阵已写入）"
+            "rotated shape must emit the cm CTM operator (FUNC-9 rotation matrix written)"
         );
-        assert!(content.contains(" rg"), "fill #ff0000 应生成 rg 填充色算子");
+        assert!(
+            content.contains(" rg"),
+            "fill #ff0000 must emit the rg fill color operator"
+        );
     }
 
-    // R-11：跳过的不支持元素类型不再静默——PDF 仍生成但该元素缺失。
-    // 验证未知类型不 panic 且产出合法 PDF（跳过清单经 tracing warn 打印）。
+    // R-11: skipped unsupported element kinds are no longer silent — the PDF is still produced but the element is missing.
+    // Verifies unknown kinds do not panic and yield a valid PDF (skip list is logged via tracing warn).
     #[test]
     fn render_pdf_skips_unsupported_kind_safely() {
         let tmp = tempdir().unwrap();
@@ -718,13 +747,16 @@ mod tests {
         let content = pdf_content(&page, tmp.path());
         assert!(
             content.starts_with("%PDF"),
-            "含不支持元素的页面仍应产出合法 PDF"
+            "page with unsupported elements must still produce a valid PDF"
         );
-        assert!(content.contains(" re"), "支持的 rect 仍应正常导出");
+        assert!(
+            content.contains(" re"),
+            "supported rect must still export normally"
+        );
     }
 
-    // R-A16 回归：总像素超限（单边不超限）应拒绝渲染，防 1GB OOM。
-    // 9000×9000=81M px > 64M，但单边 < 16384，必须由总像素门控拦下。
+    // R-A16 regression: exceeding the total pixel limit (edge within limit) must refuse to render, preventing a 1GB OOM.
+    // 9000x9000=81M px > 64M, but each edge < 16384, so only the total-pixel gate can block it.
     #[test]
     fn render_png_rejects_total_pixels_over_limit() {
         let tmp = tempdir().unwrap();
@@ -736,11 +768,11 @@ mod tests {
             elements: vec![],
         };
         let res = Exporter::export_page(&huge, ExportFormat::Png, tmp.path());
-        let err = res.expect_err("9000×9000=81M px > 64M 应被总像素门控拒绝，不分配 1GB");
+        let err = res.expect_err("9000x9000=81M px > 64M must be rejected by the total-pixel gate without allocating 1GB");
         let msg = format!("{:#}", err);
         assert!(
-            msg.contains("总像素") || msg.contains("超出"),
-            "应报总像素超限，实际: {msg}"
+            msg.contains("total") || msg.contains("exceed"),
+            "should report total pixels over limit, got: {msg}"
         );
     }
 
@@ -806,7 +838,7 @@ mod tests {
             rotation: None,
         };
         let svg = svg::render_element_svg(&el);
-        assert!(svg.contains("未知元素"));
+        assert!(svg.contains("unknown element kind"));
     }
 
     #[test]
@@ -873,8 +905,8 @@ mod tests {
 
     #[test]
     fn from_pen_document_multi_page_streams() {
-        // PERF-4：多页逐页流式导出，每页产出独立文件，无全量 collect 峰值。
-        // 回归锁定：多页 from_pen_document 须逐页导出全部页（不漏页）。
+        // PERF-4: multi-page streaming export, each page producing an independent file, no full-collect peak.
+        // Regression lock: multi-page from_pen_document must export every page one by one (no pages dropped).
         let tmp = tempdir().unwrap();
         let mut doc = fd_canvas_core::PenDocument::new();
         for i in 0..5 {
@@ -889,12 +921,12 @@ mod tests {
             doc.add_page(page);
         }
         let files = Exporter::from_pen_document(&doc, ExportFormat::Svg, tmp.path()).unwrap();
-        assert_eq!(files.len(), 5, "5 页须全导出");
+        assert_eq!(files.len(), 5, "all 5 pages must be exported");
         for (i, f) in files.iter().enumerate() {
             let content = std::fs::read_to_string(f).unwrap();
             assert!(
                 content.contains(&format!("mark{i}")),
-                "第 {i} 页内容须对应: {content}"
+                "page {i} content must match: {content}"
             );
         }
     }
@@ -908,16 +940,16 @@ mod tests {
 
     #[test]
     fn sanitize_filename_empty_defaults_to_page() {
-        // E-20/P3：空名/全非法字符须回退 "page"，不得产出 ".svg" 隐藏文件。
+        // E-20/P3: empty name / all-illegal chars must fall back to "page", never produce a ".svg" hidden file.
         assert_eq!(util::sanitize_filename(""), "page");
-        assert_eq!(util::sanitize_filename("   "), "___"); // 3 空格→3 下划线非空
-        assert_eq!(util::sanitize_filename("///"), "___"); // 3 斜杠→3 下划线非空
-        assert_eq!(util::sanitize_filename("!!!"), "___"); // 3 感叹号→3 下划线非空
+        assert_eq!(util::sanitize_filename("   "), "___"); // 3 spaces -> 3 underscores, non-empty
+        assert_eq!(util::sanitize_filename("///"), "___"); // 3 slashes -> 3 underscores, non-empty
+        assert_eq!(util::sanitize_filename("!!!"), "___"); // 3 exclamation marks -> 3 underscores, non-empty
     }
 
     #[test]
     fn export_empty_name_page_not_hidden_file() {
-        // E-20/P3：空名页面导出文件名须为 "page.svg" 非 ".svg"（隐藏文件）。
+        // E-20/P3: empty-name page must export as "page.svg", not ".svg" (hidden file).
         let tmp = tempdir().unwrap();
         let page = CanvasPage {
             id: "p1".into(),
@@ -933,11 +965,11 @@ mod tests {
             .collect();
         assert!(
             files.iter().any(|f| f == "page.svg"),
-            "空名导出 page.svg 非 .svg: {files:?}"
+            "empty name must export page.svg, not .svg: {files:?}"
         );
         assert!(
             !files.iter().any(|f| f == ".svg"),
-            "不得产出隐藏 .svg: {files:?}"
+            "must not produce a hidden .svg: {files:?}"
         );
     }
 
@@ -1009,7 +1041,7 @@ mod tests {
 
     #[test]
     fn rotation_in_svg_text() {
-        // FUNC-9：text arm 原独立分支不消费 attrs，丢旋转。修后须带 transform。
+        // FUNC-9: the text arm was originally a separate branch that did not consume attrs, dropping rotation. After the fix it must carry transform.
         let el = CanvasElement {
             kind: "text".into(),
             x: 10.0,
@@ -1029,14 +1061,17 @@ mod tests {
         let svg = svg::render_element_svg(&el);
         assert!(
             svg.contains("rotate(30"),
-            "text 旋转须输出 transform: {svg}"
+            "rotated text must output transform: {svg}"
         );
-        assert!(svg.contains("hello"), "text 内容须保留: {svg}");
+        assert!(
+            svg.contains("hello"),
+            "text content must be preserved: {svg}"
+        );
     }
 
     #[test]
     fn rotation_zero_svg_text_no_transform() {
-        // rotation=0 或 None 不应输出 transform（避免无意义旋转属性）。
+        // rotation=0 or None must not output transform (avoiding a meaningless rotation attribute).
         let mut el = CanvasElement {
             kind: "text".into(),
             x: 10.0,
@@ -1056,13 +1091,13 @@ mod tests {
         let svg = svg::render_element_svg(&el);
         assert!(
             !svg.contains("transform"),
-            "rotation=0 不应输出 transform: {svg}"
+            "rotation=0 must not output transform: {svg}"
         );
         el.rotation = None;
         let svg = svg::render_element_svg(&el);
         assert!(
             !svg.contains("transform"),
-            "rotation=None 不应输出 transform: {svg}"
+            "rotation=None must not output transform: {svg}"
         );
     }
 
@@ -1102,7 +1137,7 @@ mod tests {
 
     #[test]
     fn resolve_color_var_dot_form() {
-        // to_css_value() 产出 dot 形式 var(--color.accent)
+        // to_css_value() produces the dot form var(--color.accent)
         let reg = apple_hig_registry();
         let v = util::resolve_color_var(&Some("var(--color.accent)".into()), &reg);
         assert_eq!(v.as_deref(), Some("#007AFF"));
@@ -1110,7 +1145,7 @@ mod tests {
 
     #[test]
     fn resolve_color_var_dash_form() {
-        // parse-html 产出 dash 形式 var(--color-accent)
+        // parse-html produces the dash form var(--color-accent)
         let reg = apple_hig_registry();
         let v = util::resolve_color_var(&Some("var(--color-accent)".into()), &reg);
         assert_eq!(v.as_deref(), Some("#007AFF"));
@@ -1135,7 +1170,7 @@ mod tests {
 
     #[test]
     fn from_pen_document_with_tokens_resolves_svg() {
-        // usvg 无法解析 var(--)；导出前必须替换为实际色值（#8）
+        // usvg cannot parse var(--); it must be replaced with the actual color value before export (#8)
         let mut doc = fd_canvas_core::PenDocument::new();
         let mut page = fd_canvas_core::Page::new("p1", "Token", 100.0, 100.0);
         let mut n = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 50.0, 50.0);
@@ -1150,17 +1185,17 @@ mod tests {
         let svg = std::fs::read_to_string(&files[0]).unwrap();
         assert!(
             svg.contains("fill=\"#007AFF\""),
-            "SVG 应含解析后的实际色值: {svg}"
+            "SVG must contain the resolved actual color value: {svg}"
         );
         assert!(
             !svg.contains("var(--"),
-            "SVG 不应残留未解析 CSS 变量: {svg}"
+            "SVG must not retain unresolved CSS variables: {svg}"
         );
     }
 
     #[test]
     fn from_pen_document_with_tokens_png_resolved() {
-        // Token 驱动的设计稿导出 PNG：颜色已解析，不再是回退黑色
+        // Token-driven design export to PNG: colors are resolved, no longer falling back to black
         let mut doc = fd_canvas_core::PenDocument::new();
         let mut page = fd_canvas_core::Page::new("p1", "Png", 40.0, 40.0);
         let mut n = fd_canvas_core::PenNode::rect("n1", 0.0, 0.0, 40.0, 40.0);
@@ -1181,7 +1216,7 @@ mod tests {
 
     #[test]
     fn sanitize_image_url_whitelist() {
-        // R-5：data:image/* 放行，相对路径放行
+        // R-5: data:image/* allowed, relative paths allowed
         assert_eq!(
             util::sanitize_image_url("data:image/png;base64,xxx"),
             "data:image/png;base64,xxx"
@@ -1196,7 +1231,7 @@ mod tests {
 
     #[test]
     fn sanitize_image_url_rejects_executable_and_remote() {
-        // R-5：javascript/data:text/html/http(s)/file 一律拒（返空串）
+        // R-5: javascript/data:text/html/http(s)/file all rejected (returns empty string)
         assert_eq!(util::sanitize_image_url("javascript:alert(1)"), "");
         assert_eq!(
             util::sanitize_image_url("data:text/html,<script>alert(1)</script>"),
@@ -1228,7 +1263,7 @@ mod tests {
 
     #[test]
     fn svg_image_href_injection_blocked() {
-        // R-5 端到端：image 元素的恶意 href 经 sanitize_image_url 拦截
+        // R-5 end-to-end: a malicious href on an image element is intercepted by sanitize_image_url
         let el = CanvasElement {
             kind: "image".into(),
             x: 0.0,

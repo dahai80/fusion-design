@@ -1,10 +1,12 @@
-//! fd-skills：AI 设计 Skill 系统。trait 化能力 + SkillContext trait 解耦 inference client。
+//! fd-skills: AI design skill system. Trait-based capabilities + SkillContext trait
+//! to decouple from the inference client.
 //!
-//! ARCH-11：skill 系统（7 skill + SkillRegistry + SkillOutput 类型）+ 纯 helper
-//!（parse_ui_json/repair_model_json/strip_code_fence/encode_image_base64/
-//! ui_generator_system_prompt/DEFAULT_MAX_TOKENS）从 fd-ai-adapter 迁出。
-//! SkillContext 改对象安全 trait，fd-ai-adapter impl SkillContext for FusionMlxClient
-//! 反向单向依赖（fd-skills ← adapter）。fd-skills 零 HTTP，纯 trait + helper + 解析逻辑。
+//! ARCH-11: skill system (7 skills + SkillRegistry + SkillOutput types) + pure helpers
+//! (parse_ui_json/repair_model_json/strip_code_fence/encode_image_base64/
+//! ui_generator_system_prompt/DEFAULT_MAX_TOKENS) migrated out of fd-ai-adapter.
+//! SkillContext became an object-safe trait; fd-ai-adapter implements
+//! SkillContext for FusionMlxClient as a reverse one-way dependency
+//! (fd-skills ← adapter). fd-skills has zero HTTP: pure traits + helpers + parsing logic.
 
 use std::collections::HashMap;
 
@@ -13,17 +15,17 @@ use serde::{Deserialize, Serialize};
 use fd_canvas_core::{NodeKind, Page, PenDocument, PenNode};
 use fd_design_system::DesignSystem;
 
-/// 默认 max_tokens（生成上限）。A5：旧实现散落 9 处硬编码 4096，提为常量统一引用。
+/// Default max_tokens (generation cap). A5: the old implementation hardcoded 4096 in 9 places; promoted to one shared constant.
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-/// SkillContext trait：抽象 chat 能力，解耦 skill 与具体 inference client。
+/// SkillContext trait: abstracts the chat capability, decoupling skills from a concrete inference client.
 ///
-/// 对象安全（无泛型/Self），SkillRegistry 用 `&dyn SkillContext` 避免泛型蔓延。
-/// fd-ai-adapter `impl SkillContext for FusionMlxClient` 反向实现本 trait。
+/// Object-safe (no generics/Self); SkillRegistry uses `&dyn SkillContext` to avoid generic sprawl.
+/// fd-ai-adapter `impl SkillContext for FusionMlxClient` implements this trait in reverse.
 pub trait SkillContext: Send + Sync {
-    /// 同步 chat 请求。
+    /// Synchronous chat request.
     fn chat(&self, model: &str, sys: &str, user: &str, max_tokens: u32) -> anyhow::Result<String>;
-    /// 异步 chat 请求（返回 boxed future，借用 self + 入参同生命周期）。
+    /// Async chat request (returns a boxed future borrowing self with the same lifetime as the inputs).
     fn chat_async<'a>(
         &'a self,
         model: &'a str,
@@ -31,7 +33,7 @@ pub trait SkillContext: Send + Sync {
         user: &'a str,
         max_tokens: u32,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>;
-    /// 多模态异步 chat（图片 + 文字）。
+    /// Multimodal async chat (image + text).
     fn chat_with_image_async<'a>(
         &'a self,
         model: &'a str,
@@ -40,7 +42,7 @@ pub trait SkillContext: Send + Sync {
         image_base64: &'a str,
         max_tokens: u32,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>;
-    /// 多模态同步 chat（图片 + 文字）。
+    /// Multimodal sync chat (image + text).
     fn chat_with_image(
         &self,
         model: &str,
@@ -49,43 +51,43 @@ pub trait SkillContext: Send + Sync {
         image_base64: &str,
         max_tokens: u32,
     ) -> anyhow::Result<String>;
-    /// 生成设计 Token 的 CSS Custom Properties 片段，注入 system prompt。
-    /// `design_system` 作参数传入（原 SkillContext struct 读字段，trait 化后改参数）。
-    /// 返回 None 如果没有激活设计系统。
+    /// Generates the design-token CSS custom properties fragment injected into the system prompt.
+    /// `design_system` is passed as an argument (the original SkillContext struct read a field; the trait takes a parameter).
+    /// Returns None when no design system is active.
     fn token_prompt_fragment(&self, design_system: Option<&DesignSystem>) -> Option<String>;
 }
 
-/// Skill 输出类型。
+/// Skill output types.
 #[derive(Debug, Clone)]
 pub enum SkillOutput {
-    /// 完整页面文档
+    /// Full page document
     Document(PenDocument),
-    /// 局部编辑的节点 JSON
+    /// Partial-edit node JSON
     PartialEdit(String),
-    /// 多方案对比（3 份文档）
+    /// Multi-variant comparison (3 documents)
     MultiVariants([PenDocument; 3]),
-    /// 设计规范文档（交互规范/组件规范/页面架构）
+    /// Spec document (interaction/component specs, page architecture)
     SpecDoc(SpecDocument),
-    /// 页面流程批量生成（多页连贯流程）
+    /// Batch page-flow generation (multi-page coherent flow)
     PageFlow(Vec<PenDocument>),
 }
 
-/// 设计规范文档。
+/// Spec document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecDocument {
-    /// 文档标题。
+    /// Document title.
     pub title: String,
-    /// 页面架构描述。
+    /// Page architecture description.
     pub page_architecture: String,
-    /// 交互规范条目。
+    /// Interaction spec entries.
     pub interaction_specs: Vec<InteractionSpec>,
-    /// 组件规范条目。
+    /// Component spec entries.
     pub component_specs: Vec<ComponentSpec>,
-    /// 设计 Token 引用摘要。
+    /// Design token usage summary.
     pub token_summary: String,
 }
 
-/// 交互规范条目。
+/// Interaction spec entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionSpec {
     pub id: String,
@@ -98,7 +100,7 @@ pub struct InteractionSpec {
     pub notes: Option<String>,
 }
 
-/// 组件规范条目。
+/// Component spec entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentSpec {
     pub id: String,
@@ -111,7 +113,7 @@ pub struct ComponentSpec {
     pub accessibility: Option<String>,
 }
 
-/// 组件属性。
+/// Component property.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentProp {
     pub name: String,
@@ -122,24 +124,24 @@ pub struct ComponentProp {
     pub description: Option<String>,
 }
 
-/// AI 设计 Skill trait — 每个 Skill 实现一个设计能力。
+/// AI design skill trait — each Skill implements one design capability.
 ///
-/// `execute`/`execute_async` 接收 `&dyn SkillContext`（对象安全 trait），
-/// skill 自持 `model: String` 字段（Ruling #16），`design_system` 作参数传入
-///（Ruling #15：token_prompt_fragment 不再读 struct 字段）。
+/// `execute`/`execute_async` take `&dyn SkillContext` (object-safe trait);
+/// each skill holds its own `model: String` field (Ruling #16), and `design_system`
+/// is passed in as an argument (Ruling #15: token_prompt_fragment no longer reads a struct field).
 pub trait DesignSkill: Send + Sync {
-    /// Skill 唯一标识。
+    /// Unique skill id.
     fn id(&self) -> &str;
-    /// Skill 显示名称。
+    /// Skill display name.
     fn label(&self) -> &str;
-    /// 同步执行。
+    /// Synchronous execution.
     fn execute(
         &self,
         ctx: &dyn SkillContext,
         design_system: Option<&DesignSystem>,
         input: &str,
     ) -> anyhow::Result<SkillOutput>;
-    /// 异步执行（默认实现：委托给同步版本，input move 进 async 闭包后借）。
+    /// Async execution (default impl: delegates to the sync version, moving input into the async closure and borrowing it).
     fn execute_async<'a>(
         &'a self,
         ctx: &'a dyn SkillContext,
@@ -151,7 +153,7 @@ pub trait DesignSkill: Send + Sync {
     }
 }
 
-/// Skill 注册中心：按 id 查找并调度 Skill。
+/// Skill registry: looks up and dispatches skills by id.
 pub struct SkillRegistry {
     skills: HashMap<String, Box<dyn DesignSkill>>,
 }
@@ -169,25 +171,25 @@ impl SkillRegistry {
         }
     }
 
-    /// 注册一个 Skill。
+    /// Registers a skill.
     pub fn register(&mut self, skill: Box<dyn DesignSkill>) {
         self.skills.insert(skill.id().to_string(), skill);
     }
 
-    /// 按 id 查找 Skill。
+    /// Looks up a skill by id.
     pub fn get(&self, id: &str) -> Option<&dyn DesignSkill> {
         self.skills.get(id).map(|s| s.as_ref())
     }
 
-    /// 列出所有已注册 Skill 的 id。
+    /// Lists ids of all registered skills.
     pub fn list(&self) -> Vec<&str> {
         self.skills.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 注册内置 Skill（text-to-ui, image-to-ui, partial-edit, local-edit,
-    /// multi-variants, spec-doc, page-flow）。
+    /// Registers the builtin skills (text-to-ui, image-to-ui, partial-edit, local-edit,
+    /// multi-variants, spec-doc, page-flow).
     ///
-    /// Ruling #16：7 skill 持 `model: String` 字段，`register_builtin(model)` 传入。
+    /// Ruling #16: the 7 skills hold a `model: String` field, passed in via `register_builtin(model)`.
     pub fn register_builtin(&mut self, model: &str) {
         self.register(Box::new(TextToUiSkill::new(model)));
         self.register(Box::new(ImageToUiSkill::new(model)));
@@ -199,9 +201,9 @@ impl SkillRegistry {
     }
 }
 
-// ── 内置 Skill 实现 ──
+// ── Builtin skill implementations ──
 
-/// 文生 UI Skill。Ruling #16：持 model 字段。
+/// Text-to-UI skill. Ruling #16: holds a model field.
 pub struct TextToUiSkill {
     model: String,
 }
@@ -214,7 +216,7 @@ impl TextToUiSkill {
     }
 }
 
-/// 图生 UI Skill。
+/// Image-to-UI skill.
 pub struct ImageToUiSkill {
     model: String,
 }
@@ -227,7 +229,7 @@ impl ImageToUiSkill {
     }
 }
 
-/// 局部编辑 Skill。
+/// Partial-edit skill.
 pub struct PartialEditSkill {
     model: String,
 }
@@ -240,9 +242,9 @@ impl PartialEditSkill {
     }
 }
 
-/// 本地编辑 Skill：框选多节点 + 自然语言指令 → 批量修改。
+/// Local-edit skill: marquee-select multiple nodes + natural-language instruction → batch modification.
 ///
-/// input 格式: "node1_json\n---\nnode2_json\n---\n...|||instruction"
+/// input format: "node1_json\n---\nnode2_json\n---\n...|||instruction"
 pub struct LocalEditSkill {
     model: String,
 }
@@ -255,9 +257,9 @@ impl LocalEditSkill {
     }
 }
 
-/// 设计规范文档生成 Skill：从 PenDocument JSON 生成交互规范/组件规范/页面架构文档。
+/// Spec-doc skill: generates an interaction/component spec + page architecture document from PenDocument JSON.
 ///
-/// input 格式: "pen_document_json|spec_title"
+/// input format: "pen_document_json|spec_title"
 pub struct SpecDocSkill {
     model: String,
 }
@@ -270,10 +272,10 @@ impl SpecDocSkill {
     }
 }
 
-/// 页面流程批量生成 Skill：生成完整页面流程序列（首页→列表→详情→弹窗），统一风格。
+/// Page-flow skill: generates a full page-flow sequence (home → list → detail → dialog) in a consistent style.
 ///
-/// input 格式: "flow_desc|style_hint"
-/// flow_desc 示例: "电商应用:首页,商品列表,商品详情,购物车,结算"
+/// input format: "flow_desc|style_hint"
+/// flow_desc example: "e-commerce app:home,product list,product detail,cart,checkout"
 pub struct PageFlowSkill {
     model: String,
 }
@@ -286,7 +288,7 @@ impl PageFlowSkill {
     }
 }
 
-/// 多方案对比 Skill。
+/// Multi-variant comparison skill.
 pub struct MultiVariantsSkill {
     model: String,
 }
@@ -299,13 +301,14 @@ impl MultiVariantsSkill {
     }
 }
 
-// ── 7 Skill trait 实现（逐字迁代码体，改 3 处：self.model / design_system 参数 / &dyn SkillContext）──
+// ── 7 skill trait impls (bodies migrated verbatim; 3 changes: self.model / design_system parameter / &dyn SkillContext) ──
 
 impl DesignSkill for TextToUiSkill {
     fn id(&self) -> &str {
         "text-to-ui"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "文生 UI"
     }
 
@@ -315,15 +318,16 @@ impl DesignSkill for TextToUiSkill {
         design_system: Option<&DesignSystem>,
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
-        let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
-            .to_string();
+        let mut sys =
+            "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}. \
+Output JSON only, no extra text. page contains width/height (default 1440x900); each entry in the \
+nodes list has {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}."
+                .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user = format!("生成页面。需求：{input}");
+        let user = format!("Generate a page. Requirement: {input}");
         let resp = ctx.chat(&self.model, &sys, &user, 2048)?;
         let doc = parse_ui_json(&resp, "generated")?;
         Ok(SkillOutput::Document(doc))
@@ -337,15 +341,16 @@ impl DesignSkill for TextToUiSkill {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
     {
         Box::pin(async move {
-            let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
-                .to_string();
+            let mut sys =
+                "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}. \
+Output JSON only, no extra text. page contains width/height (default 1440x900); each entry in the \
+nodes list has {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}."
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            let user = format!("生成页面。需求：{input}");
+            let user = format!("Generate a page. Requirement: {input}");
             let resp = ctx.chat_async(&self.model, &sys, &user, 2048).await?;
             let doc = parse_ui_json(&resp, "generated")?;
             Ok(SkillOutput::Document(doc))
@@ -358,6 +363,7 @@ impl DesignSkill for ImageToUiSkill {
         "image-to-ui"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "图生 UI"
     }
 
@@ -371,34 +377,36 @@ impl DesignSkill for ImageToUiSkill {
         let sketch_path = parts[0];
         let hint = parts.get(1).unwrap_or(&"");
         let page_name = parts.get(2).unwrap_or(&"generated");
-        let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字与 markdown 围栏。\
-page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
-示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+        let mut sys =
+            "You are the fusion-design UI generator. Based on the sketch image and notes \
+provided by the user, output strict JSON: {\"page\":{...}}. Output JSON only, no extra text and no \
+markdown fences. page contains width/height (default 1440x900); each entry in the nodes list has \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}. Example: \
+{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
 {\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
 {\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
-]}}。"
-            .to_string();
+]}}."
+                .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user =
-            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let user = format!(
+            "Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\" based on the sketch image above."
+        );
         let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
             Ok(b64) => {
                 tracing::info!(
                     sketch_path,
                     bytes = b64.len(),
-                    "image-to-ui: 已加载草图，发送真实多模态请求"
+                    "image-to-ui: sketch loaded, sending real multimodal request"
                 );
                 ctx.chat_with_image(&self.model, &sys, &user, &b64, DEFAULT_MAX_TOKENS)?
             }
             Err(e) => {
-                tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
+                tracing::warn!(sketch_path, error = %e, "image-to-ui: sketch load failed, falling back to text description");
                 let user_text = format!(
-                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                    "Sketch path: {sketch_path} (unreadable: {e})\nAdditional notes: {hint}\nGenerate the UI layout for page \"{page_name}\"."
                 );
                 ctx.chat(&self.model, &sys, &user_text, 2048)?
             }
@@ -419,37 +427,38 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
             let sketch_path = parts[0];
             let hint = parts.get(1).unwrap_or(&"");
             let page_name = parts.get(2).unwrap_or(&"generated");
-            let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字与 markdown 围栏。\
-page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
-示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+            let mut sys =
+                "You are the fusion-design UI generator. Based on the sketch image and notes \
+provided by the user, output strict JSON: {\"page\":{...}}. Output JSON only, no extra text and no \
+markdown fences. page contains width/height (default 1440x900); each entry in the nodes list has \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}. Example: \
+{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
 {\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
 {\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
-]}}。"
-                .to_string();
+]}}."
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
             let user = format!(
-                "补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。"
+                "Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\" based on the sketch image above."
             );
-            // R-13：async 上下文用 tokio::fs 异步编码，不阻塞 worker 线程。
+            // R-13: in async context use tokio::fs for async encoding, so the worker thread is not blocked.
             let resp = match encode_image_base64_async(std::path::Path::new(sketch_path)).await {
                 Ok(b64) => {
                     tracing::info!(
                         sketch_path,
                         bytes = b64.len(),
-                        "image-to-ui: 已加载草图，发送真实多模态请求"
+                        "image-to-ui: sketch loaded, sending real multimodal request"
                     );
                     ctx.chat_with_image_async(&self.model, &sys, &user, &b64, DEFAULT_MAX_TOKENS)
                         .await?
                 }
                 Err(e) => {
-                    tracing::warn!(sketch_path, error = %e, "image-to-ui: 草图加载失败，回退文字描述");
+                    tracing::warn!(sketch_path, error = %e, "image-to-ui: sketch load failed, falling back to text description");
                     let user_text = format!(
-                        "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                    "Sketch path: {sketch_path} (unreadable: {e})\nAdditional notes: {hint}\nGenerate the UI layout for page \"{page_name}\"."
                     );
                     ctx.chat_async(&self.model, &sys, &user_text, 2048).await?
                 }
@@ -465,6 +474,7 @@ impl DesignSkill for PartialEditSkill {
         "partial-edit"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "局部编辑"
     }
 
@@ -474,13 +484,16 @@ impl DesignSkill for PartialEditSkill {
         _design_system: Option<&DesignSystem>,
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
-        // input 格式: "node_json|instruction"
+        // input format: "node_json|instruction"
         let parts: Vec<&str> = input.splitn(2, '|').collect();
         let node_json = parts[0];
-        let instruction = parts.get(1).unwrap_or(&"修改为更合适的样式");
-        let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
-输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
-        let user = format!("节点：{node_json}\n指令：{instruction}");
+        let instruction = parts
+            .get(1)
+            .unwrap_or(&"Restyle it to a more suitable look");
+        let sys = "You are the fusion-design partial editor. Input is one node JSON plus an edit \
+instruction; output the modified node JSON (keep the original fields, change only the fields the \
+instruction involves). Output JSON only.";
+        let user = format!("Node: {node_json}\nInstruction: {instruction}");
         let resp = ctx.chat(&self.model, sys, &user, 1024)?;
         Ok(SkillOutput::PartialEdit(resp))
     }
@@ -495,10 +508,14 @@ impl DesignSkill for PartialEditSkill {
         Box::pin(async move {
             let parts: Vec<&str> = input.splitn(2, '|').collect();
             let node_json = parts[0];
-            let instruction = parts.get(1).unwrap_or(&"修改为更合适的样式");
-            let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
-输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
-            let user = format!("节点：{node_json}\n指令：{instruction}");
+            let instruction = parts
+                .get(1)
+                .unwrap_or(&"Restyle it to a more suitable look");
+            let sys =
+                "You are the fusion-design partial editor. Input is one node JSON plus an edit \
+instruction; output the modified node JSON (keep the original fields, change only the fields the \
+instruction involves). Output JSON only.";
+            let user = format!("Node: {node_json}\nInstruction: {instruction}");
             let resp = ctx.chat_async(&self.model, sys, &user, 1024).await?;
             Ok(SkillOutput::PartialEdit(resp))
         })
@@ -510,6 +527,7 @@ impl DesignSkill for LocalEditSkill {
         "local-edit"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "本地编辑"
     }
 
@@ -520,14 +538,15 @@ impl DesignSkill for LocalEditSkill {
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
         let (nodes_part, instruction) = parse_local_edit_input(input);
-        let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。"
+        let mut sys = "You are the fusion-design local editor. Input is a JSON array of multiple \
+nodes plus an edit instruction; output the modified node JSON array (keep the original fields, \
+change only the fields the instruction involves). Output a JSON array only."
             .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user = format!("选中节点：\n{nodes_part}\n\n编辑指令：{instruction}");
+        let user = format!("Selected nodes:\n{nodes_part}\n\nEdit instruction: {instruction}");
         let resp = ctx.chat(&self.model, &sys, &user, 2048)?;
         Ok(SkillOutput::PartialEdit(resp))
     }
@@ -541,22 +560,24 @@ impl DesignSkill for LocalEditSkill {
     {
         Box::pin(async move {
             let (nodes_part, instruction) = parse_local_edit_input(&input);
-            let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。"
-                .to_string();
+            let mut sys =
+                "You are the fusion-design local editor. Input is a JSON array of multiple \
+nodes plus an edit instruction; output the modified node JSON array (keep the original fields, \
+change only the fields the instruction involves). Output a JSON array only."
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            let user = format!("选中节点：\n{nodes_part}\n\n编辑指令：{instruction}");
+            let user = format!("Selected nodes:\n{nodes_part}\n\nEdit instruction: {instruction}");
             let resp = ctx.chat_async(&self.model, &sys, &user, 2048).await?;
             Ok(SkillOutput::PartialEdit(resp))
         })
     }
 }
 
-/// 解析 local-edit 输入格式。
-/// 格式: "node_jsons|||instruction" 或 "node_jsons|instruction"（向后兼容）
+/// Parses the local-edit input format.
+/// Format: "node_jsons|||instruction" or "node_jsons|instruction" (backward compatible)
 pub fn parse_local_edit_input(input: &str) -> (String, &str) {
     if let Some((nodes, instr)) = input.splitn(2, "|||").collect::<Vec<_>>().split_first() {
         if !instr.is_empty() {
@@ -565,7 +586,9 @@ pub fn parse_local_edit_input(input: &str) -> (String, &str) {
     }
     let parts: Vec<&str> = input.splitn(2, '|').collect();
     let nodes = parts[0].to_string();
-    let instr = parts.get(1).unwrap_or(&"修改为更合适的样式");
+    let instr = parts
+        .get(1)
+        .unwrap_or(&"Restyle it to a more suitable look");
     (nodes, instr)
 }
 
@@ -574,6 +597,7 @@ impl DesignSkill for SpecDocSkill {
         "spec-doc"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "设计规范文档"
     }
 
@@ -584,22 +608,23 @@ impl DesignSkill for SpecDocSkill {
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
         let (doc_json, title) = parse_spec_doc_input(input);
-        let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
-分析其页面结构和节点，输出严格 JSON：{\"title\":\"...\",\"page_architecture\":\"...\",\
-\"interaction_specs\":[...],\"component_specs\":[...],\"token_summary\":\"...\"}。\
-只输出 JSON，禁止额外文字。\n\n\
-interaction_specs 每项含：id, element, event, behavior, animation?, notes?\n\
-component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
-规范要求：\n\
-1. 为每个可交互节点（按钮/输入框/链接等）生成交互规范\n\
-2. 为每种组件类型生成组件规范，包含属性、变体、无障碍说明\n\
-3. 页面架构用文字描述布局层次和导航关系\n\
-4. token_summary 汇总设计系统 Token 使用情况".to_string();
+        let mut sys = "You are the fusion-design design-spec document generator. Input is a \
+PenDocument JSON; analyze its page structure and nodes, and output strict JSON: \
+{\"title\":\"...\",\"page_architecture\":\"...\",\"interaction_specs\":[...],\
+\"component_specs\":[...],\"token_summary\":\"...\"}. Output JSON only, no extra text.\n\n\
+Each interaction_specs entry contains: id, element, event, behavior, animation?, notes?\n\
+Each component_specs entry contains: id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
+Requirements:\n\
+1. Generate an interaction spec for every interactive node (buttons/inputs/links, etc.)\n\
+2. Generate a component spec for each component type, covering props, variants, and accessibility notes\n\
+3. Describe the page architecture in text: layout hierarchy and navigation relationships\n\
+4. token_summary summarizes design-system token usage".to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
+        let user =
+            format!("PenDocument: {doc_json}\n\nGenerate the design spec document \"{title}\".");
         let resp = ctx.chat(&self.model, &sys, &user, DEFAULT_MAX_TOKENS)?;
         let spec = parse_spec_doc_json(&resp, title)?;
         Ok(SkillOutput::SpecDoc(spec))
@@ -614,22 +639,24 @@ component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?
     {
         Box::pin(async move {
             let (doc_json, title) = parse_spec_doc_input(&input);
-            let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
-分析其页面结构和节点，输出严格 JSON：{\"title\":\"...\",\"page_architecture\":\"...\",\
-\"interaction_specs\":[...],\"component_specs\":[...],\"token_summary\":\"...\"}。\
-只输出 JSON，禁止额外文字。\n\n\
-interaction_specs 每项含：id, element, event, behavior, animation?, notes?\n\
-component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
-规范要求：\n\
-1. 为每个可交互节点（按钮/输入框/链接等）生成交互规范\n\
-2. 为每种组件类型生成组件规范，包含属性、变体、无障碍说明\n\
-3. 页面架构用文字描述布局层次和导航关系\n\
-4. token_summary 汇总设计系统 Token 使用情况".to_string();
+            let mut sys = "You are the fusion-design design-spec document generator. Input is a \
+PenDocument JSON; analyze its page structure and nodes, and output strict JSON: \
+{\"title\":\"...\",\"page_architecture\":\"...\",\"interaction_specs\":[...],\
+\"component_specs\":[...],\"token_summary\":\"...\"}. Output JSON only, no extra text.\n\n\
+Each interaction_specs entry contains: id, element, event, behavior, animation?, notes?\n\
+Each component_specs entry contains: id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
+Requirements:\n\
+1. Generate an interaction spec for every interactive node (buttons/inputs/links, etc.)\n\
+2. Generate a component spec for each component type, covering props, variants, and accessibility notes\n\
+3. Describe the page architecture in text: layout hierarchy and navigation relationships\n\
+4. token_summary summarizes design-system token usage".to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
+            let user = format!(
+                "PenDocument: {doc_json}\n\nGenerate the design spec document \"{title}\"."
+            );
             let resp = ctx
                 .chat_async(&self.model, &sys, &user, DEFAULT_MAX_TOKENS)
                 .await?;
@@ -642,6 +669,7 @@ component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?
 pub fn parse_spec_doc_input(input: &str) -> (&str, &str) {
     let parts: Vec<&str> = input.splitn(2, '|').collect();
     let doc_json = parts[0];
+    // i18n: user-facing
     let title = parts.get(1).unwrap_or(&"设计规范文档");
     (doc_json, title)
 }
@@ -746,7 +774,7 @@ pub fn parse_spec_doc_json(json: &str, fallback_title: &str) -> anyhow::Result<S
         title = %title,
         interactions = interaction_specs.len(),
         components = component_specs.len(),
-        "parse_spec_doc_json: 规范文档解析完成"
+        "parse_spec_doc_json: spec document parsed"
     );
 
     Ok(SpecDocument {
@@ -763,6 +791,7 @@ impl DesignSkill for PageFlowSkill {
         "page-flow"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "页面流程生成"
     }
 
@@ -777,13 +806,13 @@ impl DesignSkill for PageFlowSkill {
         let text_skill = TextToUiSkill::new(&self.model);
         let mut docs = Vec::with_capacity(pages.len());
         for page_name in &pages {
-            let prompt = format!("{flow_desc}（页面：{page_name}，风格：{style_hint}）");
+            let prompt = format!("{flow_desc} (page: {page_name}, style: {style_hint})");
             match text_skill.execute(ctx, design_system, &prompt)? {
                 SkillOutput::Document(d) => docs.push(d),
-                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+                _ => anyhow::bail!("text-to-ui returned non-Document"),
             }
         }
-        tracing::info!(count = docs.len(), "page-flow: 流程生成完成");
+        tracing::info!(count = docs.len(), "page-flow: flow generation complete");
         Ok(SkillOutput::PageFlow(docs))
     }
 
@@ -800,13 +829,13 @@ impl DesignSkill for PageFlowSkill {
             let text_skill = TextToUiSkill::new(&self.model);
             let mut docs = Vec::with_capacity(pages.len());
             for page_name in &pages {
-                let prompt = format!("{flow_desc}（页面：{page_name}，风格：{style_hint}）");
+                let prompt = format!("{flow_desc} (page: {page_name}, style: {style_hint})");
                 match text_skill.execute_async(ctx, design_system, prompt).await? {
                     SkillOutput::Document(d) => docs.push(d),
-                    _ => anyhow::bail!("text-to-ui 返回非 Document"),
+                    _ => anyhow::bail!("text-to-ui returned non-Document"),
                 }
             }
-            tracing::info!(count = docs.len(), "page-flow: 流程生成完成");
+            tracing::info!(count = docs.len(), "page-flow: flow generation complete");
             Ok(SkillOutput::PageFlow(docs))
         })
     }
@@ -815,15 +844,17 @@ impl DesignSkill for PageFlowSkill {
 pub fn parse_page_flow_input(input: &str) -> (&str, &str) {
     let parts: Vec<&str> = input.splitn(2, '|').collect();
     let flow_desc = parts[0];
+    // i18n: user-facing
     let style = parts.get(1).unwrap_or(&"简约");
     (flow_desc, style)
 }
 
-/// 从流程描述中提取页面列表。
-/// 格式: "应用名:页面1,页面2,页面3" 或直接 "页面1,页面2,页面3"
+/// Extracts the page list from a flow description.
+/// Format: "app_name:page1,page2,page3" or directly "page1,page2,page3"
 pub fn parse_flow_pages(flow_desc: &str) -> Vec<String> {
     let desc = flow_desc.trim();
     if desc.is_empty() {
+        // i18n: user-facing
         return vec!["首页".to_string()];
     }
     let pages_str = if desc.contains(':') {
@@ -837,6 +868,7 @@ pub fn parse_flow_pages(flow_desc: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect();
     if pages.is_empty() {
+        // i18n: user-facing
         vec!["首页".to_string()]
     } else {
         pages
@@ -848,6 +880,7 @@ impl DesignSkill for MultiVariantsSkill {
         "multi-variants"
     }
     fn label(&self) -> &str {
+        // i18n: user-facing
         "多方案对比"
     }
 
@@ -857,38 +890,41 @@ impl DesignSkill for MultiVariantsSkill {
         design_system: Option<&DesignSystem>,
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
-        // input 格式: "prompt|style1|style2|style3"
+        // input format: "prompt|style1|style2|style3"
         let parts: Vec<&str> = input.splitn(4, '|').collect();
         let prompt = parts[0];
         let styles = [
+            // i18n: user-facing
             parts.get(1).unwrap_or(&"简约"),
+            // i18n: user-facing
             parts.get(2).unwrap_or(&"玻璃拟态"),
+            // i18n: user-facing
             parts.get(3).unwrap_or(&"深色"),
         ];
         let text_skill = TextToUiSkill::new(&self.model);
         let v1_doc = match text_skill.execute(
             ctx,
             design_system,
-            &format!("{prompt}（风格：{}）", styles[0]),
+            &format!("{prompt} (style: {})", styles[0]),
         )? {
             SkillOutput::Document(d) => d,
-            _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            _ => anyhow::bail!("text-to-ui returned non-Document"),
         };
         let v2_doc = match text_skill.execute(
             ctx,
             design_system,
-            &format!("{prompt}（风格：{}）", styles[1]),
+            &format!("{prompt} (style: {})", styles[1]),
         )? {
             SkillOutput::Document(d) => d,
-            _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            _ => anyhow::bail!("text-to-ui returned non-Document"),
         };
         let v3_doc = match text_skill.execute(
             ctx,
             design_system,
-            &format!("{prompt}（风格：{}）", styles[2]),
+            &format!("{prompt} (style: {})", styles[2]),
         )? {
             SkillOutput::Document(d) => d,
-            _ => anyhow::bail!("text-to-ui 返回非 Document"),
+            _ => anyhow::bail!("text-to-ui returned non-Document"),
         };
         Ok(SkillOutput::MultiVariants([v1_doc, v2_doc, v3_doc]))
     }
@@ -904,8 +940,11 @@ impl DesignSkill for MultiVariantsSkill {
             let parts: Vec<&str> = input.splitn(4, '|').collect();
             let prompt = parts[0];
             let styles = [
+                // i18n: user-facing
                 parts.get(1).unwrap_or(&"简约"),
+                // i18n: user-facing
                 parts.get(2).unwrap_or(&"玻璃拟态"),
+                // i18n: user-facing
                 parts.get(3).unwrap_or(&"深色"),
             ];
             let text_skill = TextToUiSkill::new(&self.model);
@@ -913,52 +952,56 @@ impl DesignSkill for MultiVariantsSkill {
                 .execute_async(
                     ctx,
                     design_system,
-                    format!("{prompt}（风格：{}）", styles[0]),
+                    format!("{prompt} (style: {})", styles[0]),
                 )
                 .await?
             {
                 SkillOutput::Document(d) => d,
-                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+                _ => anyhow::bail!("text-to-ui returned non-Document"),
             };
             let v2_doc = match text_skill
                 .execute_async(
                     ctx,
                     design_system,
-                    format!("{prompt}（风格：{}）", styles[1]),
+                    format!("{prompt} (style: {})", styles[1]),
                 )
                 .await?
             {
                 SkillOutput::Document(d) => d,
-                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+                _ => anyhow::bail!("text-to-ui returned non-Document"),
             };
             let v3_doc = match text_skill
                 .execute_async(
                     ctx,
                     design_system,
-                    format!("{prompt}（风格：{}）", styles[2]),
+                    format!("{prompt} (style: {})", styles[2]),
                 )
                 .await?
             {
                 SkillOutput::Document(d) => d,
-                _ => anyhow::bail!("text-to-ui 返回非 Document"),
+                _ => anyhow::bail!("text-to-ui returned non-Document"),
             };
             Ok(SkillOutput::MultiVariants([v1_doc, v2_doc, v3_doc]))
         })
     }
 }
 
-// ── 纯 helper（逐字迁自 fd-ai-adapter，仅改可见性为 pub）──
+// ── Pure helpers (migrated verbatim from fd-ai-adapter, only visibility changed to pub) ──
 
-/// 读取图片文件并编码为 base64。
-/// P-3：读前按 metadata 预检 ≤50MB，超大草图直接 bail 防 OOM/base64 膨胀。
+/// Reads an image file and encodes it as base64.
+/// P-3: pre-checks size via metadata (≤50MB) before reading; oversized sketches bail early to prevent OOM/base64 bloat.
 pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
     const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
     let len = std::fs::metadata(path)
-        .map_err(|e| anyhow::anyhow!("读取草图元数据失败 {}: {e}", path.display()))?
+        .map_err(|e| anyhow::anyhow!("failed to read sketch metadata {}: {e}", path.display()))?
         .len();
     if len > MAX_IMAGE_BYTES {
-        tracing::warn!(size = len, "草图超过 50MB 上限，拒绝编码");
-        anyhow::bail!("草图 {} 超过 50MB 上限（{} 字节）", path.display(), len);
+        tracing::warn!(size = len, "sketch exceeds 50MB limit, refusing to encode");
+        anyhow::bail!(
+            "sketch {} exceeds the 50MB limit ({} bytes)",
+            path.display(),
+            len
+        );
     }
     let bytes = std::fs::read(path)?;
     Ok(base64::Engine::encode(
@@ -967,18 +1010,22 @@ pub fn encode_image_base64(path: &std::path::Path) -> anyhow::Result<String> {
     ))
 }
 
-/// R-13：异步版图片 base64 编码。async 上下文下用 tokio::fs 替代 std::fs，
-/// 避免同步 IO 阻塞 tokio worker 线程（image_to_ui_async 调用路径）。
-/// 同步版保留供阻塞调用方（image_to_ui 同步版走 BLOCKING_RT）。
+/// R-13: async variant of image base64 encoding. Uses tokio::fs instead of std::fs in async context,
+/// avoiding sync IO that would block tokio worker threads (image_to_ui_async call path).
+/// The sync version is kept for blocking callers (the image_to_ui sync version runs on BLOCKING_RT).
 pub async fn encode_image_base64_async(path: &std::path::Path) -> anyhow::Result<String> {
     const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
     let len = tokio::fs::metadata(path)
         .await
-        .map_err(|e| anyhow::anyhow!("读取草图元数据失败 {}: {e}", path.display()))?
+        .map_err(|e| anyhow::anyhow!("failed to read sketch metadata {}: {e}", path.display()))?
         .len();
     if len > MAX_IMAGE_BYTES {
-        tracing::warn!(size = len, "草图超过 50MB 上限，拒绝编码");
-        anyhow::bail!("草图 {} 超过 50MB 上限（{} 字节）", path.display(), len);
+        tracing::warn!(size = len, "sketch exceeds 50MB limit, refusing to encode");
+        anyhow::bail!(
+            "sketch {} exceeds the 50MB limit ({} bytes)",
+            path.display(),
+            len
+        );
     }
     let bytes = tokio::fs::read(path).await?;
     Ok(base64::Engine::encode(
@@ -987,49 +1034,49 @@ pub async fn encode_image_base64_async(path: &std::path::Path) -> anyhow::Result
     ))
 }
 
-/// 解析 fusion-mlx 返回的 UI JSON 为 PenDocument。
+/// Parses the UI JSON returned by fusion-mlx into a PenDocument.
 ///
-/// 兼容形状：`{"page": {"width":..,"height":..,"nodes":[..]}}` 或裸 `{"nodes":[..]}`。
-/// 文生/图生 UI 共用 system prompt：显式约束 node schema + 示例，
-/// 避免 7B 模型自行发明 components/type 等不匹配 schema 的结构。
+/// Accepted shapes: `{"page": {"width":..,"height":..,"nodes":[..]}}` or bare `{"nodes":[..]}`.
+/// Text-to-UI / image-to-UI share one system prompt: it explicitly constrains the node schema + example,
+/// preventing 7B models from inventing schema-mismatched structures such as components/type.
 pub fn ui_generator_system_prompt() -> String {
-    "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字与 markdown 围栏。输出单行紧凑 JSON，禁止换行与缩进。\
-page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
-示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+    "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}. \
+Output JSON only, no extra text and no markdown fences. Output single-line compact JSON, \
+no newlines or indentation. page contains width/height (default 1440x900); each entry in the \
+nodes list has {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}. \
+Example: {\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
 {\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
 {\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
-]}}。"
+]}}."
         .to_string()
 }
 
 pub fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument> {
-    // 容错：模型可能包裹 markdown ```json ... ```，剥之
+    // Tolerance: the model may wrap output in markdown ```json ... ```; strip it
     let cleaned = strip_code_fence(json);
     let v: serde_json::Value = match serde_json::from_str(cleaned) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %e, "parse_ui_json: 原始 JSON 解析失败，尝试修复");
+            tracing::warn!(error = %e, "parse_ui_json: raw JSON parse failed, attempting repair");
             let repaired = repair_model_json(cleaned);
             match serde_json::from_str::<serde_json::Value>(&repaired) {
                 Ok(v) => {
-                    tracing::info!("parse_ui_json: JSON 修复后解析成功");
+                    tracing::info!("parse_ui_json: parse succeeded after JSON repair");
                     v
                 }
-                // R-2：修复仍失败 → fail visibly，不再静默回退合成占位文档
-                // （审计 R-2：伪成功占位掩盖模型输出错误，用户须看到真实失败）。
+                // R-2: if repair still fails → fail visibly, no more silent fallback to a synthetic placeholder document
+                // (audit R-2: fake-success placeholders mask model output errors; the user must see the real failure).
                 Err(e2) => {
-                    // 节点级抢救：模型输出中途损坏时，逐节点解析抢救完好节点，
-                    // 丢弃损坏节点（还原草稿语义——部分节点仍可用，fail visibly 降级为 warn）。
+                    // Node-level salvage: when model output is corrupted midway, parse per node to salvage intact nodes
+                    // and drop corrupted ones (draft semantics — partial nodes are still usable; fail visibly downgraded to warn).
                     if let Some(doc) = salvage_pen_document(&repaired) {
-                        tracing::warn!(error = %e2, "parse_ui_json: 整体解析失败，节点级抢救成功（部分节点丢弃）");
+                        tracing::warn!(error = %e2, "parse_ui_json: whole-document parse failed, node-level salvage succeeded (some nodes dropped)");
                         return Ok(doc);
                     }
-                    tracing::error!(error = %e2, "parse_ui_json: JSON 修复仍失败，拒绝伪成功");
-                    // 原始输出留档（截断 2KB）：缺陷类定位必需，否则无法分析模型坏输出形状。
-                    tracing::error!(raw = %String::from_utf8_lossy(&cleaned.as_bytes()[..cleaned.len().min(2048)]), "parse_ui_json: 修复失败原始输出留档");
-                    anyhow::bail!("模型输出非合法 JSON，修复失败: {e2}");
+                    tracing::error!(error = %e2, "parse_ui_json: JSON repair still failed, refusing fake success");
+                    // Keep the raw output on record (truncated to 2KB): required for defect-class triage; without it the model's bad output shape cannot be analyzed.
+                    tracing::error!(raw = %String::from_utf8_lossy(&cleaned.as_bytes()[..cleaned.len().min(2048)]), "parse_ui_json: raw output logged for failed repair");
+                    anyhow::bail!("model output is not valid JSON, repair failed: {e2}");
                 }
             }
         }
@@ -1048,16 +1095,16 @@ pub fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument>
     let nodes = match nodes_val {
         Some(nv) => match parse_nodes_with_depth(nv, 0) {
             Ok(n) => n,
-            // R-2：nodes 解析失败 → fail visibly（半结构化损坏同样不可伪成功）。
+            // R-2: nodes parse failure → fail visibly (half-structured corruption must not fake success either).
             Err(e) => {
-                tracing::error!(error = %e, "parse_ui_json: nodes 解析失败，拒绝伪成功");
-                anyhow::bail!("模型输出 nodes 解析失败: {e}");
+                tracing::error!(error = %e, "parse_ui_json: nodes parse failed, refusing fake success");
+                anyhow::bail!("failed to parse nodes from model output: {e}");
             }
         },
-        // R-2：缺 nodes 字段视为合法空页（非伪成功——空文档是有效状态，
-        // 不注入合成的占位元素）。模型可能输出仅 page 尺寸无节点的设计稿。
+        // R-2: a missing nodes field is treated as a valid empty page (not fake success — an empty document is a valid state,
+        // no synthetic placeholder elements injected). The model may output a design with only page dimensions and no nodes.
         None => {
-            tracing::info!("parse_ui_json: JSON 缺 nodes 字段，返回空页");
+            tracing::info!("parse_ui_json: JSON missing nodes field, returning empty page");
             let mut doc = PenDocument::new();
             let page = Page::new("page_1", page_name, w, h);
             doc.add_page(page);
@@ -1074,35 +1121,36 @@ pub fn parse_ui_json(json: &str, page_name: &str) -> anyhow::Result<PenDocument>
     Ok(doc)
 }
 
-/// 修复 7B 模型常见 JSON 语法错误（纯字符串替换，避免引入 regex 依赖）：
-/// - `"k":"":"v"` 双冒号 → `"k":"v"`
-/// - `"k":"v "k2"` 值内吞引号缺逗号 → `"k":"v","k2"`
-/// - 数字/右括号后紧跟空格再接引号键：`100 "w"` → `100,"w"`
-/// - `{ {` / `} }` 连续同括号去重
-/// - 括号失衡：尾部多余 `}` `]` 裁剪；EOF 处缺括号按栈补齐
+/// Repairs common JSON syntax errors from 7B models (pure string replacement, avoiding a regex dependency):
+/// - `"k":"":"v"` double colon → `"k":"v"`
+/// - `"k":"v "k2"` quote swallowed inside a value with missing comma → `"k":"v","k2"`
+/// - digit/closing bracket followed by whitespace then a quoted key: `100 "w"` → `100,"w"`
+/// - `{ {` / `} }` consecutive duplicate brackets deduplicated
+/// - unbalanced brackets: trailing extra `}` `]` trimmed; missing brackets at EOF appended via stack
 pub fn repair_model_json(s: &str) -> String {
     let mut out = s.to_string();
     while out.contains("\":\"\":\"") {
         out = out.replace("\":\"\":\"", "\":\"");
     }
     out = out.replace("{ {", "{").replace("} }", "}");
-    // 扫描修复"值后空格+引号键"缺逗号：形如 `#fff "stroke"` 或 `100 "w"`
-    // 逐字节匹配 ASCII 模式（空格/引号/字母），但 CJK 等多字节 UTF-8 字符
-    // 必须按原字节复制——旧 `bytes[i] as char` 把每个字节当 Latin-1 码点转
-    // char 再以 UTF-8 编码，CJK 3 字节变 6 字节乱码（R-A9）。模式仅涉及 ASCII，
-    // 非首字节（>=0x80）永不匹配，故按 UTF-8 字符边界推进复制即可。
+    // Scan-repair the missing comma in "value + whitespace + quoted key": e.g. `#fff "stroke"` or `100 "w"`
+    // Match the ASCII pattern byte by byte (whitespace/quote/letters), but multi-byte UTF-8 characters
+    // such as CJK must be copied as original bytes — the old `bytes[i] as char` treated each byte as a
+    // Latin-1 code point, then re-encoded as UTF-8, turning 3-byte CJK into 6-byte mojibake (R-A9).
+    // The pattern only involves ASCII; non-leading bytes (>=0x80) never match, so copying advances
+    // along UTF-8 character boundaries.
     let bytes = out.as_bytes();
     let mut rebuilt = String::with_capacity(out.len());
     let mut i = 0;
     while i < bytes.len() {
-        // 检测模式：空白（空格/制表/换行，多行缩进输出同样命中）+ `"` + ASCII 字母
-        // + ... + `":`，且前一非空字符非 `, : [ {`
+        // Detect pattern: whitespace (space/tab/newline; indented multi-line output hits too) + `"` + ASCII letter
+        // + ... + `":`, with the previous non-space character not in `, : [ {`
         if (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
             && i + 3 < bytes.len()
             && bytes[i + 1] == b'"'
             && bytes[i + 2].is_ascii_alphabetic()
         {
-            // 找到对应的 `":` 结束
+            // Found the matching `":` terminator
             let mut j = i + 2;
             while j + 1 < bytes.len() && !(bytes[j] == b'"' && bytes[j + 1] == b':') {
                 j += 1;
@@ -1119,34 +1167,34 @@ pub fn repair_model_json(s: &str) -> String {
                 }
             }
         }
-        // 按 UTF-8 字符边界复制原字节：ASCII 1 字节，多字节字符整体 push。
+        // Copy original bytes along UTF-8 character boundaries: ASCII is 1 byte; multi-byte characters are pushed whole.
         let char_len = utf8_char_len(bytes[i]);
         let end = (i + char_len).min(bytes.len());
         if let Ok(slice) = std::str::from_utf8(&bytes[i..end]) {
             rebuilt.push_str(slice);
         } else {
-            // 残缺多字节序列（输入本身非法），整体跳过避免乱码扩散。
+            // Broken multi-byte sequence (input itself invalid); skip it whole to stop mojibake from spreading.
             tracing::warn!(
                 at = i,
                 len = char_len,
-                "repair_model_json 跳过残缺 UTF-8 序列"
+                "repair_model_json skipping invalid UTF-8 sequence"
             );
         }
         i = end;
     }
-    // 数组元素漏 `{`（`},"id":` 形态）+ 尾逗号：4B 模型实测缺陷类。
-    // 须先于 balance_json_braces：孤儿元素闭 `}` 会触发 balance 的负深度截断，
-    // 先补开括号才能保住后续内容。
-    // 值级垃圾先修：悬空引号/垃圾段会在结构扫描中制造假字符串态，
-    // 须先清理再做元素开括号/尾逗号结构修复。
+    // Array element missing `{` (the `},"id":` shape) + trailing comma: defect class observed on 4B models.
+    // Must run before balance_json_braces: an orphan element's closing `}` would trigger balance's
+    // negative-depth truncation; inserting the open brace first preserves the following content.
+    // Value-level garbage is repaired first: dangling quotes/garbage segments create fake string states
+    // during the structural scan; clean them up before the element-open-brace/trailing-comma structural fixes.
     rebuilt = fix_value_garbage(&rebuilt);
     rebuilt = fix_element_open_brace(&rebuilt);
-    // 括号失衡修复：7B 模型常输出尾部多余 `}` 或中途截断。
+    // Unbalanced bracket repair: 7B models often emit trailing extra `}` or get truncated midway.
     balance_json_braces(&mut rebuilt);
     rebuilt
 }
 
-/// 由首字节判定 UTF-8 字符占用的字节数（1..=4）。非法/续字节返回 1（逐字节跳过）。
+/// Determines the UTF-8 character byte length (1..=4) from the leading byte. Invalid/continuation bytes return 1 (skipped byte by byte).
 fn utf8_char_len(b: u8) -> usize {
     if b < 0xC0 {
         1
@@ -1159,9 +1207,9 @@ fn utf8_char_len(b: u8) -> usize {
     }
 }
 
-/// 按 JSON 语义平衡花括号/方括号（跳过字符串字面量与转义）。
-/// - 扫描中深度变负（多余 `}`/`]`）则截断后续内容；
-/// - 末尾深度仍 > 0 则按栈逆序补齐缺失闭括号。
+/// Balances curly/square brackets per JSON semantics (skipping string literals and escapes).
+/// - If depth goes negative during the scan (extra `}`/`]`), the remaining content is truncated;
+/// - If depth is still > 0 at the end, the missing closing brackets are appended in reverse stack order.
 fn balance_json_braces(s: &mut String) {
     let bytes = s.as_bytes();
     let mut stack: Vec<u8> = Vec::new();
@@ -1203,7 +1251,10 @@ fn balance_json_braces(s: &mut String) {
     }
     if let Some(pos) = cut_len {
         s.truncate(pos);
-        tracing::info!(pos, "balance_json_braces: 裁剪尾部多余闭括号");
+        tracing::info!(
+            pos,
+            "balance_json_braces: truncated trailing extra closing brackets"
+        );
         return;
     }
     if !stack.is_empty() {
@@ -1211,22 +1262,25 @@ fn balance_json_braces(s: &mut String) {
         while let Some(b) = stack.pop() {
             tail.push(if b == b'{' { '}' } else { ']' });
         }
-        tracing::info!(missing = tail.len(), "balance_json_braces: 补齐缺失闭括号");
+        tracing::info!(
+            missing = tail.len(),
+            "balance_json_braces: appended missing closing brackets"
+        );
         s.push_str(&tail);
     }
 }
 
-/// 数组元素漏开括号修复（4B 模型实测缺陷类）：`},"id":` → `},{"id":`。
-/// 模型在 nodes 数组中漏写元素的 `{`，但其闭 `}` 存在——补开括号即可配平。
-/// 伴生尾逗号剔除：`,` 紧跟 `]`/`}`/EOF 时删除（模型输出尾部悬空逗号）。
-/// 仅在严格解析失败后的修复路径运行，合法 JSON 不进本函数。
+/// Repairs array elements missing their open brace (defect class observed on 4B models): `},"id":` → `},{"id":`.
+/// The model omits an element's `{` in the nodes array while its closing `}` exists — inserting the open brace rebalances it.
+/// Companion trailing-comma removal: a `,` immediately followed by `]`/`}`/EOF is deleted (dangling trailing comma in model output).
+/// Only runs on the repair path after strict parsing fails; valid JSON never enters this function.
 fn fix_element_open_brace(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + 16);
     let mut stack: Vec<u8> = Vec::new();
     let mut in_str = false;
     let mut escape = false;
-    // 数组上下文中：`}` 后紧跟 `,` 时置位，若下一非空白是 `"` 则补 `{`。
+    // In array context: set when `,` immediately follows `}`; if the next non-space char is `"`, insert `{`.
     let mut pending_elem = false;
     let mut i = 0;
     while i < bytes.len() {
@@ -1255,11 +1309,11 @@ fn fix_element_open_brace(s: &str) -> String {
         match b {
             b'"' => {
                 if pending_elem {
-                    // 数组元素以字符串键开头 = 漏 `{`，补开括号压栈。
+                    // Array element starting with a string key = missing `{`; insert the open brace and push it.
                     out.push('{');
                     stack.push(b'{');
                     pending_elem = false;
-                    tracing::info!("fix_element_open_brace: 补数组元素缺失开括号");
+                    tracing::info!("fix_element_open_brace: inserted missing element open brace");
                 }
                 in_str = true;
                 out.push_str(slice);
@@ -1275,17 +1329,19 @@ fn fix_element_open_brace(s: &str) -> String {
                 if stack.last() == Some(&opener) {
                     stack.pop();
                 }
-                // 尾逗号剔除：闭括号前最近非空白字符是 `,` 则删之（连同其后空白）。
+                // Trailing-comma removal: if the closest non-space char before the closing bracket is `,`, delete it (with trailing whitespace).
                 let trimmed = out.trim_end();
                 if trimmed.ends_with(',') {
                     let keep = trimmed.len() - 1;
                     out.truncate(keep);
-                    tracing::info!("fix_element_open_brace: 剔除闭括号前尾逗号");
+                    tracing::info!(
+                        "fix_element_open_brace: removed trailing comma before closing bracket"
+                    );
                 }
                 out.push_str(slice);
             }
             b',' => {
-                // 仅数组上下文且前一非空白字符是 `}` 时视为元素边界。
+                // Treat as an element boundary only in array context when the previous non-space char is `}`.
                 let prev_ok = out.trim_end().ends_with('}');
                 pending_elem = stack.last() == Some(&b'[') && prev_ok;
                 out.push_str(slice);
@@ -1300,7 +1356,7 @@ fn fix_element_open_brace(s: &str) -> String {
         }
         i = end;
     }
-    // EOF 尾逗号剔除。
+    // EOF trailing-comma removal.
     let trimmed = out.trim_end();
     if trimmed.ends_with(',') {
         out.truncate(trimmed.len() - 1);
@@ -1308,10 +1364,10 @@ fn fix_element_open_brace(s: &str) -> String {
     out
 }
 
-/// 值级垃圾修复（视觉模型实测缺陷类，仅修复路径运行，合法 JSON 不进本函数）：
-/// - 值后悬空引号：`"x": 0",` → `"x": 0,`（数字/字符串值闭引号后多出一个引号）
-/// - 重复数字：`"h": 60 16,` → `"h": 60,`（合法 JSON 值域外不会出现数字-空白-数字）
-/// - 字符串闭引号后垃圾段：`"# "#6b4e9a",` → `"# ",`（删到下一个引号含之）
+/// Value-level garbage repair (defect class observed on vision models; repair path only, valid JSON never enters this function):
+/// - Dangling quote after a value: `"x": 0",` → `"x": 0,` (an extra quote after a number/string value's closing quote)
+/// - Duplicate number: `"h": 60 16,` → `"h": 60,` (number-whitespace-number cannot occur in valid JSON values)
+/// - Garbage segment after a string's closing quote: `"# "#6b4e9a",` → `"# ",` (delete up to and including the next quote)
 fn fix_value_garbage(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -1357,9 +1413,9 @@ fn fix_value_garbage(s: &str) -> String {
             i = end;
             continue;
         }
-        // 键位孤儿字符串：对象内 `,`/`{` 后的字符串若后续（跳空白）不是 `:`，
-        // 为模型重复值产物（如 `"left","left",`），删除该串及其后逗号。
-        // 数组上下文不适用（字符串数组元素合法）。
+        // Orphan string in key position: a string after `,`/`{` inside an object whose following content (skipping spaces)
+        // is not `:` is a duplicated-value artifact (e.g. `"left","left",`); delete the string and its trailing comma.
+        // Not applicable in array context (string array elements are valid).
         if b == b'"' && stack.last() == Some(&b'{') {
             let prev = out.trim_end().chars().last();
             if matches!(prev, Some('{') | Some(',')) {
@@ -1375,8 +1431,8 @@ fn fix_value_garbage(s: &str) -> String {
                     }
                     let after = bytes.get(j).copied();
                     if !matches!(after, Some(b':')) {
-                        tracing::info!("fix_value_garbage: 删除键位孤儿字符串");
-                        // 跳过字符串；若其后是逗号一并跳过。
+                        tracing::info!("fix_value_garbage: removed orphan string in key position");
+                        // Skip the string; if a comma follows, skip it too.
                         i = if after == Some(b',') {
                             j + 1
                         } else {
@@ -1387,12 +1443,12 @@ fn fix_value_garbage(s: &str) -> String {
                 }
             }
         }
-        // 非字符串态的引号：判定是否值后悬空引号。
+        // Quote outside a string: determine whether it is a dangling quote after a value.
         if b == b'"' {
             let prev = out.trim_end().chars().last();
             let prev_is_value_end = matches!(prev, Some(c) if c.is_ascii_digit() || c == '"');
             if prev_is_value_end {
-                // 向后看（跳空白）首个字符：逗号/闭括号/EOF → 悬空引号，删之。
+                // Look ahead (skipping spaces) at the first char: comma/closing bracket/EOF → dangling quote, delete it.
                 let mut j = i + 1;
                 while j < bytes.len()
                     && (bytes[j] == b' '
@@ -1404,7 +1460,7 @@ fn fix_value_garbage(s: &str) -> String {
                 }
                 let next = bytes.get(j).copied();
                 if matches!(next, None | Some(b',') | Some(b'}') | Some(b']')) {
-                    tracing::info!("fix_value_garbage: 删除值后悬空引号");
+                    tracing::info!("fix_value_garbage: removed dangling quote after value");
                     i = end;
                     continue;
                 }
@@ -1414,9 +1470,9 @@ fn fix_value_garbage(s: &str) -> String {
             i = end;
             continue;
         }
-        // 非字符串态的数字：与前一数字 token 之间隔了空白 → 重复数字，跳过整个数字串。
-        // 注意必须要求 out 以空白结尾——同一 token 内的数字（如 100 的后两位）
-        // 与前一数字间无空白，不可误删。
+        // Number outside a string: whitespace between it and the previous number token → duplicate number; skip the whole digit run.
+        // Note this requires out to end with whitespace — digits within the same token (e.g. the last
+        // two digits of 100) have no whitespace before them and must not be mistakenly deleted.
         if b.is_ascii_digit() && out.ends_with(|c: char| c.is_whitespace()) {
             let trimmed_prev = out.trim_end().chars().last();
             if matches!(trimmed_prev, Some(c) if c.is_ascii_digit()) {
@@ -1424,12 +1480,12 @@ fn fix_value_garbage(s: &str) -> String {
                 while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'.') {
                     j += 1;
                 }
-                tracing::info!("fix_value_garbage: 删除重复数字段");
+                tracing::info!("fix_value_garbage: removed duplicate number segment");
                 i = j;
                 continue;
             }
         }
-        // 非字符串态的垃圾字符（前一非空白是闭引号）：删到下一个引号（含）或逗号（不含）。
+        // Garbage character outside a string (previous non-space char is a closing quote): delete up to the next quote (inclusive) or comma (exclusive).
         if !b.is_ascii_whitespace()
             && b != b','
             && b != b':'
@@ -1454,7 +1510,7 @@ fn fix_value_garbage(s: &str) -> String {
                     j += 1;
                 }
                 if let Some(cut) = cut {
-                    tracing::info!("fix_value_garbage: 删除字符串后垃圾段");
+                    tracing::info!("fix_value_garbage: removed garbage segment after string");
                     i = cut;
                     continue;
                 }
@@ -1466,14 +1522,14 @@ fn fix_value_garbage(s: &str) -> String {
     out
 }
 
-/// 节点级抢救：从坏输出中切出 nodes 数组的顶层 `{...}` 块，逐块独立解析，
-/// 保留合法块、丢弃损坏块。≥1 个合法节点即产出文档（还原草稿语义）。
+/// Node-level salvage: cuts the top-level `{...}` chunks out of the nodes array in bad output, parses each independently,
+/// keeps valid chunks and drops corrupted ones. ≥1 valid node produces a document (restores draft semantics).
 fn salvage_pen_document(s: &str) -> Option<PenDocument> {
     let bytes = s.as_bytes();
-    // 定位 nodes 数组起始 `[`（容忍 `"nodes": [` 空格变体）。
+    // Locate the nodes array's opening `[` (tolerates the `"nodes": [` space variant).
     let nodes_key = s.find("\"nodes\"")?;
     let arr_start = bytes[nodes_key..].iter().position(|&b| b == b'[')? + nodes_key;
-    // 字符串感知扫描，收集数组内顶层对象块。
+    // String-aware scan, collecting top-level object chunks inside the array.
     let mut chunks: Vec<&str> = Vec::new();
     let mut depth: i32 = 0;
     let mut in_str = false;
@@ -1519,20 +1575,20 @@ fn salvage_pen_document(s: &str) -> Option<PenDocument> {
     for c in &chunks {
         match serde_json::from_str::<serde_json::Value>(c) {
             Ok(v) => good.push(v),
-            Err(e) => tracing::warn!(error = %e, "salvage: 丢弃损坏节点块"),
+            Err(e) => tracing::warn!(error = %e, "salvage: dropped corrupted node chunk"),
         }
     }
     if good.is_empty() {
-        tracing::warn!(chunks = chunks.len(), "salvage: 无可抢救节点");
+        tracing::warn!(chunks = chunks.len(), "salvage: no salvageable nodes");
         return None;
     }
-    // 页面尺寸：就近扫描 `"width":<num>` / `"height":<num>`（缺省 1440×900）。
+    // Page dimensions: scan for the nearest `"width":<num>` / `"height":<num>` (defaults 1440×900).
     let w = scan_num_after_key(s, "width").unwrap_or(1440.0);
     let h = scan_num_after_key(s, "height").unwrap_or(900.0);
     let nodes = match parse_nodes_with_depth(&serde_json::Value::Array(good), 0) {
         Ok(n) => n,
         Err(e) => {
-            tracing::warn!(error = %e, "salvage: 抢救节点 schema 解析失败");
+            tracing::warn!(error = %e, "salvage: salvaged node schema parse failed");
             return None;
         }
     };
@@ -1541,12 +1597,15 @@ fn salvage_pen_document(s: &str) -> Option<PenDocument> {
     for n in nodes {
         page.add(n);
     }
-    tracing::info!(nodes = page.nodes.len(), "salvage: 节点级抢救产出文档");
+    tracing::info!(
+        nodes = page.nodes.len(),
+        "salvage: node-level salvage produced document"
+    );
     doc.add_page(page);
     Some(doc)
 }
 
-/// 在文本中找 `"key":` 后的首个数字（容忍冒号后空格/引号包裹）。
+/// Finds the first number after `"key":` in the text (tolerates spaces after the colon / quote wrapping).
 fn scan_num_after_key(s: &str, key: &str) -> Option<f64> {
     let pat = format!("\"{key}\":");
     let pos = s.find(&pat)?;
@@ -1566,7 +1625,7 @@ fn scan_num_after_key(s: &str, key: &str) -> Option<f64> {
     num.parse::<f64>().ok()
 }
 
-/// 从开引号字节位找配对闭引号（处理 `\\` 转义）。返回闭引号下标。
+/// Finds the matching closing quote from an opening quote byte position (handles `\\` escapes). Returns the closing quote index.
 fn find_closing_quote(bytes: &[u8], open: usize) -> Option<usize> {
     let mut j = open + 1;
     while j < bytes.len() {
@@ -1583,14 +1642,15 @@ const MAX_NODE_DEPTH: usize = 20;
 
 pub fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Result<Vec<PenNode>> {
     if depth > MAX_NODE_DEPTH {
-        anyhow::bail!("节点嵌套深度超过 {MAX_NODE_DEPTH}，拒绝解析");
+        anyhow::bail!("node nesting depth exceeds {MAX_NODE_DEPTH}, refusing to parse");
     }
     let arr = v
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("nodes 非数组"))?;
+        .ok_or_else(|| anyhow::anyhow!("nodes is not an array"))?;
     let mut nodes = Vec::with_capacity(arr.len());
-    // E-6/P3：sanitize_node_id 过滤后不同原始 id 可能归一（"a-b!" 和 "a-b" → "a-b"），
-    // 同级 id 碰撞致后续节点操作错乱。per-array seen 集合对碰撞 id 追加 _<n> 去重。
+    // E-6/P3: after sanitize_node_id filtering, distinct original ids may normalize to the same value
+    // ("a-b!" and "a-b" → "a-b"); sibling id collisions break later node operations. A per-array seen
+    // set appends a _<n> suffix to colliding ids for deduplication.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, item) in arr.iter().enumerate() {
         let mut node = parse_node_with_depth(item, i, depth)?;
@@ -1605,7 +1665,7 @@ pub fn parse_nodes_with_depth(v: &serde_json::Value, depth: usize) -> anyhow::Re
                 }
                 suffix += 1;
             }
-            tracing::warn!(original = %original, new = %node.id, "sanitize_node_id 碰撞，已追加后缀去重");
+            tracing::warn!(original = %original, new = %node.id, "sanitize_node_id collision, appended suffix to deduplicate");
         }
         nodes.push(node);
     }
@@ -1619,18 +1679,18 @@ pub fn parse_node_with_depth(
 ) -> anyhow::Result<PenNode> {
     let o = item
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("节点 {idx} 非对象"))?;
+        .ok_or_else(|| anyhow::anyhow!("node {idx} is not an object"))?;
     let kind_str = o.get("kind").and_then(|k| k.as_str()).unwrap_or("rect");
-    // kind 大小写不敏感：文档序列化是 PascalCase（"Text"），模型回显输入 JSON
-    // 原样携带大写（issue#34 区域迭代实测），解析端必须与序列化端对齐，
-    // 否则模型回显合法输入必然失败。
+    // kind is case-insensitive: document serialization is PascalCase ("Text"), and the model echoes
+    // input JSON with the original casing (observed in issue#34 region iteration); the parser must
+    // align with the serializer, otherwise echoing valid input would always fail.
     let kind = match kind_str.to_ascii_lowercase().as_str() {
         "rect" => NodeKind::Rect,
         "circle" => NodeKind::Circle,
         "text" => NodeKind::Text,
         "image" => NodeKind::Image,
         "group" => NodeKind::Group,
-        other => anyhow::bail!("未知节点类型 {other:?}"),
+        other => anyhow::bail!("unknown node kind {other:?}"),
     };
     let id = o
         .get("id")
@@ -1687,11 +1747,19 @@ fn sanitize_node_id(id: &str) -> String {
 
 fn validate_node(mut node: PenNode) -> PenNode {
     if node.w <= 0.0 {
-        tracing::warn!("节点 {} w={:.1} 非正，修正为 1.0", node.id, node.w);
+        tracing::warn!(
+            "node {} w={:.1} is non-positive, corrected to 1.0",
+            node.id,
+            node.w
+        );
         node.w = 1.0;
     }
     if node.h <= 0.0 {
-        tracing::warn!("节点 {} h={:.1} 非正，修正为 1.0", node.id, node.h);
+        tracing::warn!(
+            "node {} h={:.1} is non-positive, corrected to 1.0",
+            node.id,
+            node.h
+        );
         node.h = 1.0;
     }
     node.children = node.children.into_iter().map(validate_node).collect();

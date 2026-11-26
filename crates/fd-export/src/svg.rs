@@ -1,6 +1,6 @@
-// ARCH-10 r4：SVG 渲染从 lib.rs 拆出。render_html 经 render_svg 跨模块调；
-// render_png 也调 render_svg。render_element_svg 调 xml_escape/sanitize_image_url
-// （util 模块）。circle_polygon 留 lib.rs（PDF 独占，非 SVG）。零行为变更。
+// ARCH-10 r4: SVG rendering split out of lib.rs. render_html calls render_svg across modules;
+// render_png also calls render_svg. render_element_svg calls xml_escape/sanitize_image_url
+// (util module). circle_polygon stays in lib.rs (PDF-only, not SVG). Zero behavior change.
 
 use crate::{util::sanitize_image_url, util::xml_escape, CanvasElement, CanvasPage};
 
@@ -66,8 +66,8 @@ pub(super) fn render_element_svg(el: &CanvasElement) -> String {
                 .map(|f| format!("font-family=\"{}\"", xml_escape(f)))
                 .unwrap_or_default();
             let text = xml_escape(el.text.as_deref().unwrap_or(""));
-            // FUNC-9：text 旋转——基点对齐 rect/circle（el.x+w/2, el.y+h/2），
-            // 非用共用 attrs（text 的 fill/stroke/opacity 语义独立，arm 不消费 attrs）。
+            // FUNC-9: text rotation — pivot aligned with rect/circle (el.x+w/2, el.y+h/2),
+            // not using the shared attrs (text fill/stroke/opacity have independent semantics; the arm does not consume attrs).
             let transform = el
                 .rotation
                 .filter(|r| *r != 0.0)
@@ -93,6 +93,6 @@ pub(super) fn render_element_svg(el: &CanvasElement) -> String {
             xml_escape(&sanitize_image_url(el.text.as_deref().unwrap_or("")))
         ),
         "group" => "<!-- group -->\n".to_string(),
-        other => format!("<!-- 未知元素类型 {} -->\n", xml_escape(other)),
+        other => format!("<!-- unknown element kind {} -->\n", xml_escape(other)),
     }
 }

@@ -1,9 +1,9 @@
-//! A-3：fd-cli 子命令 handler 模块。
+//! A-3: fd-cli subcommand handler modules.
 //!
-//! 从原 main.rs 的 run() 巨型 match 拆出的全部子命令实现。ARCH-3 已完成
-//! 全量拆分：10 个 handler 模块（ai_skill/chat/check_mlx/design_system/
-//! export/generate/health/history/io_cmd/lint），main.rs run() 仅保留
-//! `Command::* => commands::<group>::<fn>(...).await` 调用入口，零内联 arm。
+//! All subcommand implementations split out of the original giant run() match in main.rs.
+//! ARCH-3 completed the full split: 10 handler modules (ai_skill/chat/check_mlx/
+//! design_system/export/generate/health/history/io_cmd/lint); main.rs run() keeps only
+//! the `Command::* => commands::<group>::<fn>(...).await` call entries, zero inline arms.
 
 pub mod ai_skill;
 pub mod chat;

@@ -1,7 +1,8 @@
-//! 请求路由：静态资产 + /api/* JSON 端点。
+//! Request routing: static assets + /api/* JSON endpoints.
 //!
-//! 手写分发（无 axum）：路径少、形状固定，最小依赖面。
-//! 请求体读取带 REQUEST_CAP 上限（8MB，与 IPC 护栏同口径）。
+//! Hand-written dispatch (no axum): few paths, fixed shapes, minimal dependency
+//! surface. Request body reads enforce the REQUEST_CAP limit (8MB, same as the
+//! IPC guardrail).
 
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use crate::{assets, handlers, AppState};
 
 type Resp = hyper::Response<http_body_util::Full<hyper::body::Bytes>>;
 
-/// 主入口：按 (method, path) 分发。
+/// Main entry: dispatches by (method, path).
 pub async fn handle(
     req: hyper::Request<Incoming>,
     state: Arc<AppState>,
@@ -42,7 +43,7 @@ pub async fn handle(
         ("GET", "/api/design-systems") => handlers::design_systems(&state),
         ("GET", "/api/sessions") => handlers::sessions(&state),
         ("GET", "/api/design-intel/search") => {
-            // issue#44：design-intelligence 数据集检索（内置 CSV，确定性打分）。
+            // issue#44: design-intelligence dataset search (embedded CSV, deterministic scoring).
             let q = query_param(&query, "q").unwrap_or_default();
             let kind = query_param(&query, "kind").unwrap_or_else(|| "all".to_string());
             let limit = query_param(&query, "limit")
@@ -84,12 +85,12 @@ pub async fn handle(
             handlers::tokens(&state, &ds, &theme)
         }
         ("POST", p) if p.starts_with("/api/session/") && p.ends_with("/mutate") => {
-            // issue#42：画布直改（拖拽/Token 面板落库），无模型往返。
+            // issue#42: direct canvas mutation (drag/Token panel persisted), no model round-trip.
             let id = p
                 .trim_start_matches("/api/session/")
                 .trim_end_matches("/mutate");
             if id.is_empty() {
-                bad_request("路径须为 /api/session/<id>/mutate")
+                bad_request("path must be /api/session/<id>/mutate")
             } else {
                 match read_body(req).await {
                     Ok(b) => handlers::node_mutate(&state, id, &b),
@@ -102,20 +103,22 @@ pub async fn handle(
             handlers::session_info(&state, id)
         }
         ("GET", p) if p.starts_with("/api/version/") => {
-            // /api/version/<session>/<n>：session id 自身含连字符（s-<hex>-<seq>），
-            // 故按段拆（id 可能含 '-'，n 是最后一段）。
+            // /api/version/<session>/<n>: the session id itself contains hyphens
+            // (s-<hex>-<seq>), so split from the right (id may contain '-'; n is
+            // the last segment).
             let rest = p.trim_start_matches("/api/version/");
             match rest.rsplit_once('/') {
                 Some((id, ver)) => match ver.parse::<u32>() {
                     Ok(v) => handlers::version_doc(&state, id, v),
-                    Err(_) => bad_request("版本号非法（须为正整数）"),
+                    Err(_) => bad_request("invalid version number (must be a positive integer)"),
                 },
-                None => bad_request("路径须为 /api/version/<session>/<version>"),
+                None => bad_request("path must be /api/version/<session>/<version>"),
             }
         }
         (m, p) if p.starts_with("/api/") => {
-            // issue#36：未知 /api/* 路径必须 404（验收 2026-11-03 误把 405
-            // 当成"路由注册方法错误"）。405 只留给"路径存在但方法不对"。
+            // issue#36: unknown /api/* paths must 404 (acceptance on 2026-11-03
+            // misread 405 as "route registered with wrong method"). 405 is only
+            // for "path exists but method is wrong".
             if known_api_path(p) {
                 method_not_allowed(m, p)
             } else {
@@ -127,8 +130,9 @@ pub async fn handle(
     Ok(resp)
 }
 
-/// 已知 API 路径判定：区分 404（路径不存在）与 405（路径存在、方法不对）。
-/// 新增路由须同步维护本清单 + docs/API.md + 契约测试。
+/// Known API path check: distinguishes 404 (path does not exist) from 405 (path
+/// exists, method wrong). New routes must keep this list + docs/API.md + contract
+/// tests in sync.
 fn known_api_path(path: &str) -> bool {
     const EXACT: [&str; 11] = [
         "/api/health",
@@ -162,8 +166,9 @@ fn not_found() -> Resp {
         .unwrap_or_default()
 }
 
-/// issue#35 契约项：405 带 hint——tokens 等只读端点仅支持 GET，
-/// 消费方不必逆向猜方法。响应形状 {"error","method","path","hint"?}。
+/// issue#35 contract item: 405 carries a hint — read-only endpoints such as
+/// tokens only support GET, so consumers don't have to reverse-engineer the
+/// method. Response shape {"error","method","path","hint"?}.
 fn method_not_allowed(method: &str, path: &str) -> Resp {
     let hint = if path.starts_with("/api/tokens") {
         Some("GET /api/tokens?ds=<id>&theme=light|dark".to_string())
@@ -177,7 +182,7 @@ fn method_not_allowed(method: &str, path: &str) -> Resp {
         None
     };
     let mut body = serde_json::json!({
-        "error": format!("无 {method} {path} 路由"),
+        "error": format!("no route for {method} {path}"),
         "method": method,
         "path": path,
     });
@@ -192,7 +197,8 @@ fn method_not_allowed(method: &str, path: &str) -> Resp {
         .unwrap_or_default()
 }
 
-/// 读请求体（上限 REQUEST_CAP）。失败/超限返回 Err(错误响应)。
+/// Reads the request body (capped at REQUEST_CAP). Returns Err(error response)
+/// on failure or when over the cap.
 async fn read_body(req: hyper::Request<Incoming>) -> Result<hyper::body::Bytes, Resp> {
     let cap = handlers::request_cap();
     let body = match req.into_body().collect().await {
@@ -201,17 +207,19 @@ async fn read_body(req: hyper::Request<Incoming>) -> Result<hyper::body::Bytes, 
             return Err(hyper::Response::builder()
                 .status(hyper::StatusCode::BAD_REQUEST)
                 .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                    serde_json::json!({"error": format!("请求体读取失败: {e}")}).to_string(),
+                    serde_json::json!({"error": format!("failed to read request body: {e}")})
+                        .to_string(),
                 )))
                 .unwrap_or_default());
         }
     };
     if body.len() > cap {
-        tracing::warn!(len = body.len(), cap, "请求体超上限，拒绝");
+        tracing::warn!(len = body.len(), cap, "request body exceeds cap, rejecting");
         return Err(hyper::Response::builder()
             .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
             .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                serde_json::json!({"error": format!("请求体超过 {cap} 字节上限")}).to_string(),
+                serde_json::json!({"error": format!("request body exceeds the {cap} byte limit")})
+                    .to_string(),
             )))
             .unwrap_or_default());
     }
@@ -225,7 +233,8 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     })
 }
 
-/// 极简 percent-decode（query 值仅设计系统 id/theme 等词表值，容错足够）。
+/// Minimal percent-decode (query values are only vocabulary values such as
+/// design-system id/theme, so this tolerance is sufficient).
 fn urldecode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -273,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn method_not_allowed_contract() {
-        // POST /api/tokens（issue#35 验收报 405 的形状）：405 + hint 指路 GET。
+        // POST /api/tokens (the 405 shape reported by the issue#35 acceptance): 405 + hint pointing to GET.
         let resp = method_not_allowed("POST", "/api/tokens");
         assert_eq!(resp.status(), hyper::StatusCode::METHOD_NOT_ALLOWED);
         use http_body_util::BodyExt;
@@ -294,20 +303,21 @@ mod tests {
                 .starts_with("GET /api/tokens"),
             "{v}"
         );
-        // 无 hint 的写端点：不带 hint 键。
+        // Write endpoints without a hint: no hint key.
         let resp = method_not_allowed("GET", "/api/generate");
         assert_eq!(resp.status(), hyper::StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]
     fn unknown_api_paths_are_404_not_405() {
-        // issue#36：/api/v1/* 是 artifacts-engine 风格路径，fd-server 无此面；
-        // 未知路径必须 404，不得误报 405（验收据此误判"方法注册错误"）。
+        // issue#36: /api/v1/* is artifacts-engine style; fd-server has no such surface.
+        // Unknown paths must 404, not misreport 405 (acceptance misjudged this as
+        // "method registration error").
         assert!(!known_api_path("/api/v1/health"));
         assert!(!known_api_path("/api/v1/designs"));
         assert!(!known_api_path("/api/v1/share-base"));
         assert!(!known_api_path("/api/share/abc"));
-        // 已知路径（含前缀路由）须命中。
+        // Known paths (including prefix routes) must match.
         assert!(known_api_path("/api/health"));
         assert!(known_api_path("/api/tokens"));
         assert!(known_api_path("/api/artifacts"));

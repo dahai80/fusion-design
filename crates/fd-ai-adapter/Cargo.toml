@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Fusion-Design AI adapter — 实现 OpenPencil ChatProvider trait，后端对接 fusion-mlx 本地多模态推理"
+description = "Fusion-Design AI adapter — implements the OpenPencil ChatProvider trait, backed by fusion-mlx local multimodal inference"
 
 [lib]
 name = "fd_ai_adapter"
@@ -14,7 +14,7 @@ path = "src/lib.rs"
 # Callers: DesignBridge (Swift AI chat flow), TextToUiSkill, DesignSkills.
 # Affected API: html_to_pen_document() added, scraper dep for HTML parsing.
 # Data schemas: HTML elements → PenNode with style extraction.
-# User instruction: "继续" — P1-1: HTML→PenDocument parser
+# User instruction: "continue" — P1-1: HTML→PenDocument parser
 
 [dependencies]
 serde = { workspace = true }
@@ -30,11 +30,11 @@ async-stream = "0.3"
 op-ai = { workspace = true }  # vendored OpenPencil subset
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }
-# ARCH-11：skill 系统（SkillContext trait + 7 skill + helper）迁出到 fd-skills，
-# adapter impl SkillContext for FusionMlxClient 反向实现 trait。re-export 保持
-# adapter 内部调用方（DesignSkills facade / mlx_integration tests）路径不变。
+# ARCH-11: skill system (SkillContext trait + 7 skills + helpers) migrated out to fd-skills;
+# the adapter back-impls the trait via SkillContext for FusionMlxClient. Re-exports keep
+# adapter-internal callers (DesignSkills facade / mlx_integration tests) on unchanged paths.
 fd-skills = { path = "../fd-skills" }
-# A-2：html_to_pen_document 拆到 fd-html-parser，此处 re-export 保持调用方不变。
+# A-2: html_to_pen_document moved to fd-html-parser; this re-export keeps callers unchanged.
 fd-html-parser = { path = "../fd-html-parser" }
 
 [dev-dependencies]

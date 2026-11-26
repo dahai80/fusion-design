@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Fusion-Design Web 宿主 — wasm32-unknown-unknown 浏览器入口，零 jian 依赖，对接 Fusion-Desk WKWebView"
+description = "Fusion-Design web host — wasm32-unknown-unknown browser entry, zero jian deps, embedded in Fusion-Desk WKWebView"
 
 [lib]
 name = "fd_host_web"
@@ -13,10 +13,10 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# wasm 绑定
+# wasm bindings
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-# R-A18：wasm panic 落到 console 而非静默 unreachable trap（白屏无诊断）。
+# R-A18: route wasm panics to the console instead of a silent unreachable trap (blank screen, no diagnostics).
 console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = [
   "console",
@@ -49,6 +49,6 @@ web-sys = { version = "0.3", features = [
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 base64 = "0.22"
-# 自研画布模型
+# self-built canvas model
 fd-canvas-core = { path = "../fd-canvas-core" }
 fd-design-system = { path = "../fd-design-system" }

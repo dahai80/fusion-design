@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Fusion-Design 宿主桥 — 嵌入 Fusion-Desk WKWebView 的通信层"
+description = "Fusion-Design host bridge — communication layer embedded in Fusion-Desk WKWebView"
 
 [lib]
 name = "fd_host_desk"

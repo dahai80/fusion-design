@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Fusion-Design web 服务面 — 生成/迭代/还原/导出 API + WASM 画布托管 + D1 工作台（issue#31/DS-0）"
+description = "Fusion-Design web service surface — generate/iterate/restore/export API + WASM canvas hosting + D1 workbench (issue#31/DS-0)"
 
 [lib]
 name = "fd_server"
@@ -23,7 +23,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 base64 = { workspace = true }
-# 入站监听栈（127.0.0.1 only）。出站 HTTP 禁止——模型调用一律经 fd-ai-adapter。
+# Inbound listen stack (127.0.0.1 only). Outbound HTTP forbidden — model calls go exclusively through fd-ai-adapter.
 http = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

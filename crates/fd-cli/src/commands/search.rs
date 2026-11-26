@@ -1,8 +1,8 @@
-//! A-3：Search 子命令 handler（issue #44）。
+//! A-3: Search subcommand handler (issue #44).
 //!
-//! Design-intelligence 数据集检索：内置 CSV（styles/palettes/typography/
-//! ux_guidelines/charts/stacks）确定性关键词打分，零 HTTP 零模型。
-//! `--json` 输出 hit 结构供脚本/cowork 管道消费，默认人读文本。
+//! Design-intelligence dataset search: deterministic keyword scoring over embedded CSVs
+//! (styles/palettes/typography/ux_guidelines/charts/stacks), zero HTTP, zero model calls.
+//! `--json` emits hit structs for scripts/cowork pipelines; human-readable text by default.
 
 pub fn run(kind: String, query: String, limit: usize, json: bool) -> anyhow::Result<()> {
     let intel = fd_search::DesignIntel::embedded();

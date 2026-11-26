@@ -1,8 +1,10 @@
-//! A-3：Lint 子命令 handler（从 main.rs 拆出）。
+//! A-3: Lint subcommand handler (split out of main.rs).
 //!
-//! 设计规范检测：PenDocument → LintResult。支持 --fix 原子写 + E-10 备份轮转。
-//! Issue #41：--profile 选择规则集（default / desigma 准入门禁），--gate 供
-//! cowork/CI 管道消费：存在 Error 级违规时退出码 1，通过为 0。
+//! Design-spec lint: PenDocument → LintResult. Supports --fix atomic write + E-10 backup
+//! rotation.
+//! Issue #41: --profile selects the rule set (default / desigma admission gate); --gate is
+//! for cowork/CI pipeline consumption: exit code 1 when any Error-severity violation
+//! exists, 0 on pass.
 
 use std::path::PathBuf;
 
@@ -49,13 +51,15 @@ pub fn run(
 
         if !dry_run {
             let fixed_json = serde_json::to_string_pretty(&doc)?;
-            // L-4 + E-10：原子写——先备份原文件，再写临时文件后 rename，写失败不破坏原文件。
-            // E-10：备份轮转保留最近 3 份，旧实现每次覆盖单 .bak，历史修复不可回溯。
+            // L-4 + E-10: atomic write — back up the original file first, then write a
+            // temp file and rename, so a failed write never corrupts the original.
+            // E-10: backup rotation keeps the latest 3 copies; the old implementation
+            // overwrote a single .bak each time, making past fixes unrecoverable.
             let backup = rotate_backup(&input);
             match std::fs::copy(&input, &backup) {
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(error = %e, "备份写入失败（rename 跨文件系统？），降级跳过备份");
+                    tracing::warn!(error = %e, "backup write failed (cross-filesystem rename?), skipping backup as fallback");
                 }
             }
             let tmp = input.with_extension("fusiondesign.tmp");
@@ -63,23 +67,23 @@ pub fn run(
                 Ok(_) => match std::fs::rename(&tmp, &input) {
                     Ok(_) => {}
                     Err(e) => {
-                        // rename 跨文件系统失败 → 回退 read+write 保数据。
-                        tracing::warn!(error = %e, "rename 失败，回退直接写");
+                        // rename fails across filesystems → fall back to read+write to keep data.
+                        tracing::warn!(error = %e, "rename failed, falling back to direct write");
                         std::fs::write(&input, &fixed_json)?;
                         let _ = std::fs::remove_file(&tmp);
                     }
                 },
                 Err(e) => {
-                    return Err(anyhow::anyhow!("写临时文件失败: {e}"));
+                    return Err(anyhow::anyhow!("failed to write temp file: {e}"));
                 }
             }
             eprintln!(
-                "修复已写入: {}（备份: {}）",
+                "fixes written: {} (backup: {})",
                 input.display(),
                 backup.display()
             );
         } else {
-            eprintln!("dry-run 模式: 修复未写入文件");
+            eprintln!("dry-run mode: fixes not written to file");
         }
     }
 

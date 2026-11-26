@@ -1,7 +1,7 @@
-// ARCH-10 r4：颜色/对比度纯函数从 lib.rs 拆出。check_contrast 消费，无状态。
-// E-14：luminance 旧实现仅 parse_hex_color，遇 rgb()/rgba()/命名色即返 -1.0 跳过，
-// check_contrast 静默漏检（假阴性）。扩解析器：hex（含 alpha 忽略，对齐 parse_hex_color）、
-// rgb(r,g,b)、rgba(r,g,b,a)、10 个常见命名色。返 (r,g,b) 三元组，alpha 在 check_contrast 单独处理。
+// ARCH-10 r4: color/contrast pure functions split out of lib.rs. Consumed by check_contrast, stateless.
+// E-14: the old luminance impl only used parse_hex_color and returned -1.0 (skip) for rgb()/rgba()/named colors,
+// so check_contrast silently missed them (false negatives). Extended the parser: hex (alpha ignored, aligned with parse_hex_color),
+// rgb(r,g,b), rgba(r,g,b,a), and 10 common named colors. Returns an (r,g,b) triple; alpha is handled separately in check_contrast.
 
 use fd_canvas_core::parse_hex_color;
 
@@ -36,7 +36,7 @@ pub(super) fn parse_color_any(color: &str) -> Option<(u8, u8, u8)> {
     named_color(&lower)
 }
 
-// rgb/rgba 内部解析：逗号分隔，前 3 通道 0-255 u8，第 4（rgba alpha）0.0-1.0 忽略（对比度按不透明近似）。
+// rgb/rgba internal parsing: comma-separated; first 3 channels are 0-255 u8; the 4th (rgba alpha) 0.0-1.0 is ignored (contrast approximated as opaque).
 fn parse_rgb_components(rest: &str) -> Option<(u8, u8, u8, Option<f32>)> {
     let parts: Vec<&str> = rest.split(',').map(|p| p.trim()).collect();
     if parts.len() < 3 {
@@ -53,7 +53,7 @@ fn parse_rgb_components(rest: &str) -> Option<(u8, u8, u8, Option<f32>)> {
     Some((r, g, b, a))
 }
 
-// 常见命名色表（WCAG 对比度场景高频）。非完整 CSS 色名，仅覆盖设计稿常用。
+// Common named color table (high-frequency in WCAG contrast scenarios). Not the full CSS color name set; only design-draft staples are covered.
 fn named_color(name: &str) -> Option<(u8, u8, u8)> {
     let rgb = match name {
         "black" => (0, 0, 0),

@@ -1,7 +1,7 @@
 # Callers: fd-cli (lint subcommand), DesignBridge (Swift Process via Process())
 # Affected API: Linter::lint(), LintResult/LintViolation/LintRule types
 # Data schemas: PenDocument→Vec<LintViolation> with auto-fix suggestions, DesignSystem Token cross-ref
-# User instruction: "现在开始实施" — Task #17 P3-6 design_lint Skill（基础检测器）
+# User instruction: "start implementation now" — Task #17 P3-6 design_lint Skill (base detectors)
 [package]
 name = "fd-design-lint"
 version.workspace = true
@@ -9,7 +9,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Fusion-Design 设计规范检测 — 6 个基础检测器"
+description = "Fusion-Design design-spec linting — 6 base detectors"
 
 [lib]
 name = "fd_design_lint"

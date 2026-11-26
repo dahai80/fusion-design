@@ -1,4 +1,4 @@
-//! Fusion-Design CLI 库接口（供 bin 复用）。
+//! Fusion-Design CLI library interface (reused by the bin target).
 
 pub use fd_ai_adapter as ai;
 pub use fd_design_system as design;
