@@ -87,8 +87,8 @@ impl SkillContext for MockSkillContext {
     fn token_prompt_fragment(&self, design_system: Option<&DesignSystem>) -> Option<String> {
         design_system.map(|ds| {
             let css = ds.to_css_custom_properties();
-            // i18n: user-facing (LLM prompt fragment; kept in sync with the lib's prompt language)
-            format!("当前设计系统 Token（CSS Custom Properties）：\n{css}\n\n生成的 UI 必须使用这些 CSS 变量。")
+            // Prompt fragment; kept in sync with the lib's prompt language (unified English)
+            format!("Current design-system tokens (CSS custom properties):\n{css}\n\nThe generated UI must use these CSS variables.")
         })
     }
 }
@@ -294,7 +294,7 @@ fn skill_context_token_prompt_with_design_system() {
     let ds = fd_design_system::builtin_apple_hig();
     let frag = ctx.token_prompt_fragment(Some(&ds)).unwrap();
     assert!(frag.contains("--color-accent"));
-    assert!(frag.contains("CSS Custom Properties"));
+    assert!(frag.contains("CSS custom properties"));
 }
 
 // ── SkillOutput variant tests ──
@@ -342,8 +342,8 @@ fn parse_local_edit_input_with_single_pipe() {
 fn parse_local_edit_input_no_instruction() {
     let (nodes, instr) = parse_local_edit_input("[{\"id\":\"a\"}]");
     assert_eq!(nodes, "[{\"id\":\"a\"}]");
-    // i18n: user-facing (default instruction, matches the lib's prompt-flowing default)
-    assert_eq!(instr, "修改为更合适的样式");
+    // Default instruction, matches the lib's prompt-flowing default (unified English)
+    assert_eq!(instr, "Restyle it to a more suitable look");
 }
 
 // ── skill id/label (::new(model) construction) ──

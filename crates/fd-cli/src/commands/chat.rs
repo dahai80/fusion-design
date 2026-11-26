@@ -60,8 +60,7 @@ pub async fn run(
             if sys.is_empty() {
                 rag
             } else {
-                // i18n: user-facing (LLM prompt separator)
-                format!("{sys}\n\n--- 以下为参考上下文 ---\n{rag}")
+                format!("{sys}\n\n--- The following is reference context ---\n{rag}")
             }
         }
         None => sys,

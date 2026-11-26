@@ -19,11 +19,10 @@ pub async fn run(
     )?;
     if stream {
         let model_owned = model.clone();
-        // i18n: user-facing (LLM prompt, Chinese wording is intentional product behavior)
-        let sys = "你是 fusion-design UI 生成器。根据用户描述，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON。";
-        // i18n: user-facing (LLM prompt, Chinese wording is intentional product behavior)
-        let user_msg = format!("描述：{prompt}\n生成页面「{page}」对应的 UI 布局。");
+        let sys = "You are the fusion-design UI generator. Based on the user's description, \
+output strict JSON: {\"page\":{...}}. Output JSON only.";
+        let user_msg =
+            format!("Description: {prompt}\nGenerate the UI layout for page \"{page}\".");
         let s =
             fd_ai_adapter::chat_stream(client, model_owned, sys.to_string(), user_msg, 2048).await;
         use futures::StreamExt;

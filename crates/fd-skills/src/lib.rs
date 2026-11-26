@@ -318,17 +318,16 @@ impl DesignSkill for TextToUiSkill {
         design_system: Option<&DesignSystem>,
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
-        // i18n: user-facing
-        let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
-            .to_string();
+        let mut sys =
+            "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}. \
+Output JSON only, no extra text. page contains width/height (default 1440x900); each entry in the \
+nodes list has {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}."
+                .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        // i18n: user-facing
-        let user = format!("生成页面。需求：{input}");
+        let user = format!("Generate a page. Requirement: {input}");
         let resp = ctx.chat(&self.model, &sys, &user, 2048)?;
         let doc = parse_ui_json(&resp, "generated")?;
         Ok(SkillOutput::Document(doc))
@@ -342,17 +341,16 @@ impl DesignSkill for TextToUiSkill {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<SkillOutput>> + Send + 'a>>
     {
         Box::pin(async move {
-            // i18n: user-facing
-            let mut sys = "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字。page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}。"
-                .to_string();
+            let mut sys =
+                "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}. \
+Output JSON only, no extra text. page contains width/height (default 1440x900); each entry in the \
+nodes list has {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?}."
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            // i18n: user-facing
-            let user = format!("生成页面。需求：{input}");
+            let user = format!("Generate a page. Requirement: {input}");
             let resp = ctx.chat_async(&self.model, &sys, &user, 2048).await?;
             let doc = parse_ui_json(&resp, "generated")?;
             Ok(SkillOutput::Document(doc))
@@ -379,23 +377,23 @@ impl DesignSkill for ImageToUiSkill {
         let sketch_path = parts[0];
         let hint = parts.get(1).unwrap_or(&"");
         let page_name = parts.get(2).unwrap_or(&"generated");
-        // i18n: user-facing
-        let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字与 markdown 围栏。\
-page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
-示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+        let mut sys =
+            "You are the fusion-design UI generator. Based on the sketch image and notes \
+provided by the user, output strict JSON: {\"page\":{...}}. Output JSON only, no extra text and no \
+markdown fences. page contains width/height (default 1440x900); each entry in the nodes list has \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}. Example: \
+{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
 {\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
 {\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
-]}}。"
-            .to_string();
+]}}."
+                .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        let user =
-            // i18n: user-facing
-            format!("补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。");
+        let user = format!(
+            "Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\" based on the sketch image above."
+        );
         let resp = match encode_image_base64(std::path::Path::new(sketch_path)) {
             Ok(b64) => {
                 tracing::info!(
@@ -408,8 +406,7 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
             Err(e) => {
                 tracing::warn!(sketch_path, error = %e, "image-to-ui: sketch load failed, falling back to text description");
                 let user_text = format!(
-                    // i18n: user-facing
-                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                    "Sketch path: {sketch_path} (unreadable: {e})\nAdditional notes: {hint}\nGenerate the UI layout for page \"{page_name}\"."
                 );
                 ctx.chat(&self.model, &sys, &user_text, 2048)?
             }
@@ -430,23 +427,22 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
             let sketch_path = parts[0];
             let hint = parts.get(1).unwrap_or(&"");
             let page_name = parts.get(2).unwrap_or(&"generated");
-            // i18n: user-facing
-            let mut sys = "你是 fusion-design UI 生成器。根据用户提供的草图图片与说明，\
-输出严格 JSON：{\"page\":{...}}。只输出 JSON，禁止额外文字与 markdown 围栏。\
-page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
-示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+            let mut sys =
+                "You are the fusion-design UI generator. Based on the sketch image and notes \
+provided by the user, output strict JSON: {\"page\":{...}}. Output JSON only, no extra text and no \
+markdown fences. page contains width/height (default 1440x900); each entry in the nodes list has \
+{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}. Example: \
+{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
 {\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
 {\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
-]}}。"
-                .to_string();
+]}}."
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
             let user = format!(
-                // i18n: user-facing
-                "补充说明：{hint}\n请根据上方草图图片生成页面「{page_name}」对应的 UI 布局。"
+                "Additional notes: {hint}\nGenerate the UI layout for page \"{page_name}\" based on the sketch image above."
             );
             // R-13: in async context use tokio::fs for async encoding, so the worker thread is not blocked.
             let resp = match encode_image_base64_async(std::path::Path::new(sketch_path)).await {
@@ -462,8 +458,7 @@ page 含 width/height（默认 1440×900），nodes 列表每项 \
                 Err(e) => {
                     tracing::warn!(sketch_path, error = %e, "image-to-ui: sketch load failed, falling back to text description");
                     let user_text = format!(
-                        // i18n: user-facing
-                    "草图路径：{sketch_path}（无法读取：{e}）\n补充说明：{hint}\n生成页面「{page_name}」对应的 UI 布局。"
+                    "Sketch path: {sketch_path} (unreadable: {e})\nAdditional notes: {hint}\nGenerate the UI layout for page \"{page_name}\"."
                     );
                     ctx.chat_async(&self.model, &sys, &user_text, 2048).await?
                 }
@@ -492,13 +487,13 @@ impl DesignSkill for PartialEditSkill {
         // input format: "node_json|instruction"
         let parts: Vec<&str> = input.splitn(2, '|').collect();
         let node_json = parts[0];
-        // i18n: user-facing
-        let instruction = parts.get(1).unwrap_or(&"修改为更合适的样式");
-        // i18n: user-facing
-        let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
-输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
-        // i18n: user-facing
-        let user = format!("节点：{node_json}\n指令：{instruction}");
+        let instruction = parts
+            .get(1)
+            .unwrap_or(&"Restyle it to a more suitable look");
+        let sys = "You are the fusion-design partial editor. Input is one node JSON plus an edit \
+instruction; output the modified node JSON (keep the original fields, change only the fields the \
+instruction involves). Output JSON only.";
+        let user = format!("Node: {node_json}\nInstruction: {instruction}");
         let resp = ctx.chat(&self.model, sys, &user, 1024)?;
         Ok(SkillOutput::PartialEdit(resp))
     }
@@ -513,13 +508,14 @@ impl DesignSkill for PartialEditSkill {
         Box::pin(async move {
             let parts: Vec<&str> = input.splitn(2, '|').collect();
             let node_json = parts[0];
-            // i18n: user-facing
-            let instruction = parts.get(1).unwrap_or(&"修改为更合适的样式");
-            // i18n: user-facing
-            let sys = "你是 fusion-design 局部编辑器。输入一个节点 JSON 和编辑指令，\
-输出修改后的节点 JSON（保持原字段，仅变更指令涉及的字段）。只输出 JSON。";
-            // i18n: user-facing
-            let user = format!("节点：{node_json}\n指令：{instruction}");
+            let instruction = parts
+                .get(1)
+                .unwrap_or(&"Restyle it to a more suitable look");
+            let sys =
+                "You are the fusion-design partial editor. Input is one node JSON plus an edit \
+instruction; output the modified node JSON (keep the original fields, change only the fields the \
+instruction involves). Output JSON only.";
+            let user = format!("Node: {node_json}\nInstruction: {instruction}");
             let resp = ctx.chat_async(&self.model, sys, &user, 1024).await?;
             Ok(SkillOutput::PartialEdit(resp))
         })
@@ -542,16 +538,15 @@ impl DesignSkill for LocalEditSkill {
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
         let (nodes_part, instruction) = parse_local_edit_input(input);
-        // i18n: user-facing
-        let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。"
+        let mut sys = "You are the fusion-design local editor. Input is a JSON array of multiple \
+nodes plus an edit instruction; output the modified node JSON array (keep the original fields, \
+change only the fields the instruction involves). Output a JSON array only."
             .to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        // i18n: user-facing
-        let user = format!("选中节点：\n{nodes_part}\n\n编辑指令：{instruction}");
+        let user = format!("Selected nodes:\n{nodes_part}\n\nEdit instruction: {instruction}");
         let resp = ctx.chat(&self.model, &sys, &user, 2048)?;
         Ok(SkillOutput::PartialEdit(resp))
     }
@@ -565,16 +560,16 @@ impl DesignSkill for LocalEditSkill {
     {
         Box::pin(async move {
             let (nodes_part, instruction) = parse_local_edit_input(&input);
-            // i18n: user-facing
-            let mut sys = "你是 fusion-design 本地编辑器。输入多个节点的 JSON 数组和编辑指令，\
-输出修改后的节点 JSON 数组（保持原字段，仅变更指令涉及的字段）。只输出 JSON 数组。"
-                .to_string();
+            let mut sys =
+                "You are the fusion-design local editor. Input is a JSON array of multiple \
+nodes plus an edit instruction; output the modified node JSON array (keep the original fields, \
+change only the fields the instruction involves). Output a JSON array only."
+                    .to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            // i18n: user-facing
-            let user = format!("选中节点：\n{nodes_part}\n\n编辑指令：{instruction}");
+            let user = format!("Selected nodes:\n{nodes_part}\n\nEdit instruction: {instruction}");
             let resp = ctx.chat_async(&self.model, &sys, &user, 2048).await?;
             Ok(SkillOutput::PartialEdit(resp))
         })
@@ -591,8 +586,9 @@ pub fn parse_local_edit_input(input: &str) -> (String, &str) {
     }
     let parts: Vec<&str> = input.splitn(2, '|').collect();
     let nodes = parts[0].to_string();
-    // i18n: user-facing
-    let instr = parts.get(1).unwrap_or(&"修改为更合适的样式");
+    let instr = parts
+        .get(1)
+        .unwrap_or(&"Restyle it to a more suitable look");
     (nodes, instr)
 }
 
@@ -612,24 +608,23 @@ impl DesignSkill for SpecDocSkill {
         input: &str,
     ) -> anyhow::Result<SkillOutput> {
         let (doc_json, title) = parse_spec_doc_input(input);
-        // i18n: user-facing
-        let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
-分析其页面结构和节点，输出严格 JSON：{\"title\":\"...\",\"page_architecture\":\"...\",\
-\"interaction_specs\":[...],\"component_specs\":[...],\"token_summary\":\"...\"}。\
-只输出 JSON，禁止额外文字。\n\n\
-interaction_specs 每项含：id, element, event, behavior, animation?, notes?\n\
-component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
-规范要求：\n\
-1. 为每个可交互节点（按钮/输入框/链接等）生成交互规范\n\
-2. 为每种组件类型生成组件规范，包含属性、变体、无障碍说明\n\
-3. 页面架构用文字描述布局层次和导航关系\n\
-4. token_summary 汇总设计系统 Token 使用情况".to_string();
+        let mut sys = "You are the fusion-design design-spec document generator. Input is a \
+PenDocument JSON; analyze its page structure and nodes, and output strict JSON: \
+{\"title\":\"...\",\"page_architecture\":\"...\",\"interaction_specs\":[...],\
+\"component_specs\":[...],\"token_summary\":\"...\"}. Output JSON only, no extra text.\n\n\
+Each interaction_specs entry contains: id, element, event, behavior, animation?, notes?\n\
+Each component_specs entry contains: id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
+Requirements:\n\
+1. Generate an interaction spec for every interactive node (buttons/inputs/links, etc.)\n\
+2. Generate a component spec for each component type, covering props, variants, and accessibility notes\n\
+3. Describe the page architecture in text: layout hierarchy and navigation relationships\n\
+4. token_summary summarizes design-system token usage".to_string();
         if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
             sys.push_str("\n\n");
             sys.push_str(&tokens);
         }
-        // i18n: user-facing
-        let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
+        let user =
+            format!("PenDocument: {doc_json}\n\nGenerate the design spec document \"{title}\".");
         let resp = ctx.chat(&self.model, &sys, &user, DEFAULT_MAX_TOKENS)?;
         let spec = parse_spec_doc_json(&resp, title)?;
         Ok(SkillOutput::SpecDoc(spec))
@@ -644,24 +639,24 @@ component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?
     {
         Box::pin(async move {
             let (doc_json, title) = parse_spec_doc_input(&input);
-            // i18n: user-facing
-            let mut sys = "你是 fusion-design 设计规范文档生成器。输入一个 PenDocument JSON，\
-分析其页面结构和节点，输出严格 JSON：{\"title\":\"...\",\"page_architecture\":\"...\",\
-\"interaction_specs\":[...],\"component_specs\":[...],\"token_summary\":\"...\"}。\
-只输出 JSON，禁止额外文字。\n\n\
-interaction_specs 每项含：id, element, event, behavior, animation?, notes?\n\
-component_specs 每项含：id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
-规范要求：\n\
-1. 为每个可交互节点（按钮/输入框/链接等）生成交互规范\n\
-2. 为每种组件类型生成组件规范，包含属性、变体、无障碍说明\n\
-3. 页面架构用文字描述布局层次和导航关系\n\
-4. token_summary 汇总设计系统 Token 使用情况".to_string();
+            let mut sys = "You are the fusion-design design-spec document generator. Input is a \
+PenDocument JSON; analyze its page structure and nodes, and output strict JSON: \
+{\"title\":\"...\",\"page_architecture\":\"...\",\"interaction_specs\":[...],\
+\"component_specs\":[...],\"token_summary\":\"...\"}. Output JSON only, no extra text.\n\n\
+Each interaction_specs entry contains: id, element, event, behavior, animation?, notes?\n\
+Each component_specs entry contains: id, name, kind, props[{name,prop_type,default_value?,description?}], variants[], accessibility?\n\n\
+Requirements:\n\
+1. Generate an interaction spec for every interactive node (buttons/inputs/links, etc.)\n\
+2. Generate a component spec for each component type, covering props, variants, and accessibility notes\n\
+3. Describe the page architecture in text: layout hierarchy and navigation relationships\n\
+4. token_summary summarizes design-system token usage".to_string();
             if let Some(tokens) = ctx.token_prompt_fragment(design_system) {
                 sys.push_str("\n\n");
                 sys.push_str(&tokens);
             }
-            // i18n: user-facing
-            let user = format!("PenDocument：{doc_json}\n\n生成设计规范文档「{title}」。");
+            let user = format!(
+                "PenDocument: {doc_json}\n\nGenerate the design spec document \"{title}\"."
+            );
             let resp = ctx
                 .chat_async(&self.model, &sys, &user, DEFAULT_MAX_TOKENS)
                 .await?;
@@ -811,8 +806,7 @@ impl DesignSkill for PageFlowSkill {
         let text_skill = TextToUiSkill::new(&self.model);
         let mut docs = Vec::with_capacity(pages.len());
         for page_name in &pages {
-            // i18n: user-facing
-            let prompt = format!("{flow_desc}（页面：{page_name}，风格：{style_hint}）");
+            let prompt = format!("{flow_desc} (page: {page_name}, style: {style_hint})");
             match text_skill.execute(ctx, design_system, &prompt)? {
                 SkillOutput::Document(d) => docs.push(d),
                 _ => anyhow::bail!("text-to-ui returned non-Document"),
@@ -835,8 +829,7 @@ impl DesignSkill for PageFlowSkill {
             let text_skill = TextToUiSkill::new(&self.model);
             let mut docs = Vec::with_capacity(pages.len());
             for page_name in &pages {
-                // i18n: user-facing
-                let prompt = format!("{flow_desc}（页面：{page_name}，风格：{style_hint}）");
+                let prompt = format!("{flow_desc} (page: {page_name}, style: {style_hint})");
                 match text_skill.execute_async(ctx, design_system, prompt).await? {
                     SkillOutput::Document(d) => docs.push(d),
                     _ => anyhow::bail!("text-to-ui returned non-Document"),
@@ -912,8 +905,7 @@ impl DesignSkill for MultiVariantsSkill {
         let v1_doc = match text_skill.execute(
             ctx,
             design_system,
-            // i18n: user-facing
-            &format!("{prompt}（风格：{}）", styles[0]),
+            &format!("{prompt} (style: {})", styles[0]),
         )? {
             SkillOutput::Document(d) => d,
             _ => anyhow::bail!("text-to-ui returned non-Document"),
@@ -921,8 +913,7 @@ impl DesignSkill for MultiVariantsSkill {
         let v2_doc = match text_skill.execute(
             ctx,
             design_system,
-            // i18n: user-facing
-            &format!("{prompt}（风格：{}）", styles[1]),
+            &format!("{prompt} (style: {})", styles[1]),
         )? {
             SkillOutput::Document(d) => d,
             _ => anyhow::bail!("text-to-ui returned non-Document"),
@@ -930,8 +921,7 @@ impl DesignSkill for MultiVariantsSkill {
         let v3_doc = match text_skill.execute(
             ctx,
             design_system,
-            // i18n: user-facing
-            &format!("{prompt}（风格：{}）", styles[2]),
+            &format!("{prompt} (style: {})", styles[2]),
         )? {
             SkillOutput::Document(d) => d,
             _ => anyhow::bail!("text-to-ui returned non-Document"),
@@ -962,8 +952,7 @@ impl DesignSkill for MultiVariantsSkill {
                 .execute_async(
                     ctx,
                     design_system,
-                    // i18n: user-facing
-                    format!("{prompt}（风格：{}）", styles[0]),
+                    format!("{prompt} (style: {})", styles[0]),
                 )
                 .await?
             {
@@ -974,8 +963,7 @@ impl DesignSkill for MultiVariantsSkill {
                 .execute_async(
                     ctx,
                     design_system,
-                    // i18n: user-facing
-                    format!("{prompt}（风格：{}）", styles[1]),
+                    format!("{prompt} (style: {})", styles[1]),
                 )
                 .await?
             {
@@ -986,8 +974,7 @@ impl DesignSkill for MultiVariantsSkill {
                 .execute_async(
                     ctx,
                     design_system,
-                    // i18n: user-facing
-                    format!("{prompt}（风格：{}）", styles[2]),
+                    format!("{prompt} (style: {})", styles[2]),
                 )
                 .await?
             {
@@ -1053,15 +1040,14 @@ pub async fn encode_image_base64_async(path: &std::path::Path) -> anyhow::Result
 /// Text-to-UI / image-to-UI share one system prompt: it explicitly constrains the node schema + example,
 /// preventing 7B models from inventing schema-mismatched structures such as components/type.
 pub fn ui_generator_system_prompt() -> String {
-    // i18n: user-facing
-    "你是 fusion-design UI 生成器。输出严格 JSON：{\"page\":{...}}。\
-只输出 JSON，禁止额外文字与 markdown 围栏。输出单行紧凑 JSON，禁止换行与缩进。\
-page 含 width/height（默认 1440×900），nodes 列表每项 \
-{id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}。\
-示例：{\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
+    "You are the fusion-design UI generator. Output strict JSON: {\"page\":{...}}. \
+Output JSON only, no extra text and no markdown fences. Output single-line compact JSON, \
+no newlines or indentation. page contains width/height (default 1440x900); each entry in the \
+nodes list has {id,kind(rect|circle|text|image|group),x,y,w,h,text?,fill?,stroke?,children?}. \
+Example: {\"page\":{\"width\":1440,\"height\":900,\"nodes\":[\
 {\"id\":\"n0\",\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":1440,\"h\":900,\"fill\":\"#ffffff\"},\
 {\"id\":\"n1\",\"kind\":\"rect\",\"x\":560,\"y\":360,\"w\":320,\"h\":48,\"fill\":\"#f0f0f0\"}\
-]}}。"
+]}}."
         .to_string()
 }
 
