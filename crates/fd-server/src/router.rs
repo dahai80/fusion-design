@@ -13,6 +13,13 @@ use crate::{assets, handlers, AppState};
 
 type Resp = hyper::Response<http_body_util::Full<hyper::body::Bytes>>;
 
+// Issue #50: user-facing error payloads on the /api/version path are product
+// strings pinned by the eval suite (design-d12) — kept Chinese on purpose; the
+// English-only rule covers comments/logs only. Pinned by contract test
+// `version_path_error_strings`.
+pub(crate) const ERR_VERSION_BAD_NUMBER: &str = "版本号非法（须为正整数）";
+pub(crate) const ERR_VERSION_PATH_SHAPE: &str = "路径须为 /api/version/<session>/<version>";
+
 /// Main entry: dispatches by (method, path).
 pub async fn handle(
     req: hyper::Request<Incoming>,
@@ -110,9 +117,9 @@ pub async fn handle(
             match rest.rsplit_once('/') {
                 Some((id, ver)) => match ver.parse::<u32>() {
                     Ok(v) => handlers::version_doc(&state, id, v),
-                    Err(_) => bad_request("invalid version number (must be a positive integer)"),
+                    Err(_) => bad_request(ERR_VERSION_BAD_NUMBER),
                 },
-                None => bad_request("path must be /api/version/<session>/<version>"),
+                None => bad_request(ERR_VERSION_PATH_SHAPE),
             }
         }
         (m, p) if p.starts_with("/api/") => {
@@ -325,5 +332,16 @@ mod tests {
         assert!(known_api_path("/api/session/s-x"));
         assert!(known_api_path("/api/version/s-x/2"));
         assert!(known_api_path("/api/generate"));
+    }
+
+    // Issue #50 / design-d12: these payloads are pinned user-facing product
+    // strings. A source-wide translation pass must not change them silently.
+    #[test]
+    fn version_path_error_strings_are_pinned() {
+        assert_eq!(ERR_VERSION_BAD_NUMBER, "版本号非法（须为正整数）");
+        assert_eq!(
+            ERR_VERSION_PATH_SHAPE,
+            "路径须为 /api/version/<session>/<version>"
+        );
     }
 }
