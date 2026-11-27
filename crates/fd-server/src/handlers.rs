@@ -226,6 +226,10 @@ pub fn tokens(state: &Arc<AppState>, ds: &str, theme: &str) -> Resp {
     }
 }
 
+// Issue #50 / design-d28: user-facing version-label prefix, pinned by the eval
+// suite — kept Chinese on purpose; the English-only rule covers comments/logs.
+pub(crate) const GENERATE_LABEL_PREFIX: &str = "生成：";
+
 #[derive(Deserialize)]
 pub struct GenerateRequest {
     pub prompt: String,
@@ -325,10 +329,14 @@ pub async fn generate(state: &Arc<AppState>, body: &[u8]) -> Resp {
             tracing::warn!(design_system = %ds, "api/generate: unknown design system, ignoring");
         }
     }
+    // Issue #50: the generate version label is a user-facing product string
+    // pinned by the eval suite (design-d28 expects the 生成： prefix) — kept
+    // Chinese on purpose; the English-only rule covers comments/logs only.
+    // Pinned by contract test `generate_version_label_prefix_is_pinned`.
     match finalize_new_session(
         state,
         &doc,
-        &format!("generate: {}", truncate(&req.prompt, 40)),
+        &format!("{}{}", GENERATE_LABEL_PREFIX, truncate(&req.prompt, 40)),
     ) {
         Ok(v) => v,
         Err(e) => err_json(hyper::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -996,7 +1004,9 @@ pub fn node_mutate(state: &Arc<AppState>, session: &str, body: &[u8]) -> Resp {
             &format!("node {node_id} does not exist", node_id = req.node_id),
         );
     }
-    match push_version(state, session, &doc, &format!("edit: {}", req.node_id)) {
+    // issue#42 contract: mutate version label pinned by eval design-d29
+    // (编辑：<node_id>) — user-facing product string, kept Chinese.
+    match push_version(state, session, &doc, &format!("编辑：{}", req.node_id)) {
         Ok(resp) => {
             tracing::info!(session = %session, node_id = %req.node_id, "api/session/mutate: node updated");
             resp
@@ -2005,6 +2015,24 @@ mod contract_tests {
         let node = &doc["pages"][0]["nodes"][0];
         assert_eq!(node["x"], 42.0);
         assert_eq!(node["style"]["fill"], "#4F7CFF");
+
+        // Issue #50: the version label is a user-facing product string pinned by
+        // the eval suite (design-d29 expects `编辑：<node_id>`) — a contract pin so
+        // a source-wide translation pass cannot silently change it again.
+        let info = json_of(session_info(&state, &sid)).await;
+        let label = info["versions"]
+            .as_array()
+            .and_then(|a| a.last())
+            .and_then(|e| e["label"].as_str())
+            .unwrap_or_default();
+        assert_eq!(label, "编辑：n1", "{info}");
+    }
+
+    // Issue #50 / design-d28: the generate version-label prefix is a pinned
+    // user-facing product string — a translation pass must not change it.
+    #[test]
+    fn generate_version_label_prefix_is_pinned() {
+        assert_eq!(GENERATE_LABEL_PREFIX, "生成：");
     }
 
     #[tokio::test]

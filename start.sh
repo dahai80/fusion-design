@@ -92,6 +92,14 @@ case "${1:-}" in
             echo "already running (pid $(cat "$PID_FILE")) on port $PORT"
             exit 0
         fi
+        # Issue #50 (design-d28): the nightly eval hit fusion-mlx HTTP 403 on every
+        # /api/generate because the server was launched without FUSION_CLIENT_KEY
+        # (the gateway LLM-channel key). Warn loudly at start so the gap is visible
+        # in the startup log instead of surfacing as eval failures hours later.
+        if [ -z "${FUSION_CLIENT_KEY:-}" ]; then
+            echo "warning: FUSION_CLIENT_KEY not set - /api/generate|iterate|restore will fail with fusion-mlx HTTP 403" >&2
+            echo "warning: FUSION_CLIENT_KEY not set - model-backed endpoints will return 502 (upstream 403)" >> "$LOG_FILE"
+        fi
         if [ ! -x "$BIN" ]; then
             echo "binary missing: $BIN" >&2
             echo "build first: cargo build --release -p fd-server" >&2
