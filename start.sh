@@ -39,6 +39,45 @@ resolve_admin_key() {
     ' "$cfg"
 }
 
+# Issue #52: resolve the gateway LLM-channel client key for the server env.
+# Order: FUSION_CLIENT_KEY env, then gateway config auth.api_keys — prefer the
+# name=admin entry (all-model wildcard), else the first entry; same semantics
+# as fusion-supervisor env_map.rs read_gateway_client_key(). Path:
+# FUSION_GATEWAY_CONFIG overrides, default ~/fusion/fusion-gateway/config.yaml.
+# Never log or echo the key.
+resolve_client_key() {
+    if [ -n "${FUSION_CLIENT_KEY:-}" ]; then
+        printf '%s' "$FUSION_CLIENT_KEY"
+        return 0
+    fi
+    local cfg="${FUSION_GATEWAY_CONFIG:-$HOME/fusion/fusion-gateway/config.yaml}"
+    [ -f "$cfg" ] || return 1
+    awk '
+        # Entries list name and key fields in arbitrary order (sometimes dash-
+        # prefixed); buffer both per entry and flush on the next "- " boundary.
+        # The name=admin entry wins, else the first entry with a key.
+        /^[^[:space:]#]/ { in_auth = ($0 == "auth:"); if (!in_auth) { in_keys = 0 } }
+        in_auth && /^[[:space:]]+api_keys:/ { in_keys = 1; next }
+        in_keys && /^[[:space:]]+- / {
+            if (cur == "admin" && have_key) { print key; done = 1; exit }
+            if (first_key == "" && have_key) { first_key = key }
+            have_key = 0; cur = ""
+        }
+        in_keys && /^[[:space:]]+- (key|name):/ { sub(/^[[:space:]]+-[[:space:]]+/, "  ") }
+        in_keys && /^[[:space:]]+(key|name):/ {
+            line = $0
+            if (line ~ /name:/) { cur = line; sub(/.*name:[[:space:]]*/, "", cur); gsub(/["'"'"']/, "", cur) }
+            else { v = line; sub(/.*key:[[:space:]]*/, "", v); gsub(/["'"'"']/, "", v); if (v != "") { key = v; have_key = 1 } }
+        }
+        END {
+            if (!done) {
+                if (cur == "admin" && have_key) { print key }
+                else if (first_key != "") { print first_key }
+            }
+        }
+    ' "$cfg"
+}
+
 # Issue #42: register the web workbench manifest with the shell registry
 # (fusion-gateway /api/v1/shell/manifests, admin-authed). Best-effort:
 # gateway may be down or unauthenticated — log and continue, never block
@@ -92,13 +131,20 @@ case "${1:-}" in
             echo "already running (pid $(cat "$PID_FILE")) on port $PORT"
             exit 0
         fi
-        # Issue #50 (design-d28): the nightly eval hit fusion-mlx HTTP 403 on every
-        # /api/generate because the server was launched without FUSION_CLIENT_KEY
-        # (the gateway LLM-channel key). Warn loudly at start so the gap is visible
-        # in the startup log instead of surfacing as eval failures hours later.
+        # Issue #50/#52 (design-d28): the nightly eval hit fusion-mlx HTTP 403 on
+        # every /api/generate because the server was launched without
+        # FUSION_CLIENT_KEY (the gateway LLM-channel key). Resolve the key with
+        # the supervisor chain (env -> gateway config auth.api_keys[admin]) and
+        # hand it to the server process; warn loudly only if both sources fail.
         if [ -z "${FUSION_CLIENT_KEY:-}" ]; then
-            echo "warning: FUSION_CLIENT_KEY not set - /api/generate|iterate|restore will fail with fusion-mlx HTTP 403" >&2
-            echo "warning: FUSION_CLIENT_KEY not set - model-backed endpoints will return 502 (upstream 403)" >> "$LOG_FILE"
+            if k="$(resolve_client_key)" && [ -n "$k" ]; then
+                export FUSION_CLIENT_KEY="$k"
+                echo "FUSION_CLIENT_KEY resolved from gateway config (auth.api_keys[admin])"
+                echo "FUSION_CLIENT_KEY resolved from gateway config auth.api_keys[admin]" >> "$LOG_FILE"
+            else
+                echo "warning: FUSION_CLIENT_KEY not set and gateway config has no auth.api_keys[admin] - model-backed endpoints will return 502 (upstream 403)" >&2
+                echo "warning: FUSION_CLIENT_KEY unresolved - model-backed endpoints will return 502 (upstream 403)" >> "$LOG_FILE"
+            fi
         fi
         if [ ! -x "$BIN" ]; then
             echo "binary missing: $BIN" >&2
